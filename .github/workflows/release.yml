@@ -43,7 +43,7 @@ jobs:
           Copy-Item -LiteralPath 'target/release/diskstudio.exe' -Destination $binary
           $sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           "$sha256  DiskStudio.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding ascii
-          Copy-Item -LiteralPath 'README.md' -Destination $package
+          Copy-Item -LiteralPath 'README.md', 'README.zh-CN.md' -Destination $package
 
           $thirdParty = Join-Path $package 'third-party'
           New-Item -ItemType Directory -Path $thirdParty | Out-Null

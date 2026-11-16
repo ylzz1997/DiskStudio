@@ -1,71 +1,72 @@
 # DiskStudio
 
-DiskStudio 是一款面向 Windows 的磁盘管理、文件恢复与备份工具。通过分区图、文件列表和操作预览，查看存储设备、整理分区、提取文件和制作备份。
+**English** · [简体中文](README.zh-CN.md)
 
-当前为早期预览版本。修改分区、格式化、还原和克隆前，请先备份重要数据，并核对所选设备。
+DiskStudio is a Windows tool for disk management, file recovery, and backups. Use the partition map, file browser, and operation previews to inspect drives, manage partitions, recover files, and create backups.
 
-## 功能
+This is an early preview. Back up important data and verify the selected drive before changing partitions, formatting, restoring, or cloning.
 
-| 功能           | 支持内容                                                                                              |
-| -------------- | ----------------------------------------------------------------------------------------------------- |
-| 磁盘管理       | 查看磁盘、分区与卷信息，创建和删除普通 GPT 数据分区，修改卷标与盘符，在支持范围内调整 NTFS 分区末端   |
-| 格式化         | NTFS、FAT12/16/32、exFAT，以及受限的 Ext 文件系统格式化；支持快速与完整格式化、簇大小和部分 NTFS 选项 |
-| 文件浏览与恢复 | 浏览受支持文件系统的目录，查找删除文件候选和文件签名，筛选、预览并导出文件，保存和载入扫描进度        |
-| 备份与还原     | 完整与增量备份、Zstd 压缩、密码保护、备份内容浏览及文件提取、同容量还原                               |
-| 磁盘与分区克隆 | 逐扇区或按已用空间复制，完成后读回校验                                                                |
-| 镜像浏览       | 只读打开 RAW/IMG，以及受支持的 VHD、VHDX、VDI、VMDK 和 Parallels HDD 镜像变体                         |
-| 磁盘工具       | 分区表备份与检查、受支持设备的 SMART 信息、表面读取扫描、扇区查看与搜索、测速和数据清除               |
+## Features
 
-具体可用操作取决于磁盘状态、分区类型和文件系统。界面会显示不支持或不可操作的原因。
+| Feature                    | What you can do                                                                                                                                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Disk management            | Inspect disks, partitions, and volumes. Create and delete ordinary GPT data partitions, change volume labels and drive letters, and resize the end of supported NTFS partitions. |
+| Formatting                 | Format as NTFS, FAT12/16/32, exFAT, or supported Ext variants. Choose quick or full formatting, cluster sizes, and NTFS options where available.                                 |
+| File browsing and recovery | Browse supported file systems, scan for deleted file candidates or file signatures, filter, preview, and export files, and save or resume scan progress.                         |
+| Backup and restore         | Create full or incremental backups with Zstd compression and password protection. Browse backups, extract files, and restore to a target of matching capacity.                   |
+| Disk and partition cloning | Copy every sector or copy used space, with readback verification.                                                                                                                |
+| Image browsing             | Open RAW/IMG files and supported VHD, VHDX, VDI, VMDK, and Parallels HDD variants in read-only mode.                                                                             |
+| Disk tools                 | Back up and check partition tables, view SMART data for supported devices, run surface read scans, view and search sectors, benchmark drives, and wipe data.                     |
 
-## 使用
+Available operations depend on the state of the disk, partition type, and file system. The app explains why an operation is unavailable when it can determine the reason.
 
-运行环境为 Windows x64，并需要 Microsoft Edge WebView2 Runtime。构建或解压程序后，运行 `diskstudio.exe`。
+## Getting started
 
-- **磁盘管理**：从左侧选择磁盘，在分区图或表格中选中分区，再选择对应操作。通过顶部“磁盘”菜单打开、关闭镜像或刷新设备列表。
-- **文件恢复**：选择来源和扫描方式，开始扫描后筛选、预览候选文件，再将选中文件导出到另一块物理磁盘。
-- **备份与克隆**：选择备份、还原或克隆，核对来源、目标、容量和选项，查看操作预览后确认执行。
+DiskStudio runs on Windows x64 and requires Microsoft Edge WebView2 Runtime. After extracting the portable package or building from source, open `DiskStudio.exe`.
 
-扫描和数据任务需要手动启动。恢复导出与备份应使用另一块物理磁盘，避免覆盖源数据。
+- In **Disk Management** (磁盘管理), select a disk on the left, then select a partition in the map or table to see its actions. Use the **Disk** (磁盘) menu to open or close images or refresh the disk list.
+- In **File Recovery** (文件恢复), choose the source and scan mode. After scanning, filter and preview candidates, then export selected files to another physical disk.
+- In **Backup & Clone** (备份与克隆), select a backup, restore, or clone operation. Review the source, target, capacity, and options in the preview before confirming.
 
-## 支持范围与限制
+Save backups to another physical disk to protect the source.
 
-- **分区操作**：主要面向普通 GPT 数据分区；系统、启动、隐藏、只读等受保护目标会限制操作。NTFS 调整容量只改变分区末端，不移动起点。
-- **快速分区**：支持批量预览、创建和格式化。仅删除明确勾选且通过保护检查的数据分区。
-- **Ext 文件系统**：格式化与末端调整仅适用于受支持、干净卸载的普通 Linux 数据分区；不会因分区类型是 Linux 就认定其中存在 Ext 文件系统。
-- **文件恢复**：发现候选文件不代表内容完整。覆盖、TRIM、碎片和元数据损坏可能导致无法恢复；EFS、Ext 删除恢复及通用碎片重组不受支持。
-- **克隆与还原**：要求符合对应操作的范围、容量和扇区大小约束，不支持自动缩放克隆或系统迁移。写入目标可能保持脱机，不会自动激活重复的磁盘标识。
-- **镜像**：以只读方式打开；并非每种容器变体、快照链或加密格式都受支持。
-- **操作中断**：失败或取消不等于回滚。请根据结果检查已完成的步骤及目标状态。
+## Supported operations and limits
 
-## 从源码构建
+- **Partition operations** primarily support ordinary GPT data partitions. System, boot, hidden, and read-only partitions have additional restrictions. NTFS resizing changes the end boundary while keeping the start fixed.
+- **Quick partitioning** previews batch creation and formatting. It deletes only partitions you explicitly select that pass the protection checks.
+- **Ext formatting and resizing** are limited to supported Linux data partitions. Resizing requires a clean, unmounted file system and changes only the end boundary.
+- **File recovery** depends on the state of the original data. Overwriting, TRIM, fragmentation, and metadata damage can make a candidate unrecoverable. EFS, deleted Ext files, and general fragmented file reconstruction are unsupported.
+- **Cloning and restoring** require matching scope, capacity, and sector geometry as applicable. Resizing during cloning and system migration are unsupported. A destination may remain offline after writing. The app leaves duplicate disk identifiers inactive.
+- **Image browsing** is read-only. Support varies by container variant, snapshot chain, and encryption format.
+- **Interrupted operations** may leave changes in place. If a job fails or you cancel it, check which steps completed and inspect the target before proceeding.
 
-### 环境要求
+## Build from source
 
-在 Windows x64 上准备：
+### Requirements
 
-- Node.js 22.12 或更新的受支持 LTS 版本，以及 npm。
-- Rust stable，使用 `x86_64-pc-windows-msvc` 工具链。
-- Visual Studio C++ Build Tools，安装“使用 C++ 的桌面开发”及 Windows SDK。
-- Microsoft Edge WebView2 Runtime。
+- Windows x64.
+- Node.js 22.12 or a later supported LTS version, with npm.
+- Stable Rust with the `x86_64-pc-windows-msvc` toolchain.
+- Visual Studio C++ Build Tools with the Desktop development with C++ workload and a Windows SDK.
+- Microsoft Edge WebView2 Runtime.
 
-环境安装说明可参考 [Tauri Windows 前置要求](https://v2.tauri.app/zh-cn/start/prerequisites/)。
+See the [Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/) for setup instructions.
 
-### 构建步骤
+### Build
 
-下载或克隆完整源码，在项目根目录打开 PowerShell：
+Download or clone the complete source and run these commands in PowerShell from the repository root.
 
 ```powershell
 npm ci
 npm run tauri -- build --no-bundle
 ```
 
-该命令会先构建前端，再生成桌面程序。默认产物位置：
+Tauri builds the frontend and the desktop executable. The executable is ready to run without a development server.
 
 ```text
 target/release/diskstudio.exe
 ```
 
-构建完成后可直接运行，无需启动前端开发服务器。上述命令生成可执行文件，不生成安装包；`--no-bundle` 的说明见 [Tauri 命令行文档](https://v2.tauri.app/reference/cli/)。
+This command builds a portable executable. See the [Tauri CLI reference](https://v2.tauri.app/reference/cli/) for packaging options.
 
-请保留源码包中的 `vendor/`、`third-party/` 和 `src-tauri/ext4-engine/` 目录。文件系统工具会嵌入桌面程序；缺少这些文件会导致构建失败。相关工具的来源、许可证和单独构建说明见 [e2fsprogs 说明](third-party/e2fsprogs/README.md)。
+Keep `vendor/`, `third-party/`, and `src-tauri/ext4-engine/` in the source tree. The build embeds the file system tools. See the [e2fsprogs notes](third-party/e2fsprogs/README.md) for their source, licenses, and separate build instructions.
