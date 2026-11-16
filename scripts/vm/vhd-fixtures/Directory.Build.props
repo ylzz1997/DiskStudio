@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../.vm/tools/vhd-fixtures-build/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../.vm/tools/vhd-fixtures-build/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

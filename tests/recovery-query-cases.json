@@ -1,0 +1,206 @@
+{
+  "files": [
+    {
+      "id": 8,
+      "name": "Report.TXT",
+      "size": "9007199254740993",
+      "supported": true,
+      "modified": {
+        "text": "2024-02-29 08:00:00.0000001",
+        "zone": "UTC+08:00",
+        "precision": "100 ns"
+      }
+    },
+    {
+      "id": 2,
+      "name": "report.txt",
+      "size": "9007199254740992",
+      "supported": true,
+      "modified": {
+        "text": "2024-02-29 00:00:00.0000002",
+        "zone": "UTC",
+        "precision": "100 ns"
+      }
+    },
+    {
+      "id": 5,
+      "name": "REPORT.txt.bak",
+      "size": "42",
+      "supported": true,
+      "modified": {
+        "text": "2024-02-28 23:59:59",
+        "zone": "UTC",
+        "precision": "1 s"
+      }
+    },
+    {
+      "id": 1,
+      "name": ".txt",
+      "size": "0",
+      "supported": true,
+      "modified": {
+        "text": "2024-02-29 13:30:00",
+        "zone": "本地时间（时区未知）",
+        "precision": "2 s"
+      }
+    },
+    {
+      "id": 9,
+      "name": "文档.txt",
+      "size": "42",
+      "supported": false,
+      "modified": {
+        "text": "2024-02-29",
+        "zone": "日期（无时区）",
+        "precision": "1 d"
+      }
+    },
+    {
+      "id": 4,
+      "name": "a*b?.TXT",
+      "size": "42",
+      "supported": true,
+      "modified": {
+        "text": "2024-02-30 00:00:00",
+        "zone": "UTC",
+        "precision": "1 s"
+      }
+    },
+    {
+      "id": 3,
+      "name": "emoji-😀.dat",
+      "size": "1",
+      "supported": true,
+      "modified": null
+    },
+    {
+      "id": 7,
+      "name": "emoji-\ue000.dat",
+      "size": "1",
+      "supported": true,
+      "modified": null
+    }
+  ],
+  "cases": [
+    {
+      "label": "stable scan identity order",
+      "query": "",
+      "filter": {},
+      "expected": [1, 2, 3, 4, 5, 7, 8, 9]
+    },
+    {
+      "label": "literal contains",
+      "query": "rEpOrT",
+      "filter": {},
+      "expected": [2, 5, 8]
+    },
+    {
+      "label": "exact ignores case",
+      "query": "REPORT.txt",
+      "filter": { "nameMatch": "exact" },
+      "expected": [2, 8]
+    },
+    {
+      "label": "exact case sensitive",
+      "query": "Report.TXT",
+      "filter": { "nameMatch": "exact", "caseSensitive": true },
+      "expected": [8]
+    },
+    {
+      "label": "prefix literal",
+      "query": "REPORT.",
+      "filter": { "nameMatch": "prefix" },
+      "expected": [2, 5, 8]
+    },
+    {
+      "label": "extension excludes backup and dotfile",
+      "query": ".tXt",
+      "filter": { "nameMatch": "extension" },
+      "expected": [2, 4, 8, 9]
+    },
+    {
+      "label": "extension case sensitive",
+      "query": "TXT",
+      "filter": { "nameMatch": "extension", "caseSensitive": true },
+      "expected": [4, 8]
+    },
+    {
+      "label": "metacharacters literal",
+      "query": "*b?",
+      "filter": {},
+      "expected": [4]
+    },
+    {
+      "label": "inclusive leap day retains unknown zones",
+      "query": "",
+      "filter": { "dateFrom": "2024-02-29", "dateTo": "2024-02-29" },
+      "expected": [1, 2, 8, 9]
+    },
+    {
+      "label": "missing field excludes all",
+      "query": "",
+      "filter": { "dateFrom": "2024-01-01", "dateField": "created" },
+      "expected": []
+    },
+    {
+      "label": "full precision UTC ordering",
+      "query": "",
+      "filter": { "sortBy": "modified" },
+      "expected": [5, 8, 2, 1, 3, 4, 7, 9]
+    },
+    {
+      "label": "unknown dates stay last descending",
+      "query": "",
+      "filter": { "sortBy": "modified", "sortDirection": "desc" },
+      "expected": [2, 8, 5, 1, 3, 4, 7, 9]
+    },
+    {
+      "label": "exact u64 size with stable ties",
+      "query": "",
+      "filter": { "sortBy": "size", "sortDirection": "desc" },
+      "expected": [8, 2, 4, 5, 9, 3, 7, 1]
+    },
+    {
+      "label": "unicode scalar names stable across engines",
+      "query": "",
+      "filter": { "sortBy": "name" },
+      "expected": [1, 4, 7, 3, 2, 8, 5, 9]
+    },
+    {
+      "label": "invalid leap day",
+      "query": "",
+      "filter": { "dateFrom": "2023-02-29" },
+      "error": true
+    },
+    {
+      "label": "invalid range",
+      "query": "",
+      "filter": { "dateFrom": "2024-03-01", "dateTo": "2024-02-29" },
+      "error": true
+    },
+    {
+      "label": "year zero",
+      "query": "",
+      "filter": { "dateFrom": "0000-01-01" },
+      "error": true
+    },
+    {
+      "label": "malformed date",
+      "query": "",
+      "filter": { "dateTo": "2024-02-29\n" },
+      "error": true
+    },
+    {
+      "label": "control characters",
+      "query": "report\n",
+      "filter": {},
+      "error": true
+    },
+    {
+      "label": "unknown operation",
+      "query": "",
+      "filter": { "sortBy": "device" },
+      "error": true
+    }
+  ]
+}

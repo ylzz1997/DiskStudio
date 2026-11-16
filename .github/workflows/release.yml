@@ -1,0 +1,66 @@
+name: Release build
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Set up Rust
+        run: rustup default stable-x86_64-pc-windows-msvc
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Test
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm test -- --maxWorkers=2
+          cargo test --locked -p disk-core
+          cargo test --locked -p diskstudio --bin diskstudio
+          node --test scripts/vm/lab-tests.mjs
+          cargo test --locked --manifest-path scripts/vm/guest-checks/Cargo.toml --target-dir target/guest-checks quick_partition_checks::tests
+      - name: Build desktop executable
+        run: npm run tauri -- build --no-bundle --ci -- --locked
+      - name: Stage portable package
+        id: package
+        run: |
+          $version = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
+          $name = 'DiskStudio-{0}-windows-x64-{1}' -f $version, $env:GITHUB_SHA.Substring(0, 8)
+          $package = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $package | Out-Null
+          $binary = Join-Path $package 'DiskStudio.exe'
+          Copy-Item -LiteralPath 'target/release/diskstudio.exe' -Destination $binary
+          $sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  DiskStudio.exe" | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding ascii
+          Copy-Item -LiteralPath 'README.md' -Destination $package
+
+          $thirdParty = Join-Path $package 'third-party'
+          New-Item -ItemType Directory -Path $thirdParty | Out-Null
+          Copy-Item -Recurse -LiteralPath 'third-party/e2fsprogs' -Destination $thirdParty
+          $scripts = Join-Path $package 'scripts'
+          New-Item -ItemType Directory -Path $scripts | Out-Null
+          Copy-Item -Recurse -LiteralPath 'scripts/ext4' -Destination $scripts
+          foreach ($component in @('ntfs', 'ext4-view')) {
+            $notices = Join-Path $thirdParty $component
+            New-Item -ItemType Directory -Path $notices | Out-Null
+            Copy-Item -LiteralPath "vendor/$component/LICENSE-APACHE", "vendor/$component/LICENSE-MIT" -Destination $notices
+          }
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "path=$package" >> $env:GITHUB_OUTPUT
+      - name: Upload portable package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error

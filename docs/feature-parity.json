@@ -1,0 +1,533 @@
+{
+  "reviewedAt": "2026-11-16",
+  "target": "补齐 DiskGenius 的用户功能；不是任选一组。逐项实现与验收，不发布空入口。",
+  "sources": [
+    "https://www.diskgenius.cn/help/",
+    "https://www.diskgenius.cn/introduce.php",
+    "https://www.diskgenius.com/editions.php",
+    "https://www.diskgenius.com/manual/format-partition.php",
+    "https://www.diskgenius.com/manual/verify-or-repair-bad-sectors.php"
+  ],
+  "rules": [
+    "一份正式程序；宿主仅查看 UI 和固定 WMI SELECT 元数据。",
+    "真实读取、扫描和写入只在隔离 VM 的 A/B 测试盘执行；客体 OS 盘不做分区变更。",
+    "实现状态和本构建 VM 验收状态分开记录；历史验收不自动转移。",
+    "文件系统的识别、浏览、恢复、格式化、缩放和转换分别判定能力。",
+    "SMART、介质故障和掉电行为不能用普通虚拟盘证明已通过真实硬件验收。",
+    "不复刻商标、注册激活或未获授权的专有镜像格式。"
+  ],
+  "phases": [
+    {
+      "id": 1,
+      "name": "文件系统与格式化",
+      "features": [
+        "windows-format",
+        "large-fat32",
+        "legacy-fat",
+        "ext2-ext3",
+        "format-options",
+        "filesystem-matrix"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "基础与高级分区管理",
+      "features": [
+        "mbr-management",
+        "drive-letter",
+        "volume-label",
+        "partition-attributes",
+        "quick-partition",
+        "partition-move",
+        "partition-split-merge",
+        "fat-exfat-resize",
+        "partition-table-convert",
+        "primary-logical-convert",
+        "partition-table-backup",
+        "partition-table-check"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "文件和分区恢复",
+      "features": [
+        "file-browser",
+        "recovery-tree",
+        "scan-resume",
+        "signature-types",
+        "ext-recovery",
+        "lost-partitions",
+        "damaged-filesystems",
+        "bitlocker",
+        "fragment-recovery",
+        "tree-export",
+        "file-operations"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "备份、克隆与迁移",
+      "features": [
+        "used-space-clone",
+        "resize-clone",
+        "file-clone",
+        "system-migration",
+        "system-hot-backup",
+        "browse-backup",
+        "encrypted-backup"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "磁盘检测与维护",
+      "features": [
+        "smart",
+        "surface-scan",
+        "sector-view-edit",
+        "wipe",
+        "free-space-wipe",
+        "trim",
+        "benchmark",
+        "device-state"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "虚拟磁盘与复杂存储",
+      "features": [
+        "virtual-disks",
+        "virtual-conversion",
+        "raid",
+        "lvm",
+        "dynamic-disks",
+        "storage-spaces",
+        "network-disk",
+        "system-virtualization"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "启动与离线环境",
+      "features": [
+        "boot-repair",
+        "boot-entries",
+        "boot-media",
+        "batch-usb-format",
+        "offline-runtime"
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "inventory",
+      "status": "implemented",
+      "detail": "固定 WMI 元数据；Windows 状态与 SMART 分开"
+    },
+    {
+      "id": "gpt-management",
+      "status": "implemented",
+      "detail": "初始化、创建、删除普通 GPT 分区；保护系统/EFI/保留分区。新建 Windows 数据分区完成前核对唯一卷关联就绪；仅进行有界元数据复查，不重复创建。当前构建 VM 验收单独记录。",
+      "evidence": ".vm/create-readiness-status.json"
+    },
+    {
+      "id": "ntfs-resize",
+      "status": "implemented-limited",
+      "detail": "Windows 支持范围内调整末端，不移动起点"
+    },
+    {
+      "id": "ext4",
+      "status": "implemented-limited",
+      "detail": "常规干净卸载 Ext4 格式化与末端缩放，已从 4 KiB 扩展到 1/2/4 KiB；新构建待 VM 验收，历史证据见 .vm/ext4-status.json"
+    },
+    {
+      "id": "windows-format",
+      "status": "implemented-limited",
+      "detail": "NTFS/exFAT 使用 Windows 接口，FAT12/16/32 使用原生引擎。4380c4ca 后端的 12 项 FAT32/exFAT/NTFS 及后续 8 项原生 FAT 通过；部分创建失败有独立记录。da43a22f 在无盘符 B/8、B/9 补验 4 项 FAT16/FAT32、512 KiB 文件读回及旧布局核对，一次创建无盘符 B/9。相同正式程序在客体 UI 预览/确认 B/9 FAT32 默认格式化、NEWVOLUME 元数据刷新、真实目录读取 0 文件均核对完成。其他 UI 组合及大容量另行验收。见 .vm/letterless-paging-resolution-status.json"
+    },
+    {
+      "id": "large-fat32",
+      "status": "in-progress",
+      "detail": "已替换 32 GiB 受限的 Windows FAT32 格式化路径；64 GiB 合成卷跨簇读写和双 FAT 核对通过，待实际大容量卷验收"
+    },
+    {
+      "id": "legacy-fat",
+      "status": "implemented-limited",
+      "detail": "原生 FAT12/16 格式化、实际簇数和完整 FAT 读回实现。VM 小容量验收：4380c4ca 上 A/B 的 2 MiB FAT12 默认/4096 及 A 128 MiB FAT16 默认/4096 通过；da43a22f 上无盘符 B/8 FAT16 128 MiB 默认/4096、512 KiB 文件读回通过。旧布局和 OS 不变；正式 UI、其他容量/簇边界另行验收。"
+    },
+    {
+      "id": "ext2-ext3",
+      "status": "in-progress",
+      "detail": "Ext2/3 真实格式化及保留数据末端缩放已实现，1/2/4 KiB 块与边界保护普通文件测试通过；当前构建待 Windows VM 与 Ubuntu 带数据验收，详见 .vm/ext23-status.json"
+    },
+    {
+      "id": "format-options",
+      "status": "implemented-limited",
+      "detail": "快速/完整格式化、NTFS 压缩与卷级短文件名设置已实现。44bfbc20 构建完成 8 个 FAT/exFAT 用例，NTFS 核验错误 1 后停止且未重试。只读 VM 诊断定位零访问卷句柄及响应字段问题；7d2ea89b 修复构建通过 610 项检查及本地/留档/payload 散列核对。后续驱动不重提原快速格式化，核对原结果后完成完整/4 KiB/压缩和短名开启、快速/64 KiB/两项关闭；524305 字节内容、压缩继承、GPT 和全部布局通过。同一正式程序在 B/15 完成独立原生预览、确认、完整格式化和忙碌提示；最终通知未捕获，不能推断 verified 标志，随后只读诊断确认实际压缩和短名开启及范围匹配，A/B 写入计数不变。浅色/深色和小窗口滚动已观察；结果持久显示改进并入下个相关批次。原 8 例仍为原构建证据；更多容量、4Kn、故障组合未验收。",
+      "evidence": [
+        ".vm/format-options-batch-status.json",
+        ".vm/format-correction-status.json"
+      ]
+    },
+    {
+      "id": "filesystem-matrix",
+      "status": "in-progress",
+      "detail": "详细信息中提供按浏览、删除恢复、格式化、末端缩放、已用空间复制和空闲清除区分的格式能力表。当前分区提示绑定同一身份和布局，不从 Linux GUID 推断文件系统，不做自动探测。563 项集中检查及正式构建通过；原生 VM 已观察入口展开、脱机分区未知格式/不可操作提示和前几列；其余横向列、宽窗口仍待目视核对。"
+    },
+    {
+      "id": "mbr-management",
+      "status": "in-progress",
+      "detail": "RAW/IMG 只读支持 MBR 主分区、单个扩展容器及最多 64 个常规 EBR 的逻辑分区，检查循环、边界、数据/表重叠；内存合成数据通过。实际设备管理、创建/删除/转换尚待实现；本轮 UI 与构建证据见 .vm/ebr-image-status.json"
+    },
+    {
+      "id": "drive-letter",
+      "status": "in-progress",
+      "detail": "已实现普通 GPT Windows 数据卷的盘符分配、更换和移除，检查空闲盘符、卷关联、系统/分页保护及其他访问路径。0a82 构建 B/7 移除 Z 成功，重新分配 Z 因同时传入互斥参数报错，停止且保留无盘符现场。80e7ef1a 修复为仅传 AccessPath，627 项集中检查通过；独立 B/15 NTFS 无盘符→A→B→无盘符全部通过，每步核对 64 KiB 文件内容/SHA-256、完整 A/B GPT、全部布局和其他盘符。相同正式程序原生 B/15 无盘符→Z 单次确认、持久结果与独立只读后验通过，B/7 旧请求未重提。其他文件系统组合仍待验收；见 .vm/letter-outcome-batch-status.json。"
+    },
+    {
+      "id": "volume-label",
+      "status": "in-progress",
+      "detail": "已实现 Windows 数据卷卷标修改和清除，校验 Unicode/FAT 名称边界并核对文件系统、卷身份和分区布局；Ext 卷标编辑仍待实现，Windows 路径待 VM 验收"
+    },
+    {
+      "id": "partition-attributes",
+      "status": "in-progress",
+      "detail": "分区更多菜单已实现普通 GPT Windows 数据分区的隐藏/显示、只读/可写及禁止/允许自动分配盘符。显式预览、单次确认、完整身份与保护核对，固定 SetAttributes 只传所选属性，完整 GPT 回读与原生布局核验。472 项检查及正式构建通过；cca1724b… 同一程序已在 VM A/3 完成三组共六项往返。独立只读核验确认 A/B 完整 GPT 摘要与基线一致、B 的 2 MiB 测试文件系统内容未变、两盘恢复初始状态；不宣称 A 的整个文件系统未变。MBR 活动标记、其他分区类型与详细参数编辑仍未实现；4Kn、并发及故障原生验收、WMI 查询性能优化仍待完成。",
+      "evidence": ".vm/partition-attributes-status.json"
+    },
+    {
+      "id": "quick-partition",
+      "status": "in-progress",
+      "detail": "已实现 GPT 批量布局与 1/2/4/8/16 MiB 起点对齐、逐项预览及单次确认。默认保留现有分区，可明确选择删除普通可删除数据分区，再新建 Windows/Linux 数据条目和非系统盘 ESP/MSR 条目。新建 Windows 数据分区可快速/完整格式化为 NTFS、FAT12/16/32、exFAT，绑定簇/卷标/NTFS 选项；Linux/ESP/MSR 不隐式格式化或安装启动文件。每一步复核完整磁盘/分区/卷关联状态及精确预期变化，失败停止并列明已完成和未执行步骤，不自动回滚或重试。642 项集中检查及正式构建通过，266af3c1 本地/留档/payload 散列一致。首轮驱动在任何预览前因卷关联夹具检查停止；仅修正驱动后，受精确原记录及一次性标记约束的续验完成 7 步混合创建、8 步仅替换本次新条目、五次 65553 字节文件读回，原有分区元数据、A 完整 GPT、B 保留 GPT 条目/字段和 B/15 文件均未变。相同正式程序原生 UI 已完成保留 17 项、在剩余空间创建两项默认 NTFS 的四步预览和单次确认，四步均核对成功；持久结果与刷新后的 19 项列表已观察。独立只读后验核对精确范围/类型、卷标/原始启动扇区、原布局/GPT/保留文件全部通过，期间 A/B 写入计数不变。252 个冻结源码文件和正式程序三份散列复核一致，见 .vm/quick-partition-continue-status.json。其他原生格式选项未在该批重测。后续 80f98cb4 批次已实现有上限且前后复核的完整关联快照、每次调用独立的逐步进度及表单间距统一；653 项集中检查和 4 项驱动约束检查、一次正式构建及三份散列核对通过。同一构建在 VM 原生 UI 完成五步替换，进度与持久结果通过。首次只读后验因比较 GPT 数组槽位误报；修正验收驱动后，原现场只读复查确认保留条目从槽位 19 移到 20，条目内容、18 项保留分区元数据、A 完整 GPT 和 B/15 文件不变，新建范围、NTFS 卷标及引导也全部通过。A/B 写入计数不变，无重复分区操作；新增 1 项回归通过，见 .vm/quick-progress-batch-status.json。RAW 需单独初始化，MBR 不支持；ESP/MSR、4Kn、并发/部分失败目前只有合成证据。"
+    },
+    {
+      "id": "partition-move",
+      "status": "planned",
+      "detail": "保留数据移动起点、重叠复制顺序与中断恢复"
+    },
+    {
+      "id": "partition-split-merge",
+      "status": "planned",
+      "detail": "拆分、合并与跨分区空闲空间重新分配"
+    },
+    {
+      "id": "fat-exfat-resize",
+      "status": "planned",
+      "detail": "FAT/exFAT 保留数据缩放，不能只改分区表"
+    },
+    {
+      "id": "partition-table-convert",
+      "status": "planned",
+      "detail": "MBR/GPT 保留数据转换"
+    },
+    {
+      "id": "primary-logical-convert",
+      "status": "planned",
+      "detail": "MBR 主分区/逻辑分区转换"
+    },
+    {
+      "id": "partition-table-backup",
+      "status": "in-progress",
+      "detail": "已实现常规 GPT 主备表、512 字节 MBR/EBR 和可选分区首扇区的 .dspt 备份及独立文件验证；历史 A/B 保存验收见 .vm/table-backup-status.json。新增原磁盘、相同几何/身份的有限 GPT 恢复：不可变备份句柄、实际文件卷定位、跨提供者/原生布局及保护检查、5 分钟单次令牌、锁卷后脱机、备份表先于主表、逐范围 SHA-256 回读、完整保护窗口及 Windows 原生布局复验。392 项检查通过；同一正式构建 3ff9a 在 VM A 完成无差异不写入，以及新建第 20 个分区后恢复原 19 分区布局，4 范围/33792 字节校验通过，A 保持脱机，B 仍脱机且写入计数未变。MBR/EBR 恢复、双 GPT 同时损坏、其他磁盘/几何、复杂类型与保护条目变更尚不支持；4Kn、首扇区和故障场景仅合成验收",
+      "evidence": ".vm/table-restore-status.json"
+    },
+    {
+      "id": "partition-table-check",
+      "status": "in-progress",
+      "detail": "已实现镜像及设备的显式 GPT/512 字节 MBR/常规 EBR 有界检查，设备检查重复核验身份、布局、原生句柄和首尾快照；4Kn MBR 明确未完整检查。新增常规 GPT 单份表修复：有效副本必须与 Windows 原生布局一致，保留 PMBR、有效副本及全部分区条目，复用单次令牌、锁卷、脱机、逐范围 SHA-256 回读与完整保护窗口校验。398 项项目检查和 1 项隔离夹具检查通过。同一正式构建 a2a06f3b 在脱机 B 上完成健康无写入检查、受控备份头 CRC 错误诊断、1 范围/512 字节修复和复查；B 保持 9 分区及脱机，A 读写计数不变且仍为脱机 19 分区。主表/条目表损坏、4Kn、MBR/EBR 等只有合成检查；双表损坏、两份有效表冲突、MBR 重建与更广泛保留扇区修复仍未实现，完整目标保留",
+      "evidence": ".vm/table-diagnostics-status.json"
+    },
+    {
+      "id": "file-recovery",
+      "status": "implemented-limited",
+      "detail": "NTFS/FAT/exFAT 候选、干净卸载 Ext2/3/4 现存文件、11 类连续文件签名、预览与导出。常规 NTFS LZNT1 压缩读取支持混合原始/压缩/稀疏单元、碎片运行及属性列表扩展记录；证据见 .vm/ntfs-compression-status.json。新增单卷 ZIP/常规 ZIP64 与 DOCX/XLSX/PPTX 包识别，逐项验证 Stored/Deflate 内容 CRC，提取前复核整包摘要。内存夹具、独立 .NET ZIP 样本与原生配置 UI 通过；实际扫描/预览/原生输出待当前构建 VM 验收。EFS、WOF、重解析文件、未知压缩方法和 Ext 删除恢复尚未实现，不承诺完整恢复 NTFS 命名数据流批次已接通普通文件的驻留、碎片、稀疏、LZNT1 与扩展记录流枚举/预览/独立导出和进度保存；按原始 UTF-16 名称及属性摘要绑定，提取前后核对分配状态，输出为独立普通文件并完整 SHA-256 回读，不重建 ADS。目录流、EFS/WOF 不支持。首轮 617 项检查与 47b332a7 正式构建通过。本地/留档/payload 一致；A 上 24 个原生样本核对通过，恢复引擎拒绝 Windows 稀疏单元字段后停止，尚未派发 B 导出。只读诊断确认稀疏流单元值 4 和末尾 16 簇对齐，A/B 写计数不变。对应修复通过 618 项集中检查，0a82c2d1 正式构建本地/留档/payload 一致。单次续验核对 24 个保留源样本、原始提取及保存进度往返通过；首次平面/树状输出共 48 文件、1708176 逻辑字节，独立逐字节与 SHA-256 比对通过，GPT 和全部布局不变。未重写源或重试已派发写操作。原生 A/2 目录读取、24 项数据流列表、中文驻留流完整 19 字节预览及 LZNT1 前缀预览通过，明确显示截断。原始失败独立保留，修复证据见 .vm/ntfs-streams-corrected-status.json；其他组合不因此计为验收。",
+      "evidence": [
+        ".vm/zip-signature-status.json",
+        ".vm/ntfs-streams-status.json",
+        ".vm/ntfs-streams-corrected-status.json"
+      ]
+    },
+    {
+      "id": "file-browser",
+      "status": "in-progress",
+      "detail": "已接入磁盘管理中选中分区 → 浏览文件，显式读取现存 NTFS/FAT/exFAT/干净卸载 Ext2/3/4 目录，默认根目录直属文件，支持目录导航、预览、筛选、目录清单及复制到其他磁盘；不依赖盘符，不自动读取或挂载。结果按磁盘身份、布局和分区匹配。新增文件修改时间列和属性弹窗，显示记录的创建/修改/访问/元数据变更时间、时区和精度、原始属性、Ext 权限及 Linux UID/GID/链接数；未知信息不推算，ctime 不冒充创建时间。内存集成、边界测试、明暗 UI 和原生入口已验证；仍为有上限的整分区元数据枚举，不保证完整列表。752b2acb 构建在 VM A/5 的既有 ext4 上显式读取 21 条记录/12 个文件，整目录复制 544.13 MiB、12 文件/2 目录，原生清单中全部成功文件有 SHA-256，实际输出已通过资源管理器和记事本核对；a17a2392 仅修正零字节完成显示，重新读取同一分区并复制空目录通过，完整大目录未在该 UI-only 构建重复。其他文件系统、元数据独立比对及故障场景仍待验收，按目录即时加载、目录属性和更多文件类型仍待补齐。属性只查看，不代表复制时会保留时间/权限/链接。 新增 RAW/IMG 普通文件的直接目录浏览、预览、筛选、目录/文件提取与删除候选扫描。整盘校验 GPT 512 B/4 KiB 或 MBR/EBR；分区文件须明确选择。原生文件选择并保留禁止共享写入的句柄，绑定来源磁盘/布局，目标仍须另一块磁盘，清单记录镜像分区来源并逐文件 SHA-256 回读。不挂载或写入源。其他容器可先转换 RAW；直接浏览仍待接入。实现、完整检查与本批原生验收分别见 .vm/image-browse-batch-status.json，不自动继承历史验收。 本批 519 项检查和正式构建通过；0178c70a… 三份散列一致。在隔离 VM 原生打开 6 MiB GPT512 RAW、读取 2 MiB NTFS，现存模式 13 条/恢复模式 4 条，预览 31 32 33 34 35；向已核对身份的 B/F 提取 5 字节，1 成功/0 失败，实际 12345 和清单中的镜像范围、SHA-256 已独立读取核对。其他原生格式组合、取消/故障和大镜像仍待验收。 2026-11-16：直接文件浏览已接入 VHD/AVHD 明确选择的父链、独立 VHDX（含 4Kn）、固定/动态 VDI、独立稀疏/压缩/平面/分卷 VMDK 和独立 Parallels HDD/HDS。原生对话框保留全部只读普通文件句柄，每操作独立解码预算，64 KiB 有界二进制请求、取消/超时/短读失败关闭，禁止向任一来源所在磁盘提取。不挂载、不自动找父盘，不支持的差分链、日志回放及目录包仍保留。533 项完整检查、10 项跨语言容器验证与一次正式构建通过，68e81b32… 本地/留档/VM payload 散列一致。同一程序在隔离 VM 完成动态 VDI、4KiB VHDX 与独立 HDS 打开和 NTFS 目录读取；VDI 五字节预览及向 B/F 提取成功，完整回读通过，Explorer/Notepad 独立确认实际 12345 和清单来源/范围/摘要。父链/分卷等原生选择、取消/故障、大镜像及其他文件系统组合仍待验收，具体记录不沿用上一批结果。 2026-11-16 文件提取批次新增 1/2/4 个并发线程和文件时间/安全属性保留；源记录重新验证取得内部元数据，清单逐字段报告，未知时区不推算，内容与元数据结果分开。取消停止派发并等待线程退出，单文件失败继续处理。586 项整批检查通过；该构建及 VM 验收另见 recovery-output-batch-status.json，尚不代表全部浏览/复制能力完成。 2026-11-16 目录批次：NTFS/FAT/exFAT/Ext 目录属性、复制后子目录到父目录的时间/属性保留、NTFS 保存进度目录记录的即时复核已实现；每目录独立报告，选项关闭不额外读取源。595 项检查通过，48101b9f… 同一生产程序已构建。VM 目录与文件验收的最终保存报告已收取，范围见后述记录。 上轮中断后已读取保存的最终报告：48101b9f 目录批次 8 组、64 个文件及 24 个目录独立内容/元数据比较通过，GPT 与全部布局不变；未重复运行写入，不将该结果转移至后续构建。 2026-11-16 查询批次：完整名称/开头/包含文字/扩展名及大小写匹配、全结果排序后分页、四类记录日期的包含首尾范围筛选已实现，均只查询已有内存结果。未知时区的修改时间始终排末尾，显示时间不会变成输出元数据权限。602 项整批检查及一次正式构建通过，24bac2c3 本地/留档/VM payload 一致；同一程序在 A/2 NTFS 显式读取 37 条文件名称，原生大小降序、结束日期筛选 14→0、重置 0→14 及复制选项取消通过，A/B 写入计数不变。大结果跨页与完整边界语义由内存组件和共享案例验证，其他原生组合不因此计为验收。 NTFS 命名数据流批次已接通普通文件的驻留、碎片、稀疏、LZNT1 与扩展记录流枚举/预览/独立导出和进度保存；按原始 UTF-16 名称及属性摘要绑定，提取前后核对分配状态，输出为独立普通文件并完整 SHA-256 回读，不重建 ADS。目录流、EFS/WOF 不支持。首轮 617 项检查与 47b332a7 正式构建通过。本地/留档/payload 一致；A 上 24 个原生样本核对通过，恢复引擎拒绝 Windows 稀疏单元字段后停止，尚未派发 B 导出。只读诊断确认稀疏流单元值 4 和末尾 16 簇对齐，A/B 写计数不变。对应修复通过 618 项集中检查，0a82c2d1 正式构建本地/留档/payload 一致。单次续验核对 24 个保留源样本、原始提取及保存进度往返通过；首次平面/树状输出共 48 文件、1708176 逻辑字节，独立逐字节与 SHA-256 比对通过，GPT 和全部布局不变。未重写源或重试已派发写操作。原生 A/2 目录读取、24 项数据流列表、中文驻留流完整 19 字节预览及 LZNT1 前缀预览通过，明确显示截断。原始失败独立保留，修复证据见 .vm/ntfs-streams-corrected-status.json；其他组合不因此计为验收。",
+      "evidence": [
+        ".vm/file-metadata-status.json",
+        ".vm/directory-export-status.json",
+        ".vm/image-browse-batch-status.json",
+        ".vm/container-browse-batch-status.json",
+        ".vm/recovery-output-batch-status.json",
+        ".vm/directory-metadata-batch-status.json",
+        ".vm/result-query-batch-status.json",
+        ".vm/ntfs-streams-status.json",
+        ".vm/ntfs-streams-corrected-status.json"
+      ]
+    },
+    {
+      "id": "recovery-tree",
+      "status": "in-progress",
+      "detail": "已实现 NTFS 父目录身份/序列校验、FAT/exFAT/Ext 已遍历目录关系、未知目录分组、目录导航、组合筛选与跨页选择。NTFS 枚举多名称、DOS 短名称及受界限检查的属性列表扩展记录；提取前复核原始名称身份，空 NTFS 目录也进入目录树。支持所选文件树状/平面保存，以及整个已读取目录和独立空目录导出；目录集合由 Rust 根据不透明目录身份推导，不受筛选或文件勾选影响，超限拒绝。名称冲突处理和版本 2 清单记录每个目录、文件、跳过及未处理项；每个成功文件在保留句柄上完整 SHA-256 回读后才发布并记录摘要。多个名称输出独立副本，不重建硬链接。435 项自动检查和正式构建通过。752b2acb 已在 VM A/5 的 ext4 复制 12 个文件/2 个目录、544.13 MiB，实际目录和全部 12 项成功摘要已查看；独立空目录也在资源管理器确认。a17a2392 仅修正零字节完成显示，重读同一分区与空目录复制复查通过，完整大目录未重复。历史 4688866f 缺少目标回读的表述已更正，驱动内部内容比对不能替代原生输出验收。其他文件系统、完整 A→B 输出、冲突与故障仍待原生验收；损坏目录重建及权限/链接/时间戳恢复仍待实现。 2026-11-16 更新：文件和目录的受支持时间/属性保留已实现，源记录在输出前重新校验，目录在子项完成后自底向上保存；不重建 ACL/所有者/硬链接/变化时间/扩展属性。当前 48101b9f 构建及 595 项检查已完成，NTFS/exFAT A→B 的嵌套目录与内容最终保存报告已收取，结果单独记录。 上轮中断后已读取保存的最终报告：48101b9f 目录批次 8 组、64 个文件及 24 个目录独立内容/元数据比较通过，GPT 与全部布局不变；未重复运行写入，不将该结果转移至后续构建。 2026-11-16 查询批次：完整名称/开头/包含文字/扩展名及大小写匹配、全结果排序后分页、四类记录日期的包含首尾范围筛选已实现，均只查询已有内存结果。未知时区的修改时间始终排末尾，显示时间不会变成输出元数据权限。602 项整批检查及一次正式构建通过，24bac2c3 本地/留档/VM payload 一致；同一程序在 A/2 NTFS 显式读取 37 条文件名称，原生大小降序、结束日期筛选 14→0、重置 0→14 及复制选项取消通过，A/B 写入计数不变。大结果跨页与完整边界语义由内存组件和共享案例验证，其他原生组合不因此计为验收。 NTFS 命名数据流批次已接通普通文件的驻留、碎片、稀疏、LZNT1 与扩展记录流枚举/预览/独立导出和进度保存；按原始 UTF-16 名称及属性摘要绑定，提取前后核对分配状态，输出为独立普通文件并完整 SHA-256 回读，不重建 ADS。目录流、EFS/WOF 不支持。首轮 617 项检查与 47b332a7 正式构建通过。本地/留档/payload 一致；A 上 24 个原生样本核对通过，恢复引擎拒绝 Windows 稀疏单元字段后停止，尚未派发 B 导出。只读诊断确认稀疏流单元值 4 和末尾 16 簇对齐，A/B 写计数不变。对应修复通过 618 项集中检查，0a82c2d1 正式构建本地/留档/payload 一致。单次续验核对 24 个保留源样本、原始提取及保存进度往返通过；首次平面/树状输出共 48 文件、1708176 逻辑字节，独立逐字节与 SHA-256 比对通过，GPT 和全部布局不变。未重写源或重试已派发写操作。原生 A/2 目录读取、24 项数据流列表、中文驻留流完整 19 字节预览及 LZNT1 前缀预览通过，明确显示截断。原始失败独立保留，修复证据见 .vm/ntfs-streams-corrected-status.json；其他组合不因此计为验收。",
+      "evidence": [
+        ".vm/ntfs-alias-status.json",
+        ".vm/ext-resume-status.json",
+        ".vm/directory-export-status.json",
+        ".vm/directory-metadata-batch-status.json",
+        ".vm/result-query-batch-status.json",
+        ".vm/ntfs-streams-status.json",
+        ".vm/ntfs-streams-corrected-status.json"
+      ]
+    },
+    {
+      "id": "scan-resume",
+      "status": "in-progress",
+      "detail": "签名扫描与 NTFS 全部文件模式已分别在对应构建完成 VM 暂停/保存/重开/加载/续扫验收。FAT12/16/32、exFAT 三种模式已实现完整项组续扫、目录队列和空目录保存，并核对源目录内容/簇链、引导几何与 exFAT 位图；423 项检查和正式构建通过。客体工具复用正式模块，在既有 A 分区通过 45 个部分进度往返/续扫案例，候选、目录树及支持提取文件完整 SHA-256 与连续扫描一致。同一 9f9ca1c1 正式程序完成 FAT32/exFAT 完成进度保存/重开/加载、错分区拒绝，以及工具保存的部分进度原生载入/继续：22/25 条记录、各 3 个候选续至 40/43 条、各 6 个候选，完成后禁用继续，A/B 写入未增加。正式 UI 点击暂停/保存、FAT12/FAT16 全界面流程和其他模式 UI 重复仍待验收；工具不能替代这些验证。旧版签名和 NTFS 进度保留读取，不兼容 DiskGenius 专有格式。Ext2/3/4 全部/现存两种模式现已实现完整目录项续扫，复核超级块/描述符、inode/分配状态及已观察目录的名称/inode 顺序和处理前缀；428 项检查含 15 项 Ext 检查与正式构建通过。当前 4688866f 构建在 A/5 ext4 上通过 6 个工具断点案例，21 条记录/12 个文件及全部 12 文件完整哈希一致；正式界面载入 10 条/5 个候选后续至 21 条/12 个，重新扫描、保存完成进度、关闭重开载入、预览及单文件导出通过。A/B 写入计数不变。Ext 正式 Pause 按钮、Ext2/3 实盘及其他组合尚未验收；历史 FAT/NTFS/签名界面证据不自动转移到新构建。全部目标保留。 NTFS 命名数据流批次已接通普通文件的驻留、碎片、稀疏、LZNT1 与扩展记录流枚举/预览/独立导出和进度保存；按原始 UTF-16 名称及属性摘要绑定，提取前后核对分配状态，输出为独立普通文件并完整 SHA-256 回读，不重建 ADS。目录流、EFS/WOF 不支持。首轮 617 项检查与 47b332a7 正式构建通过。本地/留档/payload 一致；A 上 24 个原生样本核对通过，恢复引擎拒绝 Windows 稀疏单元字段后停止，尚未派发 B 导出。只读诊断确认稀疏流单元值 4 和末尾 16 簇对齐，A/B 写计数不变。对应修复通过 618 项集中检查，0a82c2d1 正式构建本地/留档/payload 一致。单次续验核对 24 个保留源样本、原始提取及保存进度往返通过；首次平面/树状输出共 48 文件、1708176 逻辑字节，独立逐字节与 SHA-256 比对通过，GPT 和全部布局不变。未重写源或重试已派发写操作。原生 A/2 目录读取、24 项数据流列表、中文驻留流完整 19 字节预览及 LZNT1 前缀预览通过，明确显示截断。原始失败独立保留，修复证据见 .vm/ntfs-streams-corrected-status.json；其他组合不因此计为验收。",
+      "evidence": [
+        "src-tauri/src/fat_scan.rs",
+        "src-tauri/src/recovery_checkpoint.rs",
+        "scripts/vm/guest-checks/src/fat_resume_checks.rs",
+        ".vm/fat-resume-status.json",
+        ".vm/ntfs-resume-status.json",
+        ".vm/signature-resume-status.json",
+        "src-tauri/src/ext_scan.rs",
+        "scripts/vm/guest-checks/src/ext_resume_checks.rs",
+        ".vm/ext-resume-status.json",
+        ".vm/ntfs-streams-status.json",
+        ".vm/ntfs-streams-corrected-status.json"
+      ]
+    },
+    {
+      "id": "signature-types",
+      "status": "in-progress",
+      "detail": "已支持 PNG/JPEG/PDF/GIF/BMP/WAV/WebP/ZIP/DOCX/XLSX/PPTX 共 11 类、独立勾选及源内范围。ZIP 从 EOCD 定位，核对中央目录/本地记录/描述符，支持单卷 Stored/Deflate 与常规 ZIP64，逐项解压/CRC 校验后发布候选，提取前 SHA-256 复核；Office 依据内容类型和包关系识别，不运行内容或验证文档语义。10 项 Rust 新回归含独立 .NET 样本、ZIP64、描述符、边界、损坏、取消及 XML 限制；前端和原生 UI 通过，实际设备路径待 VM 验收。未支持加密/多卷/自解压头、其他压缩法、旧 Office/宏类型识别、损坏 ZIP 重建、完整媒体解码、碎片重组与自定义签名；全部目标保留。",
+      "evidence": ".vm/zip-signature-status.json"
+    },
+    {
+      "id": "ext-recovery",
+      "status": "in-progress",
+      "detail": "已接入干净卸载 Ext2/3/4 的现存文件/空目录扫描、预览、提取与扫描进度；支持间接块、extent、稀疏洞，按原始名称字节定位，导出前核对 inode、祖先及分配状态。历史 4688866f 正式构建通过 428 项检查含 15 项 Ext 检查；VM A/5 的既有 3 GiB、4 KiB 块 ext4 通过两模式共 6 个断点往返案例，21 条记录、12 个文件及全部支持文件完整 SHA-256 一致。原生界面已验证部分进度载入/继续、重新扫描、保存完成进度/重开载入、中文文本预览和目录/说明.txt 的 128 KiB 导出，实际输出经资源管理器与记事本复核。A/B 写入不变，宿主未做数据任务。其他 Ext2/3 实盘、块大小与特性组合和原生暂停按钮仍待验收；删除/日志恢复、损坏卷重建及 POSIX 元数据恢复仍待实现。 历史 4688866f 原生文件导出缺少目标 SHA-256 回读；此前相关验收表述已更正，不能由驱动内的内容比对替代。 后续 752b2acb 已补齐目标文件完整 SHA-256 回读：原生现存目录复制 12 文件/2 目录、544.13 MiB，实际版本 2 清单的全部 12 项均成功并有摘要；a17a2392 的后续变更仅为零字节进度 UI，重读和空目录复制已复查，大目录未重复。相应源盘写入计数不变；这不证明已删除文件恢复或其他 Ext 特性组合已验收。",
+      "evidence": [
+        ".vm/ext-recovery-status.json",
+        ".vm/ext-resume-status.json",
+        ".vm/directory-export-status.json"
+      ]
+    },
+    {
+      "id": "lost-partitions",
+      "status": "in-progress",
+      "detail": "已接入整盘/指定 LBA/未分配/现有分区范围的只读搜索，核对 NTFS、FAT12/16/32、exFAT、Ext2/3/4 主引导/超级块及附加证据；候选明确区分现有/重叠/未登记，停止或失败保留已检查结果。浏览/预览/提取绑定源身份、布局与候选证据，缓存前限定原始读取范围。新增完整一致 GPT 中的未登记范围恢复：1–128 个普通数据条目、全零空槽、保留全部现有条目、重叠拒绝、重复候选核验、五分钟单次令牌、锁卷后脱机、备份表先写、SHA-256 回读及原生布局复验。fb26559e 正式构建通过 459 项检查；VM B 完整搜索末段 3.36 GiB，找到已准备的 2 MiB 未登记 NTFS，读取 4 文件并预览 12345；原生预览确认后新增第 10 条记录，4 段/33792 字节写入回读通过。独立只读工具确认 B/10、脱机、原生/原始 GPT 一致及整个文件系统逐字节未变；A/19 写入计数未变。早先 d35560fc 的搜索停止、现有大 NTFS 浏览证据独立保留。新恢复仅验收单个干净 NTFS 未登记范围，未制造真实删除；其他格式、多候选及 4Kn 只有合成验证。不会还原原 GUID/名称/属性及额外尾部空间；MBR、双表丢失/损坏、备用引导重建、重叠冲突处理与损坏文件系统重建尚未实现；此来源原生导出、故障及竞态验收仍待完成。",
+      "evidence": [
+        ".vm/lost-partitions-status.json",
+        ".vm/lost-partition-restore-status.json"
+      ]
+    },
+    {
+      "id": "damaged-filesystems",
+      "status": "planned",
+      "detail": "误格式化/损坏文件系统的多来源候选重建"
+    },
+    {
+      "id": "bitlocker",
+      "status": "planned",
+      "detail": "加密卷识别、用户解锁后的访问及恢复边界"
+    },
+    {
+      "id": "fragment-recovery",
+      "status": "planned",
+      "detail": "受证据约束的碎片恢复；不猜测并宣称完整"
+    },
+    {
+      "id": "tree-export",
+      "status": "in-progress",
+      "detail": "已接入从本次内存扫描结果导出独立 HTML 目录清单，支持目录导航、文件名/状态筛选、分页及部分结果标识；不含文件内容和硬件身份，不受当前筛选/勾选影响。增加时间与属性列、完整精度/时区及展开详情，字符串按纯文本显示，保留未知值。合成报告和生产组件交互已验证；原生保存与 VM 扫描结果端到端验收待完成。尚未扫描的空目录等依赖 file-browser/recovery-tree，未声称整个分区目录完整。元数据阶段记录见 .vm/file-metadata-status.json。 2026-11-16 查询批次：完整名称/开头/包含文字/扩展名及大小写匹配、全结果排序后分页、四类记录日期的包含首尾范围筛选已实现，均只查询已有内存结果。未知时区的修改时间始终排末尾，显示时间不会变成输出元数据权限。602 项整批检查及一次正式构建通过，24bac2c3 本地/留档/VM payload 一致；同一程序在 A/2 NTFS 显式读取 37 条文件名称，原生大小降序、结束日期筛选 14→0、重置 0→14 及复制选项取消通过，A/B 写入计数不变。大结果跨页与完整边界语义由内存组件和共享案例验证，其他原生组合不因此计为验收。 离线报告采用相同查询规则，已核对全结果大小排序、扩展名空结果、错误日期范围和重置，继续保留部分扫描提示及纯文本安全渲染；本批未执行原生清单保存。",
+      "evidence": [
+        ".vm/directory-report-status.json",
+        ".vm/result-query-batch-status.json"
+      ]
+    },
+    {
+      "id": "file-operations",
+      "status": "in-progress",
+      "detail": "受控复制已实现：从已读取结果复制所选文件，或按目录身份复制所有已观察子目录、空目录和支持文件；输出只能到其他磁盘的新目录，不覆盖已有文件，每个成功文件经完整 SHA-256 回读后发布，结果清单包含摘要、失败、跳过和未处理项。752b2acb 的 VM ext4→客体桌面目录复制及独立空目录已验收，a17a2392 的零字节完成显示复查通过，完整大目录未重复；其他文件系统/目标组合、故障及取消仍待原生验收。只在输出端创建所需目录；源分区内创建目录、删除、强制删除和彻底删除尚未实现，不重建权限/时间戳/链接。 2026-11-16 更新：文件和目录的受支持时间/属性保留已实现，源记录在输出前重新校验，目录在子项完成后自底向上保存；不重建 ACL/所有者/硬链接/变化时间/扩展属性。当前 48101b9f 构建及 595 项检查已完成，NTFS/exFAT A→B 的嵌套目录与内容最终保存报告已收取，结果单独记录。 上轮中断后已读取保存的最终报告：48101b9f 目录批次 8 组、64 个文件及 24 个目录独立内容/元数据比较通过，GPT 与全部布局不变；未重复运行写入，不将该结果转移至后续构建。 24bac2c3 正式程序的客体目录复制选项已核对：默认 2 线程及两项元数据保留，切换 4 线程/关闭时间与属性保留后取消返回；该 UI 核对没有派发输出，不能转移 48101b9f 的历史内容验收。 NTFS 命名数据流批次已接通普通文件的驻留、碎片、稀疏、LZNT1 与扩展记录流枚举/预览/独立导出和进度保存；按原始 UTF-16 名称及属性摘要绑定，提取前后核对分配状态，输出为独立普通文件并完整 SHA-256 回读，不重建 ADS。目录流、EFS/WOF 不支持。首轮 617 项检查与 47b332a7 正式构建通过。本地/留档/payload 一致；A 上 24 个原生样本核对通过，恢复引擎拒绝 Windows 稀疏单元字段后停止，尚未派发 B 导出。只读诊断确认稀疏流单元值 4 和末尾 16 簇对齐，A/B 写计数不变。对应修复通过 618 项集中检查，0a82c2d1 正式构建本地/留档/payload 一致。单次续验核对 24 个保留源样本、原始提取及保存进度往返通过；首次平面/树状输出共 48 文件、1708176 逻辑字节，独立逐字节与 SHA-256 比对通过，GPT 和全部布局不变。未重写源或重试已派发写操作。原生 A/2 目录读取、24 项数据流列表、中文驻留流完整 19 字节预览及 LZNT1 前缀预览通过，明确显示截断。原始失败独立保留，修复证据见 .vm/ntfs-streams-corrected-status.json；其他组合不因此计为验收。",
+      "evidence": [
+        ".vm/directory-export-status.json",
+        ".vm/directory-metadata-batch-status.json",
+        ".vm/result-query-batch-status.json",
+        ".vm/ntfs-streams-status.json",
+        ".vm/ntfs-streams-corrected-status.json"
+      ]
+    },
+    {
+      "id": "backup-restore",
+      "status": "implemented-limited",
+      "detail": "完整/压缩/增量备份、依赖链验证与同容量还原"
+    },
+    {
+      "id": "sector-clone",
+      "status": "implemented-limited",
+      "detail": "同容量整盘/分区逐扇区克隆与读回摘要"
+    },
+    {
+      "id": "used-space-clone",
+      "status": "in-progress",
+      "detail": "已接通 NTFS、FAT12/16/32、exFAT、普通干净 Ext2/3/4 的分配信息检查、同容量已用空间克隆和已用空间备份。未知文件系统逐扇区保留，元数据矛盾/脏卷拒绝，Ext 未初始化块组完整保留；分区表与 Windows 完整布局交叉检查，保留分区外区域。锁卷后分析，写入前后复核分配元数据，克隆目标脱机且复制范围完整 SHA-256 回读；空闲目标区不清除。v3 备份零块标记和分配策略显式记录，v1/v2 兼容且 v2/v3 可混合增量链。553 项完整检查和前端构建通过；集中 VM 验收发现并修正 NTFS 0x0080 短文件名策略误拒绝，17 项相关回归通过（新增 1 项），第二次桌面构建及匹配散列通过，同一程序已通过 VM A 的 2 GiB NTFS 按已用空间备份到 B、完整逻辑校验、重新打开/目录/文本预览，以及 A→B 克隆的完整复制范围回读；B 保持脱机且文件可预览。其他格式、整盘、v3 原生增量/还原、取消/故障矩阵仍待验收。不同容量、按文件重排、系统迁移仍是独立未完成项。 后续生产源码集成驱动的保存日志确认 FAT12/FAT16/FAT32/exFAT 四组压缩全量、修改文件后的增量、空闲清除/完整回读、独立 65,553 B 文件比较及增量还原通过，GPT/布局不变。NTFS 停于新建测试文件后的首次原始枚举，未进入这组备份/清除/还原；未自动重试。该证据属于 538afa2b 生产源码批次，与桌面 UI 验收分开，不转移到后续构建。详见 .vm/allocation-matrix-batch-status.json。",
+      "evidence": ".vm/used-space-batch-status.json"
+    },
+    {
+      "id": "resize-clone",
+      "status": "planned",
+      "detail": "不同容量克隆及目标文件系统扩缩容"
+    },
+    {
+      "id": "file-clone",
+      "status": "planned",
+      "detail": "按文件复制，保留受支持元数据"
+    },
+    {
+      "id": "system-migration",
+      "status": "planned",
+      "detail": "系统迁移与目标启动验证；需另设可处置系统测试盘"
+    },
+    {
+      "id": "system-hot-backup",
+      "status": "planned",
+      "detail": "当前只实现 NTFS 数据分区 VSS 文件系统一致性；系统/应用 writers 仍待实现"
+    },
+    {
+      "id": "browse-backup",
+      "status": "in-progress",
+      "detail": "已接入 DiskStudio v1/v2 完整、压缩和增量备份直接浏览，选择分区后复用目录筛选、预览及文件/整目录提取。各层还原点独立校验并重新解析布局，成功后清除旧扫描；读取器固定版本。旧备份只显示链顺序，不推断日期。源文件保留句柄并核对实际卷 GUID、原生范围/设备编号、WMI 双向关联和磁盘身份/布局；提取目标在创建任何输出前核对实际目录句柄。08595960 构建通过 444 项检查，新增一次验证内同卷查询合并、原子取消/发布和确认窗口及导出清单的还原点来源记录。VM 原生打开三层合成 2 MiB NTFS 备份、切换最早版本、读取 49 条记录/4 个文件；确认来源名称后向 B/F 新目录提取 5 字节，1 成功、0 失败，完整回读、实际 12345 文本及清单中的基础备份 ID/名称/摘要独立核对通过。精确取消竞争和查询次数仅由合成测试覆盖。595378ca 三版本预览及同盘拒绝、a17a2392 的 3 GiB ext4 原始盘备份创建/提取等历史验收独立保留，不自动转移。原生故障/取消、多卷、V1/整盘和竞态仍待验收；其他文件作业路径尚未全部迁移到句柄核对。不支持 DiskGenius 专有备份、加密备份或文件系统引擎尚不支持的内容，完整对齐未完成。",
+      "evidence": [
+        ".vm/backup-browser-status.json",
+        ".vm/backup-browser-acceptance-status.json",
+        ".vm/restore-points-status.json",
+        ".vm/backup-commit-status.json"
+      ]
+    },
+    {
+      "id": "encrypted-backup",
+      "status": "in-progress",
+      "detail": "已接通密码加密创建、打开、浏览及还原，支持每层独立密码的完整/增量备份。Argon2id 与 XChaCha20-Poly1305，逐帧认证及完整逻辑摘要；密码不进入计划或磁盘记录，取消不降级为未加密。固定 KDF 参数及有界内存，压缩有不压缩/快速/均衡/高压缩四档。原生输入文件句柄绑定实际磁盘，输出在完整解密与全依赖链校验后通过保留句柄发布；无明文临时文件。整批代码已接通，574 项检查通过（另 1 项历史忽略），一次正式构建 7e4b7d26 与 payload 哈希一致；本地原生设置页已观察，未触发宿主数据任务。VM 集中批次因“卷锁数量不完整”停止，保存记录只有开始与失败，没有用例计为通过；未自动重试，仍需集中修复和复验。 后续卷锁修复批次集中 580 项检查通过（另 1 项历史忽略），一次正式构建 b11aa2d2 与本地/留档/VM payload 一致。隔离 VM 的 A/17 FAT12 2 MiB 与 B 输出盘完成加密高压缩全量、不同密码的快速增量、不压缩加密、错误密码和取消、完整链/浏览及增量还原；完整 SHA-256 回读和 65,553 B 文件逐字节核对通过，GPT/全部布局不变，A 保持脱机。这是编译同一生产模块的客体集成驱动证据，正式程序密码对话框端到端、其他文件系统/容量及故障组合仍待验收。NTFS 历史日志诊断在访问分区前拒绝，不计通过。",
+      "evidence": ".vm/backup-lock-repair-batch-status.json"
+    },
+    {
+      "id": "smart",
+      "status": "in-progress",
+      "detail": "已接入主动读取的健康信息面板、固定 NVMe 控制器健康日志以及 ATA/SATA 属性和可选阈值查询。Windows 状态单独展示；无自动读取/自检/设置修改，128 位计数保持精度，异常或缺失数据不推断健康。31d5aabf 正式构建在 QEMU B 盘完成 NVMe 查询、计数说明展开、完整滚动和关闭后清除结果验收；原始读写单元与命令数符合 QMP，A/B 写入计数不变，B 保持脱机。372 项检查及桌面构建通过。ATA 仅合成验证；USB 桥接、RAID/SAS、厂商属性解码、真实硬件兼容性和故障行为尚未验收。",
+      "evidence": ".vm/health-status.json"
+    },
+    {
+      "id": "surface-scan",
+      "status": "in-progress",
+      "detail": "已实现磁盘菜单入口、整盘/分区相对 LBA 范围、1 MiB 无缓存顺序读取、耗时色块、失败范围、JSON 报告、暂停、进度保存/加载与跨程序重启续扫。327 项检查通过；8f19e670… 正式构建在 VM B 盘通过暂停 51.2%、保存、退出、错盘拒绝、重新加载及继续到 100%；QMP 证明续扫只读剩余 7.80 GiB，两段总量恰好 16 GiB，A/B 写入计数不变。证据见 .vm/surface-resume-status.json；旧构建整盘/分区检测与报告证据独立保留在 .vm/surface-scan-status.json。尚缺逐扇区细分、多磁盘并行、可配置超时及写入修复；普通虚拟盘不能证明真实介质故障验收。"
+    },
+    {
+      "id": "sector-view-edit",
+      "status": "in-progress",
+      "detail": "已实现单扇区查看、十进制/十六进制位置、ASCII、大小端整数解释、内存比较基准、另盘导出并回读 SHA-256；支持 Hex ? 通配符、UTF 文本 ASCII 大小写选项、1–16 项 Any/All 条件及相对偏移、跨块重叠匹配、取消和 1024 个匹配上限。多条件支持正向或实际从尾部反向读取，组合跨度限 64 KiB；修改条件或方向清除旧结果。打开面板不读设备。字节暂存、差异预览、单次确认写回已实现，写回限非系统 GPT Windows 数据分区，保持整盘脱机；f920 构建在 VM B/9 末扇区完成 00→2A 单字节写回、SHA-256 校验和独立脱机读回，A 写入计数不变，见 .vm/sector-edit-acceptance-status.json。查看、通配符、多条件 Any/All 验收分别见 .vm/sector-view-status.json、.vm/sector-search-options-status.json、.vm/sector-multi-status.json；历史 f920 构建的 All/Any 均在 VM B/9 完成全范围扫描，分别返回 2/7 项，各读取 512 MiB，扫描期间 A/B 写入计数不变。8eb55cdc 构建通过反向 All/Any、正向 All 回归、整盘反向取消及末尾 GPT 结果定位，A/B 写入计数不变，见 .vm/sector-reverse-status.json；363 项检查通过。文本通配符、选区复制导出和其他范围写回尚未实现；4Kn、掉电及介质故障尚未实际验收。"
+    },
+    {
+      "id": "wipe",
+      "status": "in-progress",
+      "detail": "磁盘维护面板已实现 RAW/GPT 整盘、普通 GPT Windows 数据分区及指定范围覆写，保护范围拒绝。1–32 字节填充值或系统随机数据、1–7 轮、每轮完整 SHA-256 回读、单次确认、锁卷脱机、取消/失败保留实际进度及报告。488 项检查和正式构建通过；d5f252cd 构建在 VM B/9 完成 512 MiB 单轮 00 写入及完整 SHA-256 回读，GPT 复核通过。独立诊断确认完整 GPT 基线一致、B/9 全零；B/10 历史 NTFS 有 28 字节变化，13 个无名现存数据流中仅 $MFT/$MFTMirr 不同，其余 11 个一致。原字节校验失败保留，未确定写入来源；不代表所有组合均已验收。多磁盘并行、更多文件系统/布局、标准算法组合和硬件安全擦除仍待实现；普通覆写不保证 SSD 重映射区域清除。",
+      "evidence": ".vm/maintenance-batch-status.json"
+    },
+    {
+      "id": "free-space-wipe",
+      "status": "in-progress",
+      "detail": "普通 GPT Windows 数据分区的 NTFS/FAT12/16/32/exFAT 空闲簇覆写已实现：锁卷、分配证据核对、固定/随机数据 1–7 轮、每轮完整回读及全部保留区域写前/写后 SHA-256；整盘保持脱机，不重试或回滚。563 项集中检查及一次正式构建通过；538afa2b 构建在 VM A/2 的 2 GiB NTFS 完成单轮 00 覆写约 1.98 GiB、完整回读和 15.94 MiB 保留区域摘要一致、GPT 复核，B 写入计数未变；B/3 因脱机保护属性未知在预览拒绝。其他格式、多轮/随机、取消/故障和独立逐文件比较尚待 VM 验收；Ext、MBR、文件尾部余量和 SSD 物理擦除未实现。 后续生产源码集成驱动的保存日志确认 FAT12/FAT16/FAT32/exFAT 四组压缩全量、修改文件后的增量、空闲清除/完整回读、独立 65,553 B 文件比较及增量还原通过，GPT/布局不变。NTFS 停于新建测试文件后的首次原始枚举，未进入这组备份/清除/还原；未自动重试。该证据属于 538afa2b 生产源码批次，与桌面 UI 验收分开，不转移到后续构建。详见 .vm/allocation-matrix-batch-status.json。",
+      "evidence": ".vm/free-space-batch-status.json"
+    },
+    {
+      "id": "trim",
+      "status": "in-progress",
+      "detail": "磁盘维护面板已实现普通联机 NTFS 数据卷的显式 ReTrim：设备能力查询、完整身份/布局/保护核对、单次确认、固定 MSFT_Volume.Optimize 只传 ReTrim、提供者结果与 GPT 复核。不能中途取消提供者方法，不宣称物理擦除或清零。488 项检查通过；5681355a 构建在 VM B/3 完成 NTFS ReTrim，Windows 返回成功且身份/GPT 复核通过。独立 GPT 复查通过；B/10 历史样本 28 字节变化，仅 $MFT/$MFTMirr 在 13 个无名现存数据流中不同，具体来源未证实；其他卷类型和真实硬件效果尚未验收。",
+      "evidence": ".vm/maintenance-batch-status.json"
+    },
+    {
+      "id": "benchmark",
+      "status": "in-progress",
+      "detail": "磁盘维护面板已实现范围内 QD1 顺序/随机读写测速，4 KiB/64 KiB/1 MiB 块、1–65536 请求、无 Windows 缓存；默认仅读，破坏性写入单独选择、确认、锁卷脱机并逐请求 SHA-256 回读。传输量、校验量、IOPS、吞吐、P50/P95 和最小/最大延迟分开统计，可停止及保存报告。488 项检查通过；5681355a 构建在 VM B/9 完成顺序读、随机读及 256 MiB 顺序写/完整回读。独立 GPT 复查通过；B/10 历史样本 28 字节变化，仅 $MFT/$MFTMirr 在 13 个无名现存数据流中不同，具体来源未证实；多队列/多线程、非破坏性文件写测速、更多工作负载与真实硬件性能尚待实现和验收。",
+      "evidence": ".vm/maintenance-batch-status.json"
+    },
+    {
+      "id": "device-state",
+      "status": "in-progress",
+      "detail": "顶部磁盘菜单已实现联机、脱机、设为只读和解除只读，使用固定 Windows Storage 方法；显式预览和单次确认，核对身份、布局、保护、卷锁与原生设备属性，解除访问限制时拒绝重复磁盘/分区标识。466 项自动检查与 3e3b1716… 正式构建通过；同一程序在 VM A 的 19 分区 GPT 上完成只读、可写、脱机、联机四项原生操作。独立只读核验确认 A/B 完整 GPT 与基线逐字节一致、B 的完整 2 MiB NTFS 测试数据未变，两盘恢复初始状态；不宣称 A 上 Windows 挂载后的文件系统元数据未变。安全弹出尚未实现；MBR/RAW、4Kn、故障及并发变化原生场景仍待验收，逐分区 WMI 核对延迟仍需优化。",
+      "evidence": ".vm/device-state-status.json"
+    },
+    {
+      "id": "virtual-disks",
+      "status": "in-progress",
+      "detail": "RAW/IMG、固定/动态 VHD v1、独立 VHDX v1、VDI 1.1/1.1+、单文件稀疏/压缩 VMDK 和 Parallels 传统/扩展结构 HDD/HDS 已支持只读分区展示及分区表检查。除 VHDX 另支持 4Kn GPT 外，其余容器支持 512 B GPT/MBR/EBR。VMDK 支持冗余粒度表、两种压缩索引及独立平面/分卷描述符；数据文件由用户明确补选，不自动查路径或父盘，支持 FLAT 偏移、跨卷读取及文件合计。Rust 有界解压只接收字节。Parallels 支持扇区/簇地址、稀疏、旧版隐式数据偏移，保留无法确认外部快照关系的提示，不能当作完整快照。各格式有独立范围、重叠、变化检查及校验限制。VHD/AVHD 支持用户补选的最多 16 层差分链，按 UUID、容量和父盘修改时间核对，按扇区位图继承数据；显示读取顺序和文件总量，不跟随内嵌路径。已实现的八种镜像输出及集中 VM 验收另见 virtual-conversion。目录包、其他容器差分链、其他 VMDK 类型、HDD 扩展、VHDX 日志回放、挂载及其他容器的镜像文件内容浏览仍待实现。Parallels 的 Windows QEMU check 崩溃未计通过，全逻辑字节比较及应用边界/原生 UI 验证通过。镜像能力使用合成文件与独立解码器验证；真实设备验收另外记录，不自动沿用。 新增原生创建虚拟磁盘：九种输出，精确容量，空白、空 GPT（512 B/4 KiB）、空 MBR（512 B、2 TiB 内）；Rust 分块生成、两遍内容复核、完整回读及保留句柄的无覆盖发布。新镜像没有分区或文件系统，不自动挂载，不编辑已导入文件。513 项完整检查及 14 项跨语言验证通过，正式构建与 VM payload 一致；e98e2825… 同一正式构建在 VM 完成四种 64 MiB 创建，512 B/4096 B GPT 与固定 VDI/MBR 重新打开检查通过；空白 RAW 摘要等于独立的全零摘要。保存取消、生成约 1.1 GiB 逻辑内容时停止并仅保留 4 MiB partial 均通过；七项原生用例见本批记录。大容量、故障竞态和虚拟化产品互操作待验收。 新增 RAW/IMG 普通文件的直接目录浏览、预览、筛选、目录/文件提取与删除候选扫描。整盘校验 GPT 512 B/4 KiB 或 MBR/EBR；分区文件须明确选择。原生文件选择并保留禁止共享写入的句柄，绑定来源磁盘/布局，目标仍须另一块磁盘，清单记录镜像分区来源并逐文件 SHA-256 回读。不挂载或写入源。其他容器可先转换 RAW；直接浏览仍待接入。实现、完整检查与本批原生验收分别见 .vm/image-browse-batch-status.json，不自动继承历史验收。 本批 519 项检查和正式构建通过；0178c70a… 三份散列一致。在隔离 VM 原生打开 6 MiB GPT512 RAW、读取 2 MiB NTFS，现存模式 13 条/恢复模式 4 条，预览 31 32 33 34 35；向已核对身份的 B/F 提取 5 字节，1 成功/0 失败，实际 12345 和清单中的镜像范围、SHA-256 已独立读取核对。其他原生格式组合、取消/故障和大镜像仍待验收。 2026-11-16：直接文件浏览已接入 VHD/AVHD 明确选择的父链、独立 VHDX（含 4Kn）、固定/动态 VDI、独立稀疏/压缩/平面/分卷 VMDK 和独立 Parallels HDD/HDS。原生对话框保留全部只读普通文件句柄，每操作独立解码预算，64 KiB 有界二进制请求、取消/超时/短读失败关闭，禁止向任一来源所在磁盘提取。不挂载、不自动找父盘，不支持的差分链、日志回放及目录包仍保留。533 项完整检查、10 项跨语言容器验证与一次正式构建通过，68e81b32… 本地/留档/VM payload 散列一致。同一程序在隔离 VM 完成动态 VDI、4KiB VHDX 与独立 HDS 打开和 NTFS 目录读取；VDI 五字节预览及向 B/F 提取成功，完整回读通过，Explorer/Notepad 独立确认实际 12345 和清单来源/范围/摘要。父链/分卷等原生选择、取消/故障、大镜像及其他文件系统组合仍待验收，具体记录不沿用上一批结果。",
+      "evidence": [
+        ".vm/vhd-chain-status.json",
+        ".vm/image-creation-batch-status.json",
+        ".vm/image-browse-batch-status.json",
+        ".vm/container-browse-batch-status.json"
+      ]
+    },
+    {
+      "id": "virtual-conversion",
+      "status": "in-progress",
+      "detail": "已实现 RAW、固定/动态 VHD、固定/动态 VDI、固定/动态 VHDX、单文件稀疏 VMDK、Parallels 扩展 HDS 九种输出。VHDX 保留 512 B/4 KiB 扇区；VMDK 含原生选择的实际文件名与双份粒度映射，限 512 B、2040 GiB；HDD/HDS 输入需确认独立性，不合并目录包快照。1 MiB 有界二进制 IPC、两遍完整源校验、全部目标逻辑内容及元数据回读、保留句柄的无覆盖发布与 partial 保留继续适用。506 项完整检查和 11 项跨语言文件验证、正式构建通过；八种 512 B 输出通过 QEMU 全内容比较，4 KiB 偶数扇区固定/动态 VHDX 通过 7-Zip 完整提取比较。QEMU 不支持 4 KiB，7-Zip 拒绝奇数扇区容量，这些拒绝未计通过。06608fc9… 正式构建与本地、留档及 VM payload 散列一致，在隔离 VM 集中完成 RAW 到固定/动态 VHDX、稀疏 VMDK、扩展 HDS，生成的 HDS 到 RAW，以及 4 KiB VHDX 到动态 VHDX 六次完整转换，均通过两遍源校验和目标回读。另一次 4 KiB 固定 VHDX 在源复核阶段停止，保留 partial 且未发布成功镜像；资源管理器独立核对仅有未完成文件。结果自动滚动、逻辑扇区和独立性确认已观察。本次仅使用客体合成普通文件，没有设备数据任务。更多子格式、其他差分链、日志处理、目录包快照、挂载/容量调整、产品互操作及故障组合仍待实现或验收；完整功能对齐未完成。 固定 VDI 后续新增，类型为固定、完整分配零块和尾部，独立 QEMU 比对通过；转换表单更换父盘/分卷或 RAW 扇区后清除旧结果。本批正式构建 e98e2825… 在 VM 将新建 64 MiB MBR VDI 转换为另一固定 VDI，写入、第二遍源复核和完整回读均通过，逻辑摘要与源一致，原生结果单独记录。",
+      "evidence": [
+        ".vm/image-output-batch-status.json",
+        ".vm/image-creation-batch-status.json"
+      ]
+    },
+    {
+      "id": "raid",
+      "status": "planned",
+      "detail": "虚拟 RAID 重组、参数验证与恢复"
+    },
+    {
+      "id": "lvm",
+      "status": "planned",
+      "detail": "Linux LVM2 布局与逻辑卷读取"
+    },
+    {
+      "id": "dynamic-disks",
+      "status": "planned",
+      "detail": "动态卷读取恢复、转换为基本磁盘"
+    },
+    {
+      "id": "storage-spaces",
+      "status": "planned",
+      "detail": "Windows 存储池/存储空间的独立能力与保护"
+    },
+    {
+      "id": "network-disk",
+      "status": "planned",
+      "detail": "显式授权的网络磁盘共享；默认不启用"
+    },
+    {
+      "id": "system-virtualization",
+      "status": "planned",
+      "detail": "系统转 VMware/VirtualBox 与启动验证"
+    },
+    {
+      "id": "boot-repair",
+      "status": "planned",
+      "detail": "Windows 启动检查、修复及 BIOS/UEFI 转换"
+    },
+    {
+      "id": "boot-entries",
+      "status": "planned",
+      "detail": "UEFI 启动项查看与受控编辑"
+    },
+    {
+      "id": "boot-media",
+      "status": "planned",
+      "detail": "可启动维护介质制作"
+    },
+    {
+      "id": "batch-usb-format",
+      "status": "planned",
+      "detail": "批量 USB 格式化，每个设备绑定独立身份"
+    },
+    {
+      "id": "offline-runtime",
+      "status": "planned",
+      "detail": "WinPE/离线维护与重启衔接"
+    }
+  ]
+}

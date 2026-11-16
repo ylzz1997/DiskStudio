@@ -1,0 +1,35 @@
+[package]
+name = "diskstudio"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+disk-core = { path = "../crates/disk-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = "0.3.55"
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+crc32fast = "1.5.5"
+quick-xml = "0.42.0"
+sha2 = "0.10"
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+chacha20poly1305 = "0.10.1"
+getrandom = "0.3"
+zeroize = { version = "1.8", features = ["alloc"] }
+uuid = { version = "1", features = ["v4"] }
+ntfs = { path = "../vendor/ntfs" }
+ext4-view = { path = "../vendor/ext4-view", default-features = false }
+zstd = "0.13"
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+winapi = { version = "0.3.9", features = ["vsbackup", "vss", "vsserror", "combaseapi", "objbase"] }
+wmi = "0.18.4"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Wdk_Storage_FileSystem", "Win32_Security_Cryptography"] }

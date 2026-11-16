@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-__REPORT_NONCE__'; style-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>目录清单 · DiskStudio</title>
+<style>__REPORT_STYLE__</style>
+</head>
+<body>
+<header><span class="brand">DiskStudio</span><h1>目录清单</h1><p id="summary"></p>
+<p id="completion" class="notice"></p>
+<p class="muted">此文件仅保存扫描时已读取的目录和文件信息，不含文件内容。筛选、扫描范围、数量上限和读取错误可能使清单不完整；文件名及状态不证明内容可恢复。报告不连接源盘或网络。</p></header>
+<main>
+<aside aria-label="目录导航"><button id="all" type="button">所有文件</button><button id="unknown" type="button">目录未知</button>
+<h2>原目录</h2><div id="breadcrumbs"></div><div id="directories"></div>
+<div class="pager"><button id="dir-prev" type="button" aria-label="上一页目录">上一页</button><span id="dir-page"></span><button id="dir-next" type="button" aria-label="下一页目录">下一页</button></div></aside>
+<section aria-label="文件清单"><div class="tools"><label>搜索文件<input id="search" type="search" placeholder="按文件名查找" maxlength="200"></label>
+<label>文件状态<select id="state"><option value="">全部状态</option><option>现存文件</option><option>已删除</option><option>删除状态未知</option></select></label>
+<label class="check"><input id="descendants" type="checkbox" checked>包含子目录</label></div>
+<details class="query-options"><summary>排序与更多筛选</summary><div class="tools">
+<label>名称匹配<select id="name-match"><option value="contains">包含文字</option><option value="exact">完整名称</option><option value="prefix">名称开头</option><option value="extension">完整扩展名</option></select></label>
+<label class="check"><input id="case-sensitive" type="checkbox">区分大小写</label>
+<label>排序<select id="sort-by"><option value="scan">扫描顺序</option><option value="name">文件名</option><option value="size">文件大小</option><option value="extension">扩展名</option><option value="modified">修改时间</option></select></label>
+<label>顺序<select id="sort-direction"><option value="asc">升序</option><option value="desc">降序</option></select></label>
+<label>日期字段<select id="date-field"><option value="modified">修改日期</option><option value="created">创建日期</option><option value="accessed">访问日期</option><option value="changed">元数据变更日期</option></select></label>
+<label>开始日期<input id="date-from" type="date" min="0001-01-01" max="9999-12-31"></label><label>结束日期<input id="date-to" type="date" min="0001-01-01" max="9999-12-31"></label>
+<button id="reset" type="button">重置筛选</button></div><p class="muted">日期范围包含首尾两天，按记录显示日期筛选，不换算时区；未记录日期的文件不匹配。修改时间仅比较明确时区的完整时间，其他值始终排在末尾。名称按文字匹配，* 和 ? 不作通配符。</p></details>
+<p id="query-error" role="alert" hidden></p>
+<p id="location" class="muted"></p><div class="table-wrap"><table><thead><tr><th>文件名</th><th>原目录</th><th>大小（字节）</th><th>时间与属性</th><th>状态与恢复信息</th></tr></thead><tbody id="files"></tbody></table></div>
+<p id="empty" hidden>没有匹配的文件。</p><div class="pager file-pages"><span id="count" aria-live="polite"></span><button id="prev" type="button">上一页</button><button id="next" type="button">下一页</button></div></section>
+</main>
+<noscript>此离线目录清单需要浏览器启用 JavaScript 才能浏览和搜索；它不会访问源盘或网络。</noscript>
+<script type="application/json" id="report-data">__REPORT_DATA__</script>
+<script nonce="__REPORT_NONCE__">__QUERY_SCRIPT__
+__REPORT_SCRIPT__</script>
+</body></html>

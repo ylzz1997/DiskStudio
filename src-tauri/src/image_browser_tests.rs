@@ -1,0 +1,297 @@
+use super::*;
+use crate::{
+    recovery::{self, Candidate, ScanMode},
+    recovery_tree::Catalog,
+};
+use std::{io::Cursor, sync::atomic::AtomicBool};
+const NTFS: &[u8] = include_bytes!("../../tests/fixtures/ntfs-testfs1.img");
+const MIB: usize = 1024 * 1024;
+fn open(bytes: Vec<u8>, kind: Kind, sector: u64) -> Browser {
+    Browser::open(
+        Cursor::new(bytes),
+        "memory.img".into(),
+        Options { kind, sector },
+        || Ok(()),
+    )
+    .unwrap()
+}
+fn scan(browser: &Browser, part: u32, mode: ScanMode) -> (Vec<Candidate>, Catalog) {
+    let mut files = vec![];
+    let mut catalog = Catalog::default();
+    recovery::scan_filesystem_owned(
+        browser.reader(part).unwrap(),
+        mode,
+        Arc::new(AtomicBool::new(false)),
+        |_, _| Ok(()),
+        |c| files.push(c),
+        |d| catalog.insert(d),
+    )
+    .unwrap();
+    (files, catalog)
+}
+fn extract(browser: &Browser, part: u32, candidate: &Candidate) -> Vec<u8> {
+    let mut bytes = vec![];
+    recovery::extract_owned(
+        browser.reader(part).unwrap(),
+        candidate,
+        &mut bytes,
+        candidate.size,
+        Arc::new(AtomicBool::new(false)),
+        |_| Ok(()),
+    )
+    .unwrap();
+    bytes
+}
+fn assert_ntfs(browser: &Browser) {
+    let (files, catalog) = scan(browser, 0, ScanMode::Existing);
+    let file = files.iter().find(|c| c.name == "file-with-12345").unwrap();
+    assert_eq!(extract(browser, 0, file), b"12345");
+    assert!(!catalog
+        .path(file.directory.as_deref().unwrap())
+        .unwrap()
+        .is_empty());
+    assert!(files.iter().all(|c| !c.deleted));
+    let (deleted, _) = scan(browser, 0, ScanMode::Deleted);
+    assert!(deleted.iter().all(|c| c.deleted));
+    let (all, _) = scan(browser, 0, ScanMode::AllFiles);
+    // Existing-file browsing also exposes NTFS metadata records; recovery modes
+    // deliberately skip those. Compare user candidates, not the raw counts.
+    assert!(all
+        .iter()
+        .any(|c| c.name == "file-with-12345" && !c.deleted));
+    for candidate in all.iter().filter(|c| !c.deleted) {
+        assert!(files
+            .iter()
+            .any(|c| c.name == candidate.name && c.size == candidate.size));
+    }
+    assert_eq!(all.iter().filter(|c| c.deleted).count(), deleted.len());
+}
+fn mbr(bytes: &mut [u8], table: usize, kind: u8, start: u32, length: u32) {
+    bytes[table + 510..table + 512].copy_from_slice(&[0x55, 0xaa]);
+    bytes[table + 450] = kind;
+    bytes[table + 454..table + 458].copy_from_slice(&start.to_le_bytes());
+    bytes[table + 458..table + 462].copy_from_slice(&length.to_le_bytes());
+}
+fn gpt(sector: usize) -> Vec<u8> {
+    let mut b = vec![0; NTFS.len() + 4 * MIB];
+    let last = (b.len() / sector - 1) as u64;
+    mbr(&mut b, 0, 0xee, 1, last as u32);
+    let mut entries = vec![0; 16384];
+    entries[..16].fill(1);
+    entries[16..32].fill(2);
+    entries[32..40].copy_from_slice(&((MIB / sector) as u64).to_le_bytes());
+    entries[40..48].copy_from_slice(&(((MIB + NTFS.len()) / sector - 1) as u64).to_le_bytes());
+    for (own, other, at) in [(1, last, 2), (last, 1, last - 16384 / sector as u64)] {
+        b[at as usize * sector..at as usize * sector + entries.len()].copy_from_slice(&entries);
+        let h = &mut b[own as usize * sector..(own as usize + 1) * sector];
+        h[..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x10000u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92u32.to_le_bytes());
+        h[24..32].copy_from_slice(&own.to_le_bytes());
+        h[32..40].copy_from_slice(&other.to_le_bytes());
+        h[40..48].copy_from_slice(&(2 + 16384 / sector as u64).to_le_bytes());
+        h[48..56].copy_from_slice(&(last - 16384 / sector as u64 - 1).to_le_bytes());
+        h[56..72].fill(3);
+        h[72..80].copy_from_slice(&at.to_le_bytes());
+        h[80..84].copy_from_slice(&128u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128u32.to_le_bytes());
+        h[88..92].copy_from_slice(&crc32fast::hash(&entries).to_le_bytes());
+        let crc = crc32fast::hash(&h[..92]);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+    }
+    b[MIB..MIB + NTFS.len()].copy_from_slice(NTFS);
+    b
+}
+#[test]
+fn partition_images_browse_filter_preview_and_extract_ntfs_without_device_io() {
+    let browser = open(NTFS.to_vec(), Kind::Partition, 512);
+    assert_ntfs(&browser);
+    assert!(browser.reader(1).is_err());
+    let mut first = browser.reader(0).unwrap();
+    let mut second = browser.reader(0).unwrap();
+    first.seek(SeekFrom::Start(3)).unwrap();
+    let mut magic = [0; 8];
+    first.read_exact(&mut magic).unwrap();
+    assert_eq!(&magic, b"NTFS    ");
+    assert_eq!(second.stream_position().unwrap(), 0);
+    let mut same = vec![];
+    second.read_to_end(&mut same).unwrap();
+    assert_eq!(same, NTFS);
+    assert!(first.seek(SeekFrom::Start(NTFS.len() as u64 + 1)).is_err());
+    assert_eq!(first.seek(SeekFrom::End(0)).unwrap(), NTFS.len() as u64);
+    assert_eq!(first.read(&mut magic).unwrap(), 0);
+}
+#[test]
+fn mbr_and_logical_partitions_use_independent_bounded_readers() {
+    for extended in [false, true] {
+        let mut disk = vec![0; NTFS.len() + 4 * MIB];
+        let start = if extended { 2 * MIB } else { MIB };
+        disk[start..start + NTFS.len()].copy_from_slice(NTFS);
+        if extended {
+            mbr(
+                &mut disk,
+                0,
+                0x0f,
+                (MIB / 512) as u32,
+                ((NTFS.len() + 2 * MIB) / 512) as u32,
+            );
+            mbr(
+                &mut disk,
+                MIB,
+                7,
+                (MIB / 512) as u32,
+                (NTFS.len() / 512) as u32,
+            );
+        } else {
+            mbr(
+                &mut disk,
+                0,
+                7,
+                (MIB / 512) as u32,
+                (NTFS.len() / 512) as u32,
+            );
+        }
+        let browser = open(disk.clone(), Kind::Disk, 512);
+        assert_eq!(browser.info.partitions.len(), 1);
+        assert_eq!(browser.info.partitions[0].start, start as u64);
+        assert_ntfs(&browser);
+        assert!(Browser::open(
+            Cursor::new(disk),
+            "memory.img".into(),
+            Options {
+                kind: Kind::Disk,
+                sector: 4096
+            },
+            || Ok(())
+        )
+        .is_err());
+    }
+}
+#[test]
+fn gpt_sector_sizes_crc_and_partition_extent_are_enforced() {
+    for sector in [512, 4096] {
+        let disk = gpt(sector);
+        let browser = open(disk.clone(), Kind::Disk, sector as u64);
+        assert_eq!(browser.info.partitions[0].start, MIB as u64);
+        assert_ntfs(&browser);
+        let options = Options {
+            kind: Kind::Disk,
+            sector: sector as u64,
+        };
+        let mut bad = disk.clone();
+        bad[sector + 16] ^= 1;
+        assert!(Browser::open(Cursor::new(bad), "bad.img".into(), options, || Ok(())).is_err());
+        let mut bad = disk.clone();
+        let at = bad.len() - sector + 88;
+        bad[at] ^= 1;
+        assert!(Browser::open(Cursor::new(bad), "bad.img".into(), options, || Ok(())).is_err());
+        assert!(Browser::open(
+            Cursor::new(disk),
+            "wrong-sector.img".into(),
+            Options {
+                sector: if sector == 512 { 4096 } else { 512 },
+                ..options
+            },
+            || Ok(())
+        )
+        .is_err());
+    }
+}
+#[test]
+fn ext_files_read_through_partition_region_and_keep_the_same_bytes() {
+    for fixture in [
+        &include_bytes!("../../tests/fixtures/test_disk1.bin.zst")[..],
+        &include_bytes!("../../tests/fixtures/test_disk_ext2.bin.zst")[..],
+        &include_bytes!("../../tests/fixtures/test_disk_ext3.bin.zst")[..],
+    ] {
+        let raw = zstd::stream::decode_all(fixture).unwrap();
+        let browser = open(raw.clone(), Kind::Partition, 512);
+        let (files, _) = scan(&browser, 0, ScanMode::Existing);
+        let file = files
+            .iter()
+            .find(|c| c.supported && c.size > 0 && c.size < 64 * 1024)
+            .unwrap();
+        let actual = extract(&browser, 0, file);
+        let mut expected = vec![];
+        recovery::extract_owned(
+            Cursor::new(raw),
+            file,
+            &mut expected,
+            file.size,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!actual.is_empty());
+        assert_eq!(actual, expected);
+    }
+}
+#[test]
+fn unknown_options_bad_geometry_and_cancellation_never_open_a_view() {
+    assert!(
+        serde_json::from_str::<Options>(r#"{"kind":"disk","sector":512,"path":"anything"}"#)
+            .is_err()
+    );
+    for (size, sector) in [
+        (1023, 512),
+        (MIB as u64 + 1, 512),
+        (MIB as u64, 1024),
+        ((1 << 43) + 512, 512),
+    ] {
+        assert!(Options {
+            kind: Kind::Disk,
+            sector
+        }
+        .validate(size)
+        .is_err());
+    }
+    assert!(Browser::open(
+        Cursor::new(gpt(512)),
+        "cancel.img".into(),
+        Options {
+            kind: Kind::Disk,
+            sector: 512
+        },
+        || Err("cancel".into())
+    )
+    .is_err());
+    // A raw filesystem must be explicitly opened as a partition, never guessed.
+    assert!(Browser::open(
+        Cursor::new(NTFS.to_vec()),
+        "partition.img".into(),
+        Options {
+            kind: Kind::Disk,
+            sector: 512
+        },
+        || Ok(())
+    )
+    .is_err());
+}
+#[test]
+fn exported_manifests_include_image_source_in_complete_and_partial_results() {
+    let browser = open(NTFS.to_vec(), Kind::Partition, 512);
+    let (files, catalog) = scan(&browser, 0, ScanMode::Existing);
+    let file = files
+        .iter()
+        .find(|c| c.name == "file-with-12345")
+        .unwrap()
+        .clone();
+    let (_, mut plan) = crate::recovery_export::select(
+        &files,
+        &catalog,
+        &[file.id],
+        None,
+        crate::recovery_export::Layout::Tree,
+    )
+    .unwrap();
+    plan.image_source = Some(browser.provenance(0).unwrap());
+    for completed in [false, true] {
+        let report: serde_json::Value =
+            serde_json::from_slice(&plan.manifest(&[], completed).unwrap()).unwrap();
+        assert_eq!(report["imageSource"]["fileName"], "memory.img");
+        assert_eq!(report["imageSource"]["offset"], "0");
+        assert_eq!(report["imageSource"]["size"], NTFS.len().to_string());
+        assert!(report.get("backupSource").is_none());
+        assert_eq!(report["completed"], completed);
+    }
+}

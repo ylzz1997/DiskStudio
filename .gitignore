@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+*.log
+src-tauri/gen/
+.DS_Store
+*.tsbuildinfo
+test-results/
+fixtures/generated/
+tests/ui/*.generated.html
+.vm/

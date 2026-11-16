@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/disk-core", "src-tauri"]
+exclude = ["vendor/ext4-view", "vendor/ntfs"]
+resolver = "2"

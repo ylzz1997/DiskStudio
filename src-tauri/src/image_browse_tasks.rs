@@ -1,0 +1,130 @@
+//! Read-only image sessions share the recovery engine, never the device-opening path.
+use super::*;
+use crate::image_browser::{Browser, Info, Options};
+#[path = "image_session_tasks.rs"]
+pub mod sessions;
+
+#[derive(Clone)]
+pub(crate) struct Opened {
+    pub browser: Arc<Browser>,
+    pub source_disks: Vec<Target>,
+    pub bridge: Arc<crate::image_bridge::Bridge>,
+    #[cfg(windows)]
+    pub group: Arc<crate::image_files::Group>,
+}
+impl Opened {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        self.group.validate()?;
+        self.bridge.healthy()?;
+        Ok(())
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    #[serde(flatten)]
+    info: Info,
+    scan_id: Option<String>,
+    scan_partition: Option<u32>,
+    scan_mode: Option<ScanMode>,
+}
+fn status_in(s: &State) -> Option<Status> {
+    let opened = s.opened_image.as_ref()?;
+    let current = s.scan.as_ref().and_then(|(id, source)| match source {
+        ScanSource::Image {
+            opened: scan,
+            partition,
+        } if scan.browser.info.id == opened.browser.info.id => Some((id.clone(), *partition)),
+        _ => None,
+    });
+    Some(Status {
+        info: opened.browser.info.clone(),
+        scan_id: current.as_ref().map(|c| c.0.clone()),
+        scan_partition: current.as_ref().map(|c| c.1),
+        scan_mode: current.map(|_| s.scan_mode),
+    })
+}
+pub fn status() -> Option<Status> {
+    status_in(&state())
+}
+fn clear_results(s: &mut State) {
+    if matches!(s.scan, Some((_, ScanSource::Image { .. }))) {
+        s.scan = None;
+        s.candidates.clear();
+        s.directories = Catalog::default();
+        s.scan_name.clear();
+        s.recovery_progress = None;
+    }
+    s.pending = None;
+}
+pub fn close(id: String) -> Result<(), String> {
+    let _guard = crate::OPERATION
+        .try_lock()
+        .map_err(|_| "请等待当前磁盘任务完成")?;
+    let mut s = state();
+    idle(&s)?;
+    if s.opened_image
+        .as_ref()
+        .is_none_or(|v| v.browser.info.id != id)
+    {
+        return Err("镜像浏览会话已失效。".into());
+    }
+    clear_results(&mut s);
+    s.opened_image = None;
+    Ok(())
+}
+fn commit(s: &mut State, job_id: &str, opened: Opened) -> Result<(), String> {
+    if s.cancel.load(Ordering::Relaxed)
+        || s.job
+            .as_ref()
+            .is_none_or(|j| j.id != job_id || j.state != "running")
+    {
+        return Err("镜像打开已取消或任务失效；保留原镜像及目录。".into());
+    }
+    clear_results(s);
+    s.opened_image = Some(opened);
+    let job = s.job.as_mut().unwrap();
+    job.state = "completed".into();
+    job.phase = "完成".into();
+    job.message = "镜像已打开。选择分区并读取目录；没有挂载或修改镜像。".into();
+    Ok(())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScanRequest {
+    pub id: String,
+    pub partition: u32,
+    pub mode: ScanMode,
+}
+pub fn scan(request: ScanRequest) -> Result<String, String> {
+    if request.mode == ScanMode::Signatures {
+        return Err("镜像目录读取请选择现存文件、全部文件或删除候选。".into());
+    }
+    let guard = crate::OPERATION
+        .try_lock()
+        .map_err(|_| "请等待当前磁盘任务完成")?;
+    let opened = {
+        let s = state();
+        idle(&s)?;
+        s.opened_image
+            .as_ref()
+            .filter(|b| b.browser.info.id == request.id)
+            .ok_or("镜像浏览会话已失效。")?
+            .clone()
+    };
+    opened.validate()?;
+    let reader = opened.browser.reader(request.partition)?;
+    let label = format!("镜像：{}", opened.browser.label(request.partition)?);
+    scan_source_mode(
+        ScanSource::Image {
+            opened,
+            partition: request.partition,
+        },
+        Box::new(reader),
+        label,
+        "读取镜像目录",
+        request.mode,
+        guard,
+    )
+}

@@ -1,0 +1,84 @@
+[
+  {
+    "id": "sample-work",
+    "name": "工作磁盘",
+    "filename": "Sandbox.img",
+    "size": 68719476736,
+    "sectorSize": 512,
+    "scheme": "GPT",
+    "kind": "sample",
+    "partitions": [
+      {
+        "id": "efi",
+        "name": "EFI",
+        "fs": "FAT32",
+        "start": 1048576,
+        "size": 268435456,
+        "used": 33554432,
+        "color": "blue",
+        "system": true
+      },
+      {
+        "id": "workspace",
+        "name": "Workspace",
+        "fs": "NTFS",
+        "start": 269484032,
+        "size": 42949672960,
+        "used": 19971597926,
+        "color": "coral",
+        "system": false
+      },
+      {
+        "id": "archive",
+        "name": "Archive",
+        "fs": "FAT32",
+        "start": 43219156992,
+        "size": 17179869184,
+        "used": 6442450944,
+        "color": "violet",
+        "system": false
+      },
+      {
+        "id": "free-work",
+        "name": "未分配",
+        "fs": "—",
+        "start": 60399026176,
+        "size": 8319401984,
+        "used": 0,
+        "color": "free",
+        "system": false
+      }
+    ]
+  },
+  {
+    "id": "sample-backup",
+    "name": "备份磁盘",
+    "filename": "Backup.img",
+    "size": 34359738368,
+    "sectorSize": 512,
+    "scheme": "GPT",
+    "kind": "sample",
+    "partitions": [
+      {
+        "id": "backup-data",
+        "name": "Backups",
+        "fs": "exFAT",
+        "start": 1048576,
+        "size": 25769803776,
+        "used": 11274289152,
+        "color": "violet",
+        "system": false
+      },
+      {
+        "id": "free-backup",
+        "name": "未分配",
+        "fs": "—",
+        "start": 25770852352,
+        "size": 8587837440,
+        "used": 0,
+        "color": "free",
+        "system": false
+      }
+    ]
+  }
+]
