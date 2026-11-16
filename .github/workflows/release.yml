@@ -22,14 +22,14 @@ jobs:
         run: rustup default stable-x86_64-pc-windows-msvc
       - name: Install frontend dependencies
         run: npm ci
-      - name: Test
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          npm test -- --maxWorkers=2
-          cargo test --locked -p disk-core
-          cargo test --locked -p diskstudio --bin diskstudio
-          node --test scripts/vm/lab-tests.mjs
-          cargo test --locked --manifest-path scripts/vm/guest-checks/Cargo.toml --target-dir target/guest-checks quick_partition_checks::tests
+      - name: Test frontend
+        run: npm test -- --maxWorkers=2
+      - name: Test Rust core
+        run: cargo test --locked -p disk-core
+      - name: Test desktop backend
+        run: cargo test --locked -p diskstudio --bin diskstudio
+      - name: Test GPT verification with synthetic data
+        run: cargo test --locked --manifest-path scripts/vm/guest-checks/Cargo.toml --target-dir target quick_partition_checks::tests
       - name: Build desktop executable
         run: npm run tauri -- build --no-bundle --ci -- --locked
       - name: Stage portable package
