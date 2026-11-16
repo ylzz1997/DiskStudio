@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { gunzipSync, inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -74,9 +75,8 @@ it("uses immutable ordinary-file metadata, bounded native slices and exact repli
   group.files[0].name = "changed.img";
   expect(file.name).toBe("source.img");
   expect(Object.isFrozen(file)).toBe(true);
-  expect(
-    new Uint8Array(await file.slice(2, 2 * MiB + 3).arrayBuffer()),
-  ).toEqual(bytes.slice(2, 2 * MiB + 3));
+  const actual = Buffer.from(await file.slice(2, 2 * MiB + 3).arrayBuffer());
+  expect(actual.equals(bytes.subarray(2, 2 * MiB + 3))).toBe(true);
   expect(calls).toEqual([MiB, MiB, 1]);
   expect(new Uint8Array(await file.slice(-7).arrayBuffer())).toEqual(
     bytes.slice(-7),
