@@ -96,6 +96,8 @@ pub enum NtfsError {
         expected: u16,
         actual: u16,
     },
+    /// The NTFS index at byte position {position:#x} exceeds the supported tree depth
+    IndexDepthExceeded { position: NtfsPosition },
     /// The NTFS index root at byte position {position:#x} indicates that its entries start at offset {expected}, but the index root only has a size of {actual} bytes
     InvalidIndexRootEntriesOffset {
         position: NtfsPosition,

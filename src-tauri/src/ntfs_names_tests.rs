@@ -160,7 +160,7 @@ fn aliases_in_different_parents_short_names_and_empty_directories_survive_scan_a
         .cloned()
         .collect();
     assert_eq!(selected.len(), 3);
-    assert!(summary.contains("额外名称"));
+    assert!(summary.contains("additional names"), "{summary}");
     for c in &selected {
         assert_eq!(extract(&bytes, c).unwrap(), b"12345");
     }

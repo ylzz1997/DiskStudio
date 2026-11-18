@@ -4,6 +4,60 @@
 
 所有 QEMU、下载、系统盘、测试盘、检查点、工具光盘、测试临时文件和日志集中在项目 `.vm/`。脚本不安装系统服务、不修改 PATH、不提权、不自动启用 Windows 功能。
 
+## FAT 与 exFAT 保留数据缩放
+
+`build-fat-resize.ps1` 只编译客体驱动，绑定已完成桌面程序的 SHA-256。只在通过身份、容量和隔离预检的 DiskStudio-Test 内运行 `Fat-Resize-Check.exe`。它用跨构建的单次标记保护八次操作，匹配 A 的四个已有测试卷并各建立独立文件，不删除或格式化分区。每次缩放后核对脱机状态、精确 GPT 几何、独立读取的 65,553 字节文件及 SHA-256。在后续扩容之前单独联机并确认 Windows 能识别缩容的卷。失败停止且不重试，结束时 A 保持脱机，B 只用于核对。
+
+正式程序 `45c36059…` 的八项隔离设备验收全部通过。原生程序另在 B 上只预览并取消 QBFAT16 128→64 MiB，保持两盘写入计数不变。`Fat-Resize-Report.exe` 可只读查看保存的末尾事件。完整证据见 `.vm/fat-resize-batch-status.json`。
+
+尾部簇搬移使用 `build-fat-resize.ps1 -Relocation` 生成独立入口。客体驱动绑定原有 A 盘夹具，通过 Windows 文件分配放置样本，并在执行前要求正式预览明确报告非零搬移簇数。使用 `-Remaining` 构建的续验入口先核对首轮同一桌面构建在 FAT12 样本创建阶段因空间不足停止的记录，再鉴别并测试 FAT16、FAT32、exFAT 三个尚未操作的卷。两个入口使用独立单次标记，各自的 `Report` 入口只读取保存日志。
+
+正式构建 `27012e24…` 完成 662 项集中检查。续验的三种卷均通过缩容和回扩，独立核对 GPT、Windows 识别状态及 65,553 字节文件。实际搬移 17、65、17 个簇，A 结束时脱机，B 写入计数不变。原生界面在 B/17 使用 MiB 预览 128→127 MiB 并取消。FAT12 的尾部搬移有合成验证，首轮因准备失败未执行客体缩容。记录见 `.vm/fat-relocation-batch-status.json`。
+
+分配表容量批次由 `build-fat-resize.ps1 -Capacity` 绑定正式程序，使用 A 盘未分配范围上的两个新夹具。测试独立读引导区几何、比较完整 GPT，并通过恢复引擎逐字节检查样本。FAT12 首轮扩容通过后在清理已创建的占位文件时遇到 Windows 路径错误。`-Capacity -Remaining` 核对这一记录并只读枚举 FAT12 文件，再独立验收尚未开始的 exFAT。`-Fat12Tail` 绑定同一正式程序和两段历史记录，验证两个样本、占位文件长度及其位于 A/20 的句柄，将占位文件长度置零以释放空间。随后执行先前未提交的 FAT12 缩容。各入口只派发一次，独立 `Report` 读取保存日志。
+
+正式构建 `d6b64df6…` 的集中检查共 664 项通过。A/20 FAT12 1→2→1 MiB，扩容和缩容各搬移 129 簇。A/21 exFAT 96→1088→96 MiB，扩容搬移 21 簇，位图 1→9→1 簇。独立读回样本及 GPT 均通过。真实设备四次调整限 A，最终 A 脱机、B 写入计数不变。原生界面核实占位还在时缩容预览拒绝，取消后两盘写入计数不变。详见 `.vm/fat-capacity-batch-status.json`。
+
+`build-fat-resize.ps1 -Sectors` 将两个扇区规格的验收驱动绑定到现有正式程序哈希。默认配置运行 `Fat-Sectors-512-Check.exe`。要切换到 4Kn，请先正常关闭客体，再用 `node scripts/vm/lab.mjs start --4kn` 启动同一台隔离测试 VM。在 `.vm/windows` 中单独使用 `test-a-4kn.qcow2` 和 `test-b-4kn.qcow2`，系统盘仍为原 80 GiB 镜像。QMP 核对控制器上的逻辑和物理扇区大小、序列号和文件后端，客体再核对 Windows 报告的扇区和完整序列号。通过 `preflight` 后运行 `Fat-Sectors-4Kn-Check.exe`。两个驱动都用独立单次标记，写入只限 A，4Kn 的 B 保持 RAW。以普通 `start` 再次启动即可使用原有两块 NVMe 镜像。
+
+512 字节扇区的 FAT16（A/22）通过 64→160→64 MiB，FAT32（A/23）通过 320→448→320 MiB。两者都扩大了 FAT，客体独立读回 65,553 字节样本并核对 GPT，A 最终脱机，B 的 GPT 和写入计数一致。
+
+首轮 4Kn 驱动完成 A/2 FAT16 的准备，卷未卸载干净时预览拒绝，未派发缩放。`-Sectors -SectorDiagnosis` 通过只读核对两份 FAT 的保留项和样本，确认当时卷已恢复干净。`-Sectors -Remaining` 生成 `Fat-Sectors-4Kn-Continue-Check.exe`，绑定正式程序与首轮停止记录，复用原 A/2 和文件，在客体测试中等待 Windows 清除卷状态后才请求首次缩放。各 `Report` 入口只读保存的记录。首轮及续验入口都只运行一次。
+
+续验通过 FAT16 64→160→64 MiB，随后 FAT32 预览因主备引导扇区不一致拒绝。`-SectorTail` 生成只读 FAT32 诊断和仅测试后续两项的入口。诊断读出 A/3 两份 4 KiB 引导扇区逐字节一致，A/B 写入计数不变。后续两项通过 FAT12（A/4）8→12→8 MiB 和 exFAT（A/5）96→1088→96 MiB，exFAT 位图 1→9→1 簇。`-SectorFat32` 验证原停止记录、原样本和当前主备引导区，再执行 A/3 首次缩放。FAT32 320→448→320 MiB 通过，每份 FAT 从 80 增至 112 个扇区。四类 4Kn 试验均独立核对文件、GPT 和引导几何，A 最终脱机，B 保持 RAW 且全程零写入。参见 `.vm/fat-sectors-batch-status.json`。
+
+## GPT 分区移动验收批次
+
+`build-partition-move.ps1` 将客体驱动绑定到正式桌面 SHA-256。默认 512 字节配置通过 QMP `preflight` 后，客体中的 `Partition-Move-Prepare.exe` 核对 UUID、完整序列号和两盘容量。在 A 的空闲区准备 512 MiB FAT16 和固定样本，在 B 上确定已有 NTFS 卷为断点存储。它保存两盘 GPT 基线，并报告 A 的分区号、原起点、向右移动 64 MiB 的目标起点和 B 的盘符。准备入口只允许运行一次。
+
+用光盘上的正式程序预览并确认上述范围，断点保存到驱动核对的 B 卷。要验收跨进程和重启续作，在复制阶段已有落盘进度后使用「停止并保留断点」。`Partition-Move-Interrupted.exe` 只读确认 A 脱机、原 GPT 完整、B GPT 一致、断点位于 B 且记录了非零进度。重启同一客体后，从磁盘菜单打开「继续分区移动」，选同一个文件并再次确认。`Partition-Move-Inspect.exe` 独立核对最终 GPT、FAT 引导区隐藏扇区计数及完整样本。若原生操作已完成，直接做最终检查。若任一步失败，保留原记录和当前盘面。
+
+首轮正式构建 `b5ec7564…` 在原生界面完成 A/24 的重叠移动。独立核对 GPT、FAT16 引导区和 131,089 字节样本通过。重启后 A 保持脱机，原断点通过当前 Windows 用户的来源校验。`-Diagnose` 生成的只读驱动确认该构建复核时遇到空的分区脱机、隐藏、只读和卷影复制字段。诊断期间 A/B 写入计数不变。见 `.vm/partition-move-windows-status.json`。
+
+`build-partition-move.ps1 -Stop` 为后续隔离验收生成 `Partition-Move-Stop-Prepare.exe`、`Partition-Move-Stop-Interrupted.exe` 和 `Partition-Move-Stop-Inspect.exe`。先用正式程序只读复核上一轮的原断点，再运行 `Stop-Prepare`，它只在 A 的空闲范围创建新的 DSMOVESTOP 夹具，B 上使用独立的 `DiskStudio-move-stop` 文件夹。`node scripts/vm/lab.mjs move-stop-window` 在完整 QMP 预检后将 A 写入限为 8 MiB/s，以便在原生界面复制阶段使用停止按钮。断点只读检查后用 `move-stop-clear` 解除限速，再正常关闭并重启客体，从相同断点继续。`Stop-Inspect` 核对最终布局和样本。
+
+正式构建 `e47addd6…` 通过 679 项集中测试，原生只读复核首轮已完成的断点通过，期间 A/B 写入计数不变。A/25 的 FAT16 在 12894→12958 MiB 移动过程中按下停止，独立读取确认已记录 220 MiB 且原 GPT 完整。重启后 A 仍脱机，原生界面读取同一断点并续作。A 的写入量为剩余 292 MiB 加五个 512 字节的引导及 GPT 扇区。独立核对新位置的 FAT 引导、完整样本和 A/B 两盘 GPT 通过。记录见 `.vm/partition-move-resume-status.json`。
+
+`build-partition-move.ps1 -FourKn` 使用已通过集中测试的同一正式程序生成 4Kn 对应的 `Exfat` 和 `Ntfs` 准备及只读检查入口。正常关闭客体后用 `node scripts/vm/lab.mjs start --4kn` 更换为独立的 4Kn A/B 镜像，完成 QMP 预检。`Partition-Move-4Kn-Exfat-Prepare.exe` 一次性初始化仍为 RAW 的 4Kn B，创建 256 MiB NTFS 断点卷。在 A 的空闲区创建 96 MiB exFAT 样本并计划向右移动 4 MiB。原生操作与只读后验完成之后再准备 128 MiB NTFS 样本，向左移动 4 MiB。各用例使用独立的断点目录。只读入口复核正、副引导区、两盘 GPT 及 131,089 字节样本，exFAT 另外复算两个引导区的校验和。
+
+4Kn exFAT 原生移动和独立后验均通过。NTFS 准备阶段完成了 Windows 文件回读，随后原始文件检查拒绝。`-FourKnDiagnose` 绑定原准备报告、夹具范围和程序散列，只读复核原文件的 Windows 文件 ID、MFT 记录、分配表及原始文件内容。只有原始文件内容和分配表复核都通过时，才单独保存原生移动所需的测试基线。见 `.vm/partition-move-4kn-status.json`。
+
+同一构建 `e47addd6…` 在 A/6 上完成 96 MiB exFAT 的 548→552 MiB 重叠移动。NTFS 原夹具的只读复查通过，A/B 写入计数不变。随后在 A/7 上完成 128 MiB NTFS 的 796→792 MiB 重叠移动。两项都验证了全部样本、主备卷引导区和两盘 GPT，A 完成时脱机，独立检查期间 A/B 写入计数均不变。
+
+`build-partition-move.ps1 -FourKnFat` 复用这份正式程序和已有 FAT 样本。`Partition-Move-4Kn-Fat12-Prepare.exe` 在检查 NTFS 的已完成断点和两盘 GPT 后联机 A，按 664 MiB 起点、8 MiB 长度和 `DSSEC12` 标签识别 FAT12，核对原有 65,553 字节样本，给出向右移动 4 MiB 的预览参数。原生移动后用对应的 `Inspect` 复核。随后 `Partition-Move-4Kn-Fat32-Prepare.exe` 核对 FAT12 已完成，再选择 212 MiB 起点、320 MiB 长度的 `DSSEC32` FAT32 向左移动 4 MiB。预览使用 Windows 当前分区编号。两个用例在 `DS4KMOVEJRN` 卷使用独立目录。4Kn 下 `move-stop-window` 仅将 A 的写入速度限制为 4 MiB/s，供 FAT32 复制阶段停止。用对应的 `Interrupted` 检查原 GPT 和非零断点进度，解除限速并正常重启，再从同一断点继续。最终由 `Inspect` 独立读回样本、主备 FAT32 引导区和两盘 GPT。
+
+如旧版 FAT12 准备工具仅联机了 A，随后因分区重编号退出，`-FourKnFatContinue` 生成 `Partition-Move-4Kn-Fat12-Continue-Prepare.exe` 及按固定范围定位的 `Partition-Move-4Kn-Fat32-Range-Prepare.exe`。FAT12 准备续作要求 A 已联机、旧的一次性标记存在、两盘 GPT 通过上一用例的证明，且当前用例的基线文件尚未建立。
+
+## NTFS 分区合并验收批次
+
+集中测试和桌面构建完成后，用 `build-partition-merge.ps1` 绑定正式程序的 SHA-256 并生成四个客体入口。用 `start --4kn` 和 `preflight` 核对隔离配置，刷新只读工具盘。所有入口仍在客体核对 UUID、盘容量和完整序列号。`Partition-Merge-4Kn-Prepare.exe` 核对光盘上的桌面哈希，只在 A 的空闲区新建相邻的 256 MiB `DSMERGEKEEP` 和 128 MiB `DSMERGEFROM`，准备确定内容的文件、命名流、硬链接和 Unicode 文件名，并保存两盘 GPT 基线。
+
+准备通过后，可用同一光盘的桌面程序预览并取消，从 `DSMERGEKEEP` 打开「合并分区」，选择右侧 `DSMERGEFROM`，核对先迁移和读回文件、再删除及扩容的顺序。`Partition-Merge-4Kn-Check.exe` 使用同一生产后端和同一对 GPT 身份，只派发一次实际合并。它独立比较最终 384 MiB 布局、B 的完整 GPT、保留卷的原文件、迁移内容与命名流、硬链接、Windows 所有者/主组/DACL 和修改时间。`Inspect` 独立读回布局和样本，`Report` 读取保存的执行日志。准备或合并失败时保留现场和日志，先核对已经提交的步骤。
+
+首轮正式程序 `d39743b2…` 在原生界面通过 A/9 合入 A/8 的预览及取消，A/B 写入计数保持一致。合并驱动在建立源清单时退出。`-Diagnose` 用同一正式程序生成只读诊断入口，核对两盘 GPT、源样本以及目标目录尚未创建，再读取 Windows TxF 保留文件的名称和属性。`-Continue` 绑定了修正后的正式程序 `28139773…` 和原夹具，执行到卷根保留属性校验时停止。`-CatalogueProbe` 生成只读复查入口 `Partition-Merge-4Kn-Catalogue-Recheck.exe`，在验证两盘 GPT、两个目标目录均未创建及源文件内容后，用修正后的清单模块读取已验证的 A/9。配套 `Catalogue-Recheck-Report` 仅显示保存的记录。验收证据见 `.vm/partition-merge-batch-status.json`。
+
+`-Corrected` 在源清单只读复查通过后验证文件迁移。正式程序 `d2e2080f…` 完成样本写入后在 Windows 还原原所有者时收到错误 1307。`-OwnerInspect` 核对两盘 GPT、源所有者与 DACL、源文件和暂存副本的内容。`-Fresh` 绑定所有者修正版，只有上述复查已通过才在 A 的空闲区创建一对新夹具。使用 `Fresh-Prepare` 准备，`Fresh-Check` 提交一次合并，`Fresh-Inspect` 独立读回，`Fresh-Report` 查看该次提交的结果。
+
 ## GPT 快速分区验收批次
 
 后续进度/关联快照批次使用 `build-quick-progress.ps1` 和独立四个 `Quick-Progress-*` 入口。`Prepare` 只做 A/B 读取、基线记录及五步预览后作废令牌，不派发磁盘修改；只允许替换前一轮原生 UI 新建的 B DATA1（14768 MiB 起点/807 MiB），保留其余 18 项。正式程序原生 UI 将其分成默认 NTFS DATA1 403 MiB 与 DATA2 404 MiB；`Inspect` 独立只读核对精确范围、原始 NTFS 引导、卷标、全部保留元数据/GPT 与 B/15 文件，不写样本。两者均有独立跨构建 once 标记，`-Report` 只读日志。此批桌面 `80f98cb4…` 五步原生验收通过。原驱动 `c8dccc4c…` 将 GPT 数组槽位纳入比较并误报，原记录保留。`build-quick-progress.ps1 -Recheck` 单独生成只读复查入口，要求同一桌面散列与原失败记录。复查按唯一 GUID 核对保留条目全部字段，报告槽位 19→20，新建范围、NTFS 卷标及引导、A 完整 GPT、18 项保留分区元数据和 B/15 文件均通过，A/B 写入计数不变。见 `.vm/quick-progress-batch-status.json`。不要重跑历史 `Quick-Partition-*` 入口。

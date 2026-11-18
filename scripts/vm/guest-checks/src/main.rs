@@ -43,7 +43,9 @@ mod ext_resume_checks;
 mod extfs;
 #[path = "../../../../src-tauri/src/fat_recovery.rs"]
 mod fat_recovery;
+mod fat_resize_checks;
 mod fat_resume_checks;
+mod fat_sector_checks;
 #[path = "../../../../src-tauri/src/fat_volume.rs"]
 mod fat_volume;
 #[path = "../../../../src-tauri/src/file_metadata.rs"]
@@ -68,7 +70,11 @@ mod lost_partitions;
 mod maintenance_io;
 #[path = "../../../../src-tauri/src/maintenance_tasks.rs"]
 mod maintenance_tasks;
+mod merge_checks;
 mod metadata_checks;
+mod move_checks;
+#[path = "../../../../src-tauri/src/native_locale.rs"]
+mod native_locale;
 #[path = "../../../../src-tauri/src/ntfs_allocation.rs"]
 mod ntfs_allocation;
 #[path = "../../../../src-tauri/src/ntfs_checkpoint.rs"]
@@ -86,6 +92,10 @@ mod ntfs_stream_evidence;
 mod ntfs_streams;
 #[path = "../../../../src-tauri/src/partition_attributes.rs"]
 mod partition_attributes;
+#[path = "../../../../src-tauri/src/partition_move.rs"]
+mod partition_move;
+#[path = "../../../../src-tauri/src/partition_move_task.rs"]
+mod partition_move_task;
 #[path = "../../../../src-tauri/src/partitions.rs"]
 mod partitions;
 mod quick_partition_checks;
@@ -126,11 +136,12 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
     time::Duration,
 };
 use wmi::WMIConnection;
 static OPERATION: Mutex<()> = Mutex::new(());
+static TEST_SECTOR: OnceLock<u64> = OnceLock::new();
 // MSFT_Disk preserves six padding spaces before the NVMe namespace suffix.
 const A: &str = "DS-TEST-A-0001      _00000001.";
 const B: &str = "DS-TEST-B-0001      _00000001.";
@@ -143,6 +154,9 @@ struct Product {
 }
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+fn test_sector() -> u64 {
+    TEST_SECTOR.get().copied().unwrap_or(512)
 }
 fn inventory() -> Result<Vec<Disk>, String> {
     let cim = WMIConnection::new().map_err(err)?;
@@ -172,15 +186,17 @@ fn inventory() -> Result<Vec<Disk>, String> {
             || found[0].is_boot != Some(false)
             || found[0].is_system != Some(false)
             || found[0].bus_type != Some(17)
+            || found[0].logical_sector_size != Some(test_sector())
         {
             return Err(format!(
                 "STOP: invalid test disk {serial}\n{}",
                 disks
                     .iter()
                     .map(|d| format!(
-                        "serial={:?}, size={}, boot={:?}, system={:?}, bus={:?}",
+                        "serial={:?}, size={}, sector={:?}, boot={:?}, system={:?}, bus={:?}",
                         d.serial_number.as_ref().map(|s| s.replace(' ', "[SP]")),
                         d.size,
+                        d.logical_sector_size,
                         d.is_boot,
                         d.is_system,
                         d.bus_type
@@ -540,10 +556,160 @@ fn main() {
             .to_str()
             .map(str::to_owned)
     });
+    if matches!(
+        mode.as_deref(),
+        Some(
+            "Fat-Sectors-4Kn-Check"
+                | "Fat-Sectors-4Kn-Report"
+                | "Fat-Sectors-4Kn-Diagnose"
+                | "Fat-Sectors-4Kn-Continue-Check"
+                | "Fat-Sectors-4Kn-Continue-Report"
+                | "Fat-Sectors-4Kn-Tail-Check"
+                | "Fat-Sectors-4Kn-Tail-Report"
+                | "Fat-Sectors-4Kn-Fat32-Diagnose"
+                | "Fat-Sectors-4Kn-Fat32-Check"
+                | "Fat-Sectors-4Kn-Fat32-Report"
+                | "Partition-Move-4Kn-Exfat-Prepare"
+                | "Partition-Move-4Kn-Exfat-Inspect"
+                | "Partition-Move-4Kn-Ntfs-Prepare"
+                | "Partition-Move-4Kn-Ntfs-Inspect"
+                | "Partition-Move-4Kn-Ntfs-Diagnose"
+                | "Partition-Move-4Kn-Fat12-Prepare"
+                | "Partition-Move-4Kn-Fat12-Continue-Prepare"
+                | "Partition-Move-4Kn-Fat12-Inspect"
+                | "Partition-Move-4Kn-Fat32-Prepare"
+                | "Partition-Move-4Kn-Fat32-Range-Prepare"
+                | "Partition-Move-4Kn-Fat32-Interrupted"
+                | "Partition-Move-4Kn-Fat32-Inspect"
+                | "Partition-Merge-4Kn-Prepare"
+                | "Partition-Merge-4Kn-Check"
+                | "Partition-Merge-4Kn-Inspect"
+                | "Partition-Merge-4Kn-Report"
+                | "Partition-Merge-4Kn-Diagnose"
+                | "Partition-Merge-4Kn-Continue"
+                | "Partition-Merge-4Kn-Continue-Report"
+                | "Partition-Merge-4Kn-Continue-Inspect"
+                | "Partition-Merge-4Kn-Catalogue-Recheck"
+                | "Partition-Merge-4Kn-Catalogue-Recheck-Report"
+                | "Partition-Merge-4Kn-Corrected"
+                | "Partition-Merge-4Kn-Corrected-Report"
+                | "Partition-Merge-4Kn-Corrected-Inspect"
+                | "Partition-Merge-4Kn-Owner-Inspect"
+                | "Partition-Merge-4Kn-Fresh-Prepare"
+                | "Partition-Merge-4Kn-Fresh-Check"
+                | "Partition-Merge-4Kn-Fresh-Report"
+                | "Partition-Merge-4Kn-Fresh-Inspect"
+        )
+    ) {
+        TEST_SECTOR.set(4096).expect("guest sector configured once");
+    }
     let result = std::panic::catch_unwind(|| match mode.as_deref() {
         Some("Allocation-Probe") => allocation_probe::inspect(),
         Some("Letter-Outcome") => letter_outcome_checks::check(),
+        Some("Partition-Merge-4Kn-Prepare") => merge_checks::prepare(),
+        Some("Partition-Merge-4Kn-Check") => merge_checks::check(),
+        Some("Partition-Merge-4Kn-Inspect") => merge_checks::inspect(),
+        Some("Partition-Merge-4Kn-Report") => merge_checks::report(),
+        Some("Partition-Merge-4Kn-Diagnose") => merge_checks::diagnose(),
+        Some("Partition-Merge-4Kn-Continue") => merge_checks::continue_check(),
+        Some("Partition-Merge-4Kn-Continue-Report") => merge_checks::continue_report(),
+        Some("Partition-Merge-4Kn-Continue-Inspect") => merge_checks::continue_inspect(),
+        Some("Partition-Merge-4Kn-Catalogue-Recheck") => merge_checks::catalogue_probe(),
+        Some("Partition-Merge-4Kn-Catalogue-Recheck-Report") => merge_checks::catalogue_probe_report(),
+        Some("Partition-Merge-4Kn-Corrected") => merge_checks::corrected_check(),
+        Some("Partition-Merge-4Kn-Corrected-Report") => merge_checks::corrected_report(),
+        Some("Partition-Merge-4Kn-Corrected-Inspect") => merge_checks::corrected_inspect(),
+        Some("Partition-Merge-4Kn-Owner-Inspect") => merge_checks::inspect_owner_failure(),
+        Some("Partition-Merge-4Kn-Fresh-Prepare") => merge_checks::prepare_fresh(),
+        Some("Partition-Merge-4Kn-Fresh-Check") => merge_checks::check_fresh(),
+        Some("Partition-Merge-4Kn-Fresh-Report") => merge_checks::report_fresh(),
+        Some("Partition-Merge-4Kn-Fresh-Inspect") => merge_checks::inspect_fresh(),
+        Some("Partition-Move-Prepare") => move_checks::prepare(&move_checks::FIRST),
+        Some("Partition-Move-Prepare-Report") => {
+            backup_protection::report("partition-move-prepare")
+        }
+        Some("Partition-Move-Interrupted") => move_checks::inspect(&move_checks::FIRST, true),
+        Some("Partition-Move-Inspect") => move_checks::inspect(&move_checks::FIRST, false),
+        Some("Partition-Move-Restart-Diagnose") => move_checks::diagnose_restart(),
+        Some("Partition-Move-Stop-Prepare") => move_checks::prepare(&move_checks::STOP),
+        Some("Partition-Move-Stop-Interrupted") => move_checks::inspect(&move_checks::STOP, true),
+        Some("Partition-Move-Stop-Inspect") => move_checks::inspect(&move_checks::STOP, false),
+        Some("Partition-Move-4Kn-Exfat-Prepare") => {
+            move_checks::prepare_4kn(&move_checks::EXFAT_4KN, true)
+        }
+        Some("Partition-Move-4Kn-Exfat-Inspect") => {
+            move_checks::inspect(&move_checks::EXFAT_4KN, false)
+        }
+        Some("Partition-Move-4Kn-Ntfs-Prepare") => {
+            move_checks::prepare_4kn(&move_checks::NTFS_4KN, false)
+        }
+        Some("Partition-Move-4Kn-Ntfs-Diagnose") => move_checks::diagnose_4kn_ntfs(),
+        Some("Partition-Move-4Kn-Ntfs-Inspect") => {
+            move_checks::inspect(&move_checks::NTFS_4KN, false)
+        }
+        Some("Partition-Move-4Kn-Fat12-Prepare") => move_checks::prepare_existing_4kn_fat(
+            &move_checks::FAT12_4KN,
+            &move_checks::NTFS_4KN,
+            false,
+        ),
+        Some("Partition-Move-4Kn-Fat12-Continue-Prepare") => move_checks::prepare_existing_4kn_fat(
+            &move_checks::FAT12_4KN,
+            &move_checks::NTFS_4KN,
+            true,
+        ),
+        Some("Partition-Move-4Kn-Fat12-Inspect") => {
+            move_checks::inspect(&move_checks::FAT12_4KN, false)
+        }
+        Some("Partition-Move-4Kn-Fat32-Prepare" | "Partition-Move-4Kn-Fat32-Range-Prepare") => {
+            move_checks::prepare_existing_4kn_fat(
+                &move_checks::FAT32_4KN,
+                &move_checks::FAT12_4KN,
+                false,
+            )
+        }
+        Some("Partition-Move-4Kn-Fat32-Interrupted") => {
+            move_checks::inspect(&move_checks::FAT32_4KN, true)
+        }
+        Some("Partition-Move-4Kn-Fat32-Inspect") => {
+            move_checks::inspect(&move_checks::FAT32_4KN, false)
+        }
         Some("Quick-Partition") => quick_partition_checks::check(),
+        Some("Fat-Resize-Check") => fat_resize_checks::check(),
+        Some("Fat-Sectors-512-Check") => fat_sector_checks::check(),
+        Some("Fat-Sectors-512-Report") => backup_protection::report("fat-sectors-512"),
+        Some("Fat-Sectors-4Kn-Check") => fat_sector_checks::check(),
+        Some("Fat-Sectors-4Kn-Diagnose") => fat_sector_checks::diagnose_4kn(),
+        Some("Fat-Sectors-4Kn-Continue-Check") => fat_sector_checks::continue_4kn(),
+        Some("Fat-Sectors-4Kn-Continue-Report") => {
+            backup_protection::report("fat-sectors-4kn-continue")
+        }
+        Some("Fat-Sectors-4Kn-Tail-Check") => fat_sector_checks::tail_4kn(),
+        Some("Fat-Sectors-4Kn-Tail-Report") => {
+            backup_protection::report(fat_sector_checks::TAIL_4KN_KIND)
+        }
+        Some("Fat-Sectors-4Kn-Fat32-Diagnose") => fat_sector_checks::diagnose_4kn_fat32(),
+        Some("Fat-Sectors-4Kn-Fat32-Check") => fat_sector_checks::resume_4kn_fat32(),
+        Some("Fat-Sectors-4Kn-Fat32-Report") => {
+            backup_protection::report(fat_sector_checks::FAT32_4KN_KIND)
+        }
+        Some("Fat-Sectors-4Kn-Report") => backup_protection::report("fat-sectors-4kn"),
+        Some("Fat-Resize-Report") => backup_protection::report("fat-resize"),
+        Some("Fat-Relocation-Check") => fat_resize_checks::check_relocation(),
+        Some("Fat-Relocation-Report") => backup_protection::report("fat-relocation"),
+        Some("Fat-Relocation-Remaining-Check") => fat_resize_checks::continue_relocation(),
+        Some("Fat-Relocation-Remaining-Report") => {
+            backup_protection::report("fat-relocation-remaining")
+        }
+        Some("Fat-Capacity-Check") => fat_resize_checks::check_capacity(),
+        Some("Fat-Capacity-Report") => backup_protection::report("fat-capacity"),
+        Some("Fat-Capacity-Remaining-Check") => fat_resize_checks::continue_capacity(),
+        Some("Fat-Capacity-Remaining-Report") => {
+            backup_protection::report("fat-capacity-remaining")
+        }
+        Some("Fat-Capacity-Fat12-Tail-Check") => fat_resize_checks::check_capacity_fat12_tail(),
+        Some("Fat-Capacity-Fat12-Tail-Report") => {
+            backup_protection::report("fat-capacity-fat12-tail")
+        }
         Some("Quick-Progress-Prepare") => quick_partition_checks::prepare_progress_ui(),
         Some("Quick-Progress-Prepare-Report") => {
             backup_protection::report("quick-progress-prepare")

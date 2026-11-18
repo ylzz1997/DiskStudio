@@ -8,6 +8,8 @@ import {
   Save,
 } from "lucide-react";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle } from "./LocalDiskView";
 import type { Disk, TableReport } from "./types";
 import { TableRestoreDialog } from "./TableRestoreDialog";
 
@@ -37,6 +39,7 @@ export function TableBackupDialog({
   onBusy: (busy: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [restore, setRestore] = useState(false);
   const [boot, setBoot] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -68,7 +71,7 @@ export function TableBackupDialog({
       setResult(report);
       setSaved(mode === "backup");
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -87,16 +90,17 @@ export function TableBackupDialog({
     );
   return (
     <Dialog
-      title="分区表备份与恢复"
-      subtitle={`${disk.name} · ${disk.hardware?.model ?? ""}`}
+      title={t("分区表备份与恢复")}
+      subtitle={`${diskTitle(disk, t)} · ${disk.hardware?.model ?? ""}`}
       wide
       onClose={() => {
         if (!inFlight.current) onClose();
       }}
     >
       <p className="table-backup-intro">
-        保存 MBR / EBR 或 GPT
-        主备分区表，用于保留当前分区布局。备份文件需要存到另一块磁盘。
+        {t(
+          "保存 MBR / EBR 或 GPT 主备分区表，用于保留当前分区布局。备份文件需要存到另一块磁盘。",
+        )}
       </p>
       <label className="table-backup-option">
         <input
@@ -106,8 +110,8 @@ export function TableBackupDialog({
           onChange={(e) => setBoot(e.target.checked)}
         />
         <span>
-          <strong>同时备份各分区的首扇区</strong>
-          <small>保存原始字节，不代表完整的文件系统或文件备份。</small>
+          <strong>{t("同时备份各分区的首扇区")}</strong>
+          <small>{t("保存原始字节，不代表完整的文件系统或文件备份。")}</small>
         </span>
       </label>
       <div className="table-backup-actions">
@@ -117,7 +121,7 @@ export function TableBackupDialog({
           onClick={() => void run("backup")}
         >
           <Save size={16} />
-          保存备份…
+          {t("保存备份…")}
         </button>
         <button
           className="button"
@@ -125,59 +129,59 @@ export function TableBackupDialog({
           onClick={() => void run("verify")}
         >
           <FileCheck2 size={16} />
-          验证备份文件…
+          {t("验证备份文件…")}
         </button>
         <button
           className="button"
           disabled={busy}
           onClick={() => setRestore(true)}
         >
-          从备份恢复…
+          {t("从备份恢复…")}
         </button>
       </div>
       {busy && (
         <p className="table-backup-progress" role="status">
           <LoaderCircle className="spin" size={16} />
-          正在处理，请等待文件选择或校验完成…
+          {t("正在处理，请等待文件选择或校验完成…")}
         </p>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {result && (
-        <section className="table-backup-result" aria-label="备份校验结果">
+        <section className="table-backup-result" aria-label={t("备份校验结果")}>
           <h3>
             <CheckCircle2 size={19} />
-            {saved ? "备份已保存并通过回读校验" : "备份文件校验通过"}
+            {saved ? t("备份已保存并通过回读校验") : t("备份文件校验通过")}
           </h3>
           <p>{result.name}</p>
           <dl>
             <div>
-              <dt>分区表</dt>
+              <dt>{t("分区表")}</dt>
               <dd>{result.info.scheme}</dd>
             </div>
             <div>
-              <dt>磁盘容量</dt>
+              <dt>{t("磁盘容量")}</dt>
               <dd>
-                {(result.info.size / 2 ** 30).toLocaleString(undefined, {
+                {(result.info.size / 2 ** 30).toLocaleString(language, {
                   maximumFractionDigits: 2,
                 })}{" "}
                 GiB
               </dd>
             </div>
             <div>
-              <dt>逻辑扇区</dt>
+              <dt>{t("逻辑扇区")}</dt>
               <dd>{result.info.sector} B</dd>
             </div>
             <div>
-              <dt>分区数量</dt>
-              <dd>{result.info.partitions}</dd>
+              <dt>{t("分区数量")}</dt>
+              <dd>{result.info.partitions.toLocaleString(language)}</dd>
             </div>
             <div>
-              <dt>分区表字节</dt>
-              <dd>{result.info.tableBytes.toLocaleString()} B</dd>
+              <dt>{t("分区表字节")}</dt>
+              <dd>{result.info.tableBytes.toLocaleString(language)} B</dd>
             </div>
             <div>
-              <dt>分区首扇区</dt>
-              <dd>{result.info.bootBytes.toLocaleString()} B</dd>
+              <dt>{t("分区首扇区")}</dt>
+              <dd>{result.info.bootBytes.toLocaleString(language)} B</dd>
             </div>
           </dl>
           {result.info.report.items
@@ -186,21 +190,22 @@ export function TableBackupDialog({
               <p className="table-backup-warning" key={item.code}>
                 <AlertTriangle size={17} />
                 <span>
-                  {item.title}：{item.detail}
+                  {catalogText(item.title)} · {catalogText(item.detail)}
                 </span>
               </p>
             ))}
           <details>
-            <summary>完整性与分区表检查</summary>
+            <summary>{t("完整性与分区表检查")}</summary>
             <p className="table-backup-digest">
-              文件 SHA-256
+              {t("文件 SHA-256")}
               <br />
               <code>{result.fileSha256}</code>
             </p>
             <ul>
               {result.info.report.items.map((item) => (
                 <li key={item.code}>
-                  <strong>{item.title}</strong>：{item.detail}
+                  <strong>{catalogText(item.title)}</strong> ·{" "}
+                  {catalogText(item.detail)}
                 </li>
               ))}
             </ul>
@@ -208,7 +213,9 @@ export function TableBackupDialog({
         </section>
       )}
       <p className="table-backup-note">
-        备份前会核对磁盘身份并锁定同盘卷。分区表损坏、状态不完整或卷被占用时会停止；验证文件只检查备份本身，不会读取或修改当前磁盘。
+        {t(
+          "备份前会核对磁盘身份并锁定同盘卷。分区表损坏、状态不完整或卷被占用时会停止；验证文件只检查备份本身，不会读取或修改当前磁盘。",
+        )}
       </p>
     </Dialog>
   );

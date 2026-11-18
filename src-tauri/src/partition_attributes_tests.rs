@@ -1,5 +1,6 @@
 use super::*;
 use crate::partitions::policy::{Disk, Partition, BASIC_DATA};
+use crate::table_archive::Kind;
 use std::io::Cursor;
 fn fixture(sector: usize) -> Archive {
     let bytes = crate::table_archive::tests::gpt(sector);

@@ -294,10 +294,14 @@ fn context(
 struct Pending {
     request: model::Request,
     preview: model::Preview,
+    expected: ExpectedState,
+    deadline: Instant,
+}
+struct ExpectedState {
     fingerprint: String,
     identity: String,
     native: String,
-    deadline: Instant,
+    state: State,
 }
 static STATE_PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 fn pending() -> std::sync::MutexGuard<'static, Option<Pending>> {
@@ -331,6 +335,7 @@ pub fn prepare(request: model::Request) -> Result<model::Preview, String> {
     {
         return Err("预览期间设备状态变化".into());
     }
+    let locale = crate::native_locale::current();
     let warning = match request.action {
         StateAction::Online => "联机后 Windows 可能自动挂载分区并写入文件系统元数据。不会更改磁盘/分区标识，也不会自动解除只读。",
         StateAction::Offline => "脱机后所有分区将无法供其他程序访问。请保存文件并关闭占用程序；不能独占锁定时拒绝操作。",
@@ -340,19 +345,37 @@ pub fn prepare(request: model::Request) -> Result<model::Preview, String> {
     let preview = model::Preview {
         token: uuid::Uuid::new_v4().to_string(),
         title: request.action.title().into(),
-        target: c.ctx.resolved.label.clone(),
+        target: format!(
+            "{} · {}",
+            locale.format(
+                "磁盘 {number}",
+                &[("number", &c.ctx.resolved.disk.number.to_string())]
+            ),
+            c.ctx
+                .resolved
+                .disk
+                .serial_number
+                .as_deref()
+                .unwrap_or_default(),
+        ),
         size: c.ctx.resolved.disk.size,
         partitions: c.ctx.parts.len(),
         before: c.state,
         after: request.action.desired(c.state),
-        warning: format!("{warning} 确认有效期为 5 分钟；失败时检查实际状态，不会自动重试或回滚。"),
+        warning: locale.sentences(&[
+            warning,
+            "确认有效期为 5 分钟；失败时检查实际状态，不会自动重试或回滚。",
+        ]),
     };
     *pending() = Some(Pending {
         request,
         preview: preview.clone(),
-        fingerprint: c.ctx.fingerprint,
-        identity: digest(&c.identity)?,
-        native,
+        expected: ExpectedState {
+            fingerprint: c.ctx.fingerprint,
+            identity: digest(&c.identity)?,
+            native,
+            state: c.state,
+        },
         deadline: Instant::now() + Duration::from_secs(300),
     });
     Ok(preview)
@@ -360,42 +383,115 @@ pub fn prepare(request: model::Request) -> Result<model::Preview, String> {
 pub fn execute(token: String) -> Result<model::Outcome, String> {
     let _guard = OPERATION.try_lock().map_err(|_| "另一项磁盘操作正在运行")?;
     let p = consume(&mut pending(), &token, Instant::now())?;
-    let c = context(&p.request, None)?;
-    if c.ctx.fingerprint != p.fingerprint || digest(&c.identity)? != p.identity {
+    execute_checked(&p.request, &p.expected, None, || Ok(()))
+}
+
+/// Called inside the batch guard, only after the movement and its journal have
+/// been verified. An independently offline disk cannot enter this path.
+pub(super) fn online_after_verified_move(
+    source: crate::data_tasks::Selection,
+    original_disk: &Disk,
+    raw: &crate::table_archive::Archive,
+    before_dispatch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut expected_disk = original_disk.clone();
+    expected_disk.is_offline = Some(true);
+    if original_disk.is_offline != Some(false) {
+        return Err("本批移动前未确认联机状态。".into());
+    }
+    change_for_verified_batch(
+        source,
+        StateAction::Online,
+        &expected_disk,
+        raw,
+        before_dispatch,
+    )
+}
+
+pub(super) fn offline_after_verified_batch(
+    source: crate::data_tasks::Selection,
+    expected_disk: &Disk,
+    raw: &crate::table_archive::Archive,
+) -> Result<(), String> {
+    change_for_verified_batch(source, StateAction::Offline, expected_disk, raw, || Ok(()))
+}
+
+fn change_for_verified_batch(
+    source: crate::data_tasks::Selection,
+    action: StateAction,
+    expected_disk: &Disk,
+    raw: &crate::table_archive::Archive,
+    before_dispatch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let request = model::Request { source, action };
+    let current = context(&request, None)?;
+    if &current.ctx.resolved.disk != expected_disk
+        || raw.source != request.source.target.0
+        || raw.size != expected_disk.size
+        || Some(raw.sector) != expected_disk.logical_sector_size
+    {
+        return Err("待切换状态的磁盘与本批已核对的设备身份不同。".into());
+    }
+    let mut file = device::device(&current.ctx.resolved, false)?;
+    raw.matches(&mut file, || Ok(()))?;
+    let expected = ExpectedState {
+        fingerprint: current.ctx.fingerprint.clone(),
+        identity: digest(&current.identity)?,
+        native: native(&file, &current.ctx, &current.id)?,
+        state: current.state,
+    };
+    drop(file);
+    execute_checked(&request, &expected, Some(raw), before_dispatch)?;
+    Ok(())
+}
+
+fn execute_checked(
+    request: &model::Request,
+    expected: &ExpectedState,
+    raw: Option<&crate::table_archive::Archive>,
+    before_dispatch: impl FnOnce() -> Result<(), String>,
+) -> Result<model::Outcome, String> {
+    let c = context(request, None)?;
+    if c.ctx.fingerprint != expected.fingerprint || digest(&c.identity)? != expected.identity {
         return Err("设备状态与预览不同，请重新预览。".into());
     }
     let locks = device::state_locks(&c.ctx.resolved)?;
-    let fresh = context(&p.request, Some((&c.ctx, &locks)))?;
+    let fresh = context(request, Some((&c.ctx, &locks)))?;
     device::verify_locks(
         &locks,
         &fresh.ctx.resolved,
         &fresh.ctx.parts.iter().collect::<Vec<_>>(),
     )?;
-    let f = device::device(&fresh.ctx.resolved, false)?;
-    if fresh.ctx.fingerprint != p.fingerprint
-        || digest(&fresh.identity)? != p.identity
-        || attributes(&f)? != p.preview.before
-        || native(&f, &fresh.ctx, &fresh.id)? != p.native
+    let mut f = device::device(&fresh.ctx.resolved, false)?;
+    if fresh.ctx.fingerprint != expected.fingerprint
+        || digest(&fresh.identity)? != expected.identity
+        || attributes(&f)? != expected.state
+        || native(&f, &fresh.ctx, &fresh.id)? != expected.native
     {
         return Err("锁定后的设备身份、布局或状态变化，未提交变更。".into());
     }
     // Resolve the provider-derived object again directly before the single call.
     let s = Session::open()?;
-    let disk = policy::target_disk(&s.disks, &p.request.source.target)?;
+    let disk = policy::target_disk(&s.disks, &request.source.target)?;
     policy::corroborate(disk, &s.legacy)?;
-    let (id, _) = identities(&s, disk, p.request.action)?;
+    let (id, _) = identities(&s, disk, request.action)?;
     if digest(disk)? != digest(&fresh.ctx.resolved.disk)?
-        || digest(&id)? != p.identity
+        || digest(&id)? != expected.identity
         || digest(&policy::layout(disk, &s.partitions)?)? != digest(&fresh.ctx.parts)?
     {
         return Err("提交前设备发生变化".into());
     }
+    if let Some(raw) = raw {
+        raw.matches(&mut f, || Ok(()))?;
+    }
+    let after_state = request.action.desired(expected.state);
     #[derive(Serialize)]
     #[serde(rename_all = "PascalCase")]
     struct ReadOnly {
         is_read_only: bool,
     }
-    let result = match p.request.action {
+    before_dispatch()?;
+    let result = match request.action {
         StateAction::Online => call::<Disk>(&s, &disk.path, "Online", ()),
         StateAction::Offline => call::<Disk>(&s, &disk.path, "Offline", ()),
         StateAction::ReadOnly | StateAction::ReadWrite => call::<Disk>(
@@ -403,32 +499,40 @@ pub fn execute(token: String) -> Result<model::Outcome, String> {
             &disk.path,
             "SetAttributes",
             ReadOnly {
-                is_read_only: p.preview.after.read_only,
+                is_read_only: after_state.read_only,
             },
         ),
     };
     // Release locks before resolving the new volume associations. Never retry a method.
     drop(locks);
-    result.map_err(|e| format!("{e} 状态可能已改变；请刷新核对，不会自动重试或回滚。"))?;
-    let after = disk_read_context(&p.request.source, None, true).map_err(|e| {
-        format!(
-            "方法已返回成功，但写后保护/布局核验未完成：{e}；请检查实际状态，不会自动重试或回滚。"
+    result.map_err(|e| {
+        crate::native_locale::diagnostic(
+            "{error} 状态可能已改变；请刷新核对，不会自动重试或回滚。",
+            &e,
         )
     })?;
+    let after = disk_read_context(&request.source, None, true).map_err(|e| {
+        crate::native_locale::diagnostic(
+            "方法已返回成功，但写后保护/布局核验未完成：{error}；请检查实际状态，不会自动重试或回滚。", &e)
+    })?;
     let mut expected_disk = fresh.ctx.resolved.disk.clone();
-    expected_disk.is_offline = Some(p.preview.after.offline);
-    expected_disk.is_read_only = Some(p.preview.after.read_only);
-    let checked = device::device(&after.resolved, false)?;
+    expected_disk.is_offline = Some(after_state.offline);
+    expected_disk.is_read_only = Some(after_state.read_only);
+    let mut checked = device::device(&after.resolved, false)?;
     if digest(&expected_disk)? != digest(&after.resolved.disk)?
-        || attributes(&checked)? != p.preview.after
-        || native(&checked, &after, &fresh.id)? != p.native
+        || attributes(&checked)? != after_state
+        || native(&checked, &after, &fresh.id)? != expected.native
     {
         return Err("方法已返回成功，但写后设备属性或原生布局与预期不一致；请检查实际状态，不会自动重试或回滚。".into());
     }
+    if let Some(raw) = raw {
+        raw.matches(&mut checked, || Ok(()))?;
+    }
+    let locale = crate::native_locale::current();
     Ok(model::Outcome {
-        message: format!(
-            "{}完成；设备身份、状态及原生分区布局核对通过。",
-            p.request.action.title()
+        message: locale.format(
+            "{action}完成；设备身份、状态及原生分区布局核对通过。",
+            &[("action", locale.text(request.action.title()))],
         ),
     })
 }

@@ -36,14 +36,15 @@ fn parts() -> Result<Vec<partitions::policy::Partition>, String> {
     p.sort_by_key(|p| (p.disk_number, p.partition_number));
     Ok(p)
 }
-fn table(serial: &str) -> Result<table_archive::Archive, String> {
+pub(super) fn table(serial: &str) -> Result<table_archive::Archive, String> {
     inventory()?;
     let s = selection(serial, None)?;
     let ctx = partitions::platform::table_inspect_context(&s)?;
     let mut f = data_windows::device(&ctx.resolved, false)?;
-    let archive = table_archive::capture(&mut f, 16 * GIB, 512, s.target.0, false, || Ok(()))?;
+    let sector = test_sector();
+    let archive = table_archive::capture(&mut f, 16 * GIB, sector, s.target.0, false, || Ok(()))?;
     if !table_restore::archive_layout(&archive)?
-        .agrees(&extfs::restore_native(&f, Some(&ctx.parts.iter().collect::<Vec<_>>()), 512)?.0)
+        .agrees(&extfs::restore_native(&f, Some(&ctx.parts.iter().collect::<Vec<_>>()), sector)?.0)
     {
         return Err("Raw/native GPT disagrees".into());
     }

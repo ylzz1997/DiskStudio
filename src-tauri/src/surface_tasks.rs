@@ -270,8 +270,11 @@ pub fn load_progress(target: crate::partitions::Target) -> Result<Option<Snapsho
             return Err("请先暂停当前检测。".into());
         }
         let Some(path) = rfd::FileDialog::new()
-            .set_title("加载当前磁盘的检测进度")
-            .add_filter("DiskStudio 检测进度", &["dsscan"])
+            .set_title(crate::native_locale::text("加载当前磁盘的检测进度"))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 检测进度"),
+                &["dsscan"],
+            )
             .pick_file()
         else {
             return Ok(None);
@@ -370,8 +373,11 @@ fn save_file(
     use crate::data_windows as platform;
     use std::{fs::OpenOptions, io::Write};
     let Some(path) = rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter("DiskStudio 检测文件", &[extension])
+        .set_title(crate::native_locale::text(title))
+        .add_filter(
+            crate::native_locale::text("DiskStudio 检测文件"),
+            &[extension],
+        )
         .set_file_name(name)
         .save_file()
     else {

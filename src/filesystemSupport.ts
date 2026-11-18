@@ -26,7 +26,7 @@ export const filesystemSupport: readonly FilesystemSupport[] = [
     browse: "支持",
     recover: "连续空闲簇候选",
     format: "支持",
-    resize: "未实现",
+    resize: "末端缩放 · 现有分配表",
     allocatedCopy: "分配表校验",
     freeWipe: "分配表校验",
   },
@@ -35,7 +35,7 @@ export const filesystemSupport: readonly FilesystemSupport[] = [
     browse: "支持",
     recover: "不含删除的碎片链",
     format: "支持",
-    resize: "未实现",
+    resize: "末端缩放 · 现有位图簇链",
     allocatedCopy: "位图校验",
     freeWipe: "位图校验",
   },
@@ -58,6 +58,12 @@ export const filesystemSupport: readonly FilesystemSupport[] = [
     freeWipe: "未实现",
   },
 ];
+
+export function isFatResizeFilesystem(filesystem: string) {
+  return ["FAT", "FAT12", "FAT16", "FAT32", "EXFAT"].includes(
+    filesystem.toUpperCase(),
+  );
+}
 
 export function selectedFilesystemSupport(
   disk: Disk,
@@ -86,6 +92,12 @@ export function selectedFilesystemSupport(
     partition.fs.toUpperCase() === "NTFS" &&
     target.resizePartitions.includes(number)
   );
+  const fatResize = !!(
+    coherent &&
+    number != null &&
+    isFatResizeFilesystem(partition.fs) &&
+    target.fatResizePartitions.includes(number)
+  );
   return {
     // The partition GUID may permit inspection, but cannot establish an Ext FS.
     filesystem: partition.fs,
@@ -98,6 +110,8 @@ export function selectedFilesystemSupport(
       ? "NTFS 末端缩放，容量范围由 Windows 检查"
       : ext
         ? "需显式检查 Ext 文件系统及支持的特性"
-        : "当前分区不可调整大小",
+        : fatResize
+          ? "需显式检查 FAT 或 exFAT 的完整目录、分配与尾部空间"
+          : "当前分区不可调整大小",
   };
 }

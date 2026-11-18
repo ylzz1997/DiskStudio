@@ -218,6 +218,38 @@ fn named_resident_streams_keep_raw_identity_preview_and_safe_output_mapping() {
     write_record(&mut bytes, at, b, a);
     assert!(extract_bytes(&bytes, c).unwrap_err().contains("身份"));
 }
+
+#[test]
+fn merge_streams_include_unnamed_file_data_and_literal_named_data() {
+    let mut bytes = ORIGINAL.to_vec();
+    insert(
+        &mut bytes,
+        vec![resident(&raw("$DATA"), 100, b"named")],
+        false,
+    );
+    let (record, _, _, _) = record_info(&bytes, "file-with-12345");
+    let mut reader = Cursor::new(&bytes);
+    let ntfs = ntfs::Ntfs::new(&mut reader).unwrap();
+    let file = ntfs.file(&mut reader, record).unwrap();
+    assert_eq!(enumerate(&mut reader, &file).unwrap().len(), 1);
+    let streams = enumerate_for_merge(&mut reader, &file).unwrap();
+    assert_eq!(streams.len(), 2);
+    for (stream, expected) in streams.iter().zip([&b"12345"[..], &b"named"[..]]) {
+        let mut actual = Vec::new();
+        assert_eq!(
+            extract_for_merge(
+                &mut reader,
+                &file,
+                &stream.identity,
+                &mut actual,
+                |_| Ok(())
+            )
+            .unwrap(),
+            expected.len() as u64
+        );
+        assert_eq!(actual, expected);
+    }
+}
 #[test]
 fn named_plain_sparse_initialized_and_deleted_allocation_are_checked() {
     for sparse in [false, true] {
@@ -381,7 +413,7 @@ fn stream_names_and_attribute_bounds_reject_malformed_without_panics() {
         for byte in [0, 1, 128, 255] {
             let b = vec![byte; n];
             let _ = attribute_name(&b);
-            let _ = references(&b);
+            let _ = references(&b, Scope::Recovery);
         }
     }
     let mut bytes = ORIGINAL.to_vec();

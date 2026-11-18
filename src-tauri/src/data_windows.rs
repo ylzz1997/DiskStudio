@@ -35,6 +35,37 @@ pub struct Resolved {
     pub partition_ranges: Vec<crate::used_space::Span>,
     pub(crate) data_lock_proof: Option<DataLockProof>,
 }
+impl Resolved {
+    pub(crate) fn verify_partition_snapshot(
+        &self,
+        disk: &Disk,
+        parts: &[&Partition],
+    ) -> Result<(), String> {
+        let proof = self.data_lock_proof.as_ref().ok_or("缺少卷和分区凭据。")?;
+        if lock_fingerprint(
+            disk,
+            parts,
+            &proof.associations,
+            &proof.source,
+            proof.writing,
+        )? != proof.fingerprint
+        {
+            return Err("完整分区快照或保护状态已变化。".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn partition_filesystem(&self, number: u32) -> Option<&str> {
+        self.data_lock_proof
+            .as_ref()?
+            .associations
+            .iter()
+            .find(|(partition, _)| *partition == number)?
+            .1
+            .file_system
+            .as_deref()
+    }
+}
 #[derive(Clone)]
 pub(crate) struct DataLockProof {
     source: Selection,
@@ -324,18 +355,20 @@ fn resolve_impl(
     } else {
         None
     };
+    let locale = crate::native_locale::current();
+    let disk_title = locale.format("磁盘 {number}", &[("number", &d.number.to_string())]);
+    let location = match s.partition {
+        Some(number) => format!(
+            "{disk_title} / {}",
+            locale.format("分区 {partition}", &[("partition", &number.to_string())])
+        ),
+        None => disk_title,
+    };
     Ok(Resolved {
         disk: d.clone(),
         offset,
         size,
-        label: format!(
-            "磁盘 {}{} · {}",
-            d.number,
-            s.partition
-                .map(|n| format!(" / 分区 {n}"))
-                .unwrap_or_default(),
-            d.serial_number.as_deref().unwrap_or("")
-        ),
+        label: format!("{location} · {}", d.serial_number.as_deref().unwrap_or("")),
         volumes,
         ntfs_volume,
         data_lock_proof,
@@ -601,7 +634,7 @@ fn validate_lock_extent(
     }
     Ok(())
 }
-fn verify_offline_device(r: &Resolved) -> Result<(), String> {
+pub(crate) fn verify_offline_device(r: &Resolved) -> Result<(), String> {
     let file = device(r, false)?;
     let mut bytes = [0; 16];
     let n = control(&file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)?;
@@ -619,8 +652,17 @@ fn validate_offline_attributes(disk: &Disk, bytes: &[u8]) -> Result<(), String> 
     Ok(())
 }
 pub fn offline(file: &File) -> Result<(), String> {
+    set_offline(file, false)
+}
+
+pub(crate) fn persist_offline(file: &File) -> Result<(), String> {
+    set_offline(file, true)
+}
+
+fn set_offline(file: &File, persist: bool) -> Result<(), String> {
     let mut attributes = [0u8; 40];
     attributes[0..4].copy_from_slice(&40u32.to_le_bytes());
+    attributes[4] = u8::from(persist);
     attributes[8..16].copy_from_slice(&1u64.to_le_bytes());
     attributes[16..24].copy_from_slice(&1u64.to_le_bytes());
     control(file, IOCTL_DISK_SET_DISK_ATTRIBUTES, &attributes, &mut [])?;
@@ -700,7 +742,7 @@ impl FileLocation {
         Ok(())
     }
 }
-fn volume_root(path: &str) -> Result<String, String> {
+pub(crate) fn volume_root(path: &str) -> Result<String, String> {
     let tail = path
         .strip_prefix("\\\\?\\Volume{")
         .ok_or("文件不在本机普通卷上")?;

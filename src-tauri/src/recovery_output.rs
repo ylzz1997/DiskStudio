@@ -377,7 +377,7 @@ mod tests {
         cleanup(parent, destination, &plan);
     }
     #[test]
-    fn native_nested_directory_times_survive_child_writes_and_handle_close() {
+    fn native_nested_directory_metadata_is_verified_after_child_writes() {
         use crate::{
             file_metadata::{Metadata, Stamp},
             recovery_export::Folder,
@@ -427,15 +427,19 @@ mod tests {
         for outcome in &batch.directories {
             let report = outcome.metadata.as_ref().unwrap();
             assert_eq!(report.warnings(), 0, "{report:?}");
+            let access = report.fields.iter().find(|f| f.name == "accessed").unwrap();
+            assert_eq!(access.status, "preserved");
+            assert_eq!(access.observed.as_deref(), Some("133444736000000000"));
         }
         // The final child writer and each attribute handle have closed. Observe
-        // through independent native metadata, not the production report.
+        // creation, last write and attributes through independent metadata.
+        // NTFS can update last access on subsequent I/O, including a probe of
+        // the nested path. Check that field on the handle used to set it above.
         for name in ["d1", "d1/d2"] {
             let actual = std::fs::metadata(destination.display.join(name)).unwrap();
             assert!(actual.is_dir());
             assert_eq!(actual.creation_time(), 133444736000000000);
             assert_eq!(actual.last_write_time(), 133444736000000000);
-            assert_eq!(actual.last_access_time(), 133444736000000000);
             assert_eq!(actual.file_attributes() & 0x22, 0x22);
         }
         assert_eq!(

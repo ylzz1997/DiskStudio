@@ -19,7 +19,7 @@ struct Entry {
     directory: bool,
     metadata: crate::file_metadata::Metadata,
 }
-fn decode(bits: u8, entries: &Entries, size: u64) -> Result<Entry, String> {
+fn decode(bits: u8, entries: &[(u64, Vec<u8>)], size: u64) -> Result<Entry, String> {
     if entries.is_empty() || entries.len() > 21 {
         return Err("保存目录项组长度无效".into());
     }
@@ -112,6 +112,33 @@ fn decode(bits: u8, entries: &Entries, size: u64) -> Result<Entry, String> {
         return Err("目录项名称无效".into());
     }
     Ok(entry)
+}
+
+pub(super) struct ExfatStream {
+    pub first: u32,
+    pub length: u64,
+    pub contiguous: bool,
+    pub directory: bool,
+}
+
+pub(super) fn exfat_live_stream(
+    entries: &[(u64, Vec<u8>)],
+    size: u64,
+) -> Result<ExfatStream, String> {
+    let entry = decode(64, entries, size)?;
+    if entry.deleted
+        || entry.valid > entry.size
+        || (entry.size == 0 && (entry.first != 0 || entry.directory))
+        || (entry.directory && entry.valid != entry.size)
+    {
+        return Err("exFAT 活动数据流的长度或状态无效。".into());
+    }
+    Ok(ExfatStream {
+        first: entry.first,
+        length: entry.size,
+        contiguous: entry.contiguous,
+        directory: entry.directory,
+    })
 }
 pub(super) fn extraction_metadata(
     bits: u8,
@@ -622,9 +649,12 @@ pub fn continue_scan(
             cp.records += step as u64;
             if cp.count == MAX_RESULTS {
                 cp.sealed = true;
-                return Ok(format!(
-                    "达到 {MAX_RESULTS} 条结果上限；已跳过 {} 个无效目录项。",
-                    cp.skipped
+                return Ok(crate::native_locale::current().format(
+                    "达到 {limit} 条结果上限；已跳过 {skipped} 个无效目录项。",
+                    &[
+                        ("limit", &MAX_RESULTS.to_string()),
+                        ("skipped", &cp.skipped.to_string()),
+                    ],
                 ));
             }
             if end {
@@ -636,7 +666,10 @@ pub fn continue_scan(
     }
     cp.sealed = true;
     tick(cp.records, cp.records)?;
-    Ok(format!("扫描完成，找到 {} 个文件，跳过 {} 个无效或未支持的目录项。不遍历已删除、重复引用或超过 64 层的目录；已删除连续文件仅为候选，不能保证未覆盖或未被 TRIM。",cp.count,cp.skipped))
+    Ok(crate::native_locale::current().format(
+        "扫描完成，找到 {count} 个文件，跳过 {skipped} 个无效或未支持的目录项。不遍历已删除、重复引用或超过 64 层的目录；已删除连续文件仅为候选，不能保证未覆盖或未被 TRIM。",
+        &[("count", &cp.count.to_string()), ("skipped", &cp.skipped.to_string())],
+    ))
 }
 fn make_candidate(
     id: usize,

@@ -198,8 +198,9 @@ pub fn execute(token: String) -> Result<Outcome, String> {
                 return Err("原生布局或源扇区与预览不同，未写入。".into());
             }
             *sector_tasks::page_state() = None;
-            device::offline(&file)
-                .map_err(|e| format!("{e}；磁盘可能已脱机，尚未发出扇区写入。"))?;
+            device::offline(&file).map_err(|e| {
+                crate::native_locale::diagnostic("磁盘可能已脱机，尚未发出扇区写入。{error}", &e)
+            })?;
             let result = (|| -> Result<String, String> {
                 if extfs::layout_fingerprint(&extfs::native_layout(&file, &parts)?, None)
                     != item.native
@@ -220,8 +221,12 @@ pub fn execute(token: String) -> Result<Outcome, String> {
                 }
                 Ok(hash)
             })();
-            let sha256 = result
-                .map_err(|e| format!("{e} 磁盘保持脱机；可能存在部分改动，未重试或回滚。"))?;
+            let sha256 = result.map_err(|e| {
+                crate::native_locale::diagnostic(
+                    "磁盘保持脱机；可能存在部分改动，未重试或回滚。{error}",
+                    &e,
+                )
+            })?;
             Ok(Outcome {message:format!("已保存 {} 个字节改动，整个扇区 SHA-256 回读一致。磁盘保持脱机，请核对后再手动联机。",item.plan.changes.len()),sha256})
         })
     }

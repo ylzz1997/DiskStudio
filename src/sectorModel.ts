@@ -54,12 +54,19 @@ export function buildSectorQuery(
   return {
     mode,
     conditions: inputs.map((input, i) => {
-      if (!input.value) throw Error(`请填写条件 ${i + 1}。`);
+      const number = i + 1;
+      if (!input.value)
+        throw new MessageError("请填写条件 {number}。", { number });
       if (!/^(?:\d+|0x[\da-f]+)$/i.test(input.offset.trim()))
-        throw Error(`条件 ${i + 1} 的偏移须为十进制或 0x 开头的十六进制。`);
+        throw new MessageError(
+          "条件 {number} 的偏移须为十进制或 0x 开头的十六进制。",
+          { number },
+        );
       const offset = Number(input.offset.trim());
       if (!Number.isSafeInteger(offset) || offset < 0 || offset >= 65536)
-        throw Error(`条件 ${i + 1} 的偏移须小于 64 KiB。`);
+        throw new MessageError("条件 {number} 的偏移须小于 64 KiB。", {
+          number,
+        });
       return {
         pattern: { encoding: input.encoding, value: input.value },
         offset,
@@ -145,3 +152,4 @@ export function stageSectorBytes(
     next[offset + i / 2] = parseInt(hex.slice(i, i + 2), 16);
   return next;
 }
+import { MessageError } from "./i18n/translate";

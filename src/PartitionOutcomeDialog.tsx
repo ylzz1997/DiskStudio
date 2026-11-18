@@ -1,5 +1,6 @@
 import { Dialog, FormError, Hint } from "./components";
 import type { PartitionOutcome } from "./partitionOutcome";
+import { useLocale } from "./i18n/LanguageProvider";
 
 export function PartitionOutcomeDialog({
   outcome,
@@ -10,6 +11,8 @@ export function PartitionOutcomeDialog({
   busy: boolean;
   onClose: () => void;
 }) {
+  const { t, catalogText } = useLocale();
+  const { plan } = outcome;
   const close = () => {
     if (!busy) onClose();
   };
@@ -17,35 +20,48 @@ export function PartitionOutcomeDialog({
     <Dialog
       title={
         outcome.status === "verified"
-          ? "操作已完成并核对"
+          ? t("操作已完成并核对")
           : outcome.status === "unverified"
-            ? "操作结果尚未核对完整"
-            : "操作未能完成"
+            ? t("操作结果尚未核对完整")
+            : t("操作未能完成")
       }
-      subtitle={`${outcome.plan.targetName}${outcome.plan.partition == null ? "" : ` · 分区 ${outcome.plan.partition}`}`}
+      subtitle={
+        plan.partition == null
+          ? plan.targetName
+          : `${plan.targetName} · ${t("分区 {partition}", { partition: plan.partition })}`
+      }
       onClose={close}
       footer={
         <button className="button primary" disabled={busy} onClick={close}>
-          {busy ? "正在刷新列表…" : "关闭结果"}
+          {busy ? t("正在刷新列表…") : t("关闭结果")}
         </button>
       }
     >
       <dl className="detail-list">
-        <dt>操作</dt>
-        <dd>{outcome.plan.title}</dd>
-        <dt>目标序列号</dt>
+        <dt>{t("操作")}</dt>
+        <dd>{catalogText(plan.title)}</dd>
+        <dt>{t("目标序列号")}</dt>
         <dd>{outcome.plan.serial}</dd>
       </dl>
       <p
         className="partition-outcome-message"
         role={outcome.status === "verified" ? "status" : "alert"}
       >
-        {outcome.message}
+        {catalogText(outcome.message)}
       </p>
       {outcome.status !== "verified" && (
-        <Hint>请先检查实际状态。操作可能已部分执行；不会自动重试或回滚。</Hint>
+        <Hint>
+          {t("请先检查实际状态。操作可能已部分执行；不会自动重试或回滚。")}
+        </Hint>
       )}
-      <FormError message={outcome.refreshError} />
+      <FormError
+        message={
+          outcome.refreshError &&
+          t("列表刷新失败：{error}", {
+            error: catalogText(outcome.refreshError),
+          })
+        }
+      />
     </Dialog>
   );
 }

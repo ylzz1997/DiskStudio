@@ -484,7 +484,10 @@ pub(crate) fn restore_native(
         .collect();
     Ok((layout, protected, layout_fingerprint(&bytes, None)))
 }
-fn restore_model(bytes: &[u8], sector: u64) -> Result<crate::table_restore::Layout, String> {
+pub(crate) fn restore_model(
+    bytes: &[u8],
+    sector: u64,
+) -> Result<crate::table_restore::Layout, String> {
     use crate::table_restore::{Entry, Layout};
     let gpt = unsafe {
         bytes
@@ -549,7 +552,7 @@ fn restore_model(bytes: &[u8], sector: u64) -> Result<crate::table_restore::Layo
         entries,
     })
 }
-fn resize_layout(
+pub(crate) fn resize_layout(
     file: &File,
     original: &[u8],
     partition: &Partition,
@@ -771,12 +774,13 @@ pub fn execute(
         }
         Ok(())
     };
-    work().map_err(|e| format!("{e} 磁盘已保持脱机；操作可能部分完成。请核对分区与文件系统状态，不要直接重试；不会自动回滚。"))?;
+    work().map_err(|e| crate::native_locale::diagnostic("{error} 磁盘已保持脱机；操作可能部分完成。请核对分区与文件系统状态，不要直接重试；不会自动回滚。", &e))?;
+    let locale = crate::native_locale::current();
     Ok(Outcome {
         verified: true,
-        message: format!(
-            "{}已完成，文件系统检查、容量和分区边界核对通过。磁盘保持脱机，可在 Linux 中挂载使用。",
-            request.action.title()
+        message: locale.format(
+            "{action}已完成，文件系统检查、容量和分区边界核对通过。磁盘保持脱机，可在 Linux 中挂载使用。",
+            &[("action", locale.text(request.action.title()))],
         ),
     })
 }

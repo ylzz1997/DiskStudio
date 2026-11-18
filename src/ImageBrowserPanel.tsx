@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { FileSearch, FolderOpen, HardDrive, X } from "lucide-react";
+import { useLocale } from "./i18n/LanguageProvider";
 import { formatSize } from "./types";
 
 export type ImageBrowseOptions = {
@@ -35,6 +36,7 @@ export function ImageBrowserPanel({
   onClose: () => void;
   onRead: (partition: number, mode: ImageBrowseMode) => void;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [options, setOptions] = useState<ImageBrowseOptions>({
     kind: "disk",
     sector: 512,
@@ -46,13 +48,13 @@ export function ImageBrowserPanel({
     setMode(info?.scanMode ?? "existing");
   }, [info?.id, info?.scanPartition, info?.scanMode]);
   return (
-    <section className="data-panel backup-browser" aria-label="浏览镜像">
+    <section className="data-panel backup-browser" aria-label={t("浏览镜像")}>
       <div className="section-heading">
-        <h2>浏览镜像文件</h2>
+        <h2>{t("浏览镜像文件")}</h2>
         {info && (
           <button className="button" disabled={busy} onClick={onClose}>
             <X size={15} />
-            关闭镜像
+            {t("关闭镜像")}
           </button>
         )}
       </div>
@@ -63,8 +65,9 @@ export function ImageBrowserPanel({
             <strong title={info.name}>{info.name}</strong>
             <span>
               {info.format} ·{" "}
-              {info.options.kind === "disk" ? "整盘镜像" : "分区镜像"} ·{" "}
-              {formatSize(info.size)} · {info.options.sector} B 扇区
+              {info.options.kind === "disk" ? t("整盘镜像") : t("分区镜像")} ·{" "}
+              {formatSize(info.size)} ·{" "}
+              {t("{size} B 扇区", { size: info.options.sector })}
             </span>
           </div>
         </div>
@@ -72,14 +75,16 @@ export function ImageBrowserPanel({
       <details className="image-source-settings" open={!info}>
         <summary>
           {info
-            ? `打开其他镜像 · 当前 ${info.files.length} 个来源文件`
-            : "选择镜像文件"}
+            ? t("打开其他镜像 · 当前 {count} 个来源文件", {
+                count: info.files.length.toLocaleString(language),
+              })
+            : t("选择镜像文件")}
         </summary>
         <div className="image-browser-open-row">
           <label>
-            RAW 范围
+            {t("RAW 范围")}
             <select
-              aria-label="镜像范围"
+              aria-label={t("镜像范围")}
               value={options.kind}
               disabled={busy}
               onChange={(e) =>
@@ -89,14 +94,14 @@ export function ImageBrowserPanel({
                 })
               }
             >
-              <option value="disk">整盘镜像（GPT / MBR）</option>
-              <option value="partition">分区镜像（文件系统）</option>
+              <option value="disk">{t("整盘镜像（GPT / MBR）")}</option>
+              <option value="partition">{t("分区镜像（文件系统）")}</option>
             </select>
           </label>
           <label>
-            RAW 扇区
+            {t("RAW 扇区")}
             <select
-              aria-label="镜像浏览扇区大小"
+              aria-label={t("镜像浏览扇区大小")}
               value={options.sector}
               disabled={busy}
               onChange={(e) =>
@@ -116,7 +121,7 @@ export function ImageBrowserPanel({
             onClick={() => onOpen(options)}
           >
             <FolderOpen size={16} />
-            {info ? "更换镜像…" : "打开镜像…"}
+            {info ? t("更换镜像…") : t("打开镜像…")}
           </button>
         </div>
         {info && <p className="data-footnote">{info.files.join(" · ")}</p>}
@@ -124,15 +129,15 @@ export function ImageBrowserPanel({
       {info && (
         <>
           <label className="backup-browser-partition">
-            镜像中的分区
+            {t("镜像中的分区")}
             <select
-              aria-label="镜像中的分区"
+              aria-label={t("镜像中的分区")}
               value={partition}
               disabled={busy || !info.partitions.length}
               onChange={(e) => setPartition(e.target.value)}
             >
               {!info.partitions.length && (
-                <option value="">没有可浏览的分区</option>
+                <option value="">{t("没有可浏览的分区")}</option>
               )}
               {info.partitions.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -142,49 +147,48 @@ export function ImageBrowserPanel({
             </select>
           </label>
           <label className="backup-browser-partition">
-            文件范围
+            {t("文件范围")}
             <select
-              aria-label="镜像文件范围"
+              aria-label={t("镜像文件范围")}
               value={mode}
               disabled={busy}
               onChange={(e) => setMode(e.target.value as ImageBrowseMode)}
             >
-              <option value="existing">现存文件</option>
-              <option value="allFiles">现存文件与删除候选</option>
-              <option value="deleted">仅删除候选</option>
+              <option value="existing">{t("现存文件")}</option>
+              <option value="allFiles">{t("现存文件与删除候选")}</option>
+              <option value="deleted">{t("仅删除候选")}</option>
             </select>
           </label>
           {info.warning && (
             <details className="image-source-settings">
-              <summary>镜像检查说明</summary>
-              <p className="data-footnote">{info.warning}</p>
+              <summary>{t("镜像检查说明")}</summary>
+              <p className="data-footnote">{catalogText(info.warning)}</p>
             </details>
           )}
           <div className="data-action-row">
-            <span>读取后可预览、搜索并提取文件或整个目录。</span>
+            <span>{t("读取后可预览、搜索并提取文件或整个目录。")}</span>
             <button
               className="button primary"
               disabled={busy || !available || partition === ""}
               onClick={() => onRead(Number(partition), mode)}
             >
               <FileSearch size={16} />
-              读取目录
+              {t("读取目录")}
             </button>
           </div>
         </>
       )}
       <details className="image-source-settings">
-        <summary>支持范围与读取说明</summary>
+        <summary>{t("支持范围与读取说明")}</summary>
         <p className="data-footnote">
-          支持 RAW/IMG、VHD/AVHD、VHDX、VDI、VMDK 和独立 Parallels
-          文件的已实现容器类型；可明确补选 VHD 父链与 VMDK 分卷。脏 VHDX
-          日志、其他差分链和目录包快照暂不支持。
+          {t(
+            "支持 RAW/IMG、VHD/AVHD、VHDX、VDI、VMDK 和独立 Parallels 文件的已实现容器类型；可明确补选 VHD 父链与 VMDK 分卷。脏 VHDX 日志、其他差分链和目录包快照暂不支持。",
+          )}
         </p>
         <p className="data-footnote">
-          文件系统支持 NTFS、FAT、exFAT，以及干净卸载的 Ext2/3/4
-          现存文件。源镜像只读、不挂载；提取到其他磁盘并逐文件核对
-          SHA-256。删除候选不保证内容完整。RAW
-          分区镜像需手动选择正确范围和扇区。
+          {t(
+            "文件系统支持 NTFS、FAT、exFAT，以及干净卸载的 Ext2/3/4 现存文件。源镜像只读、不挂载；提取到其他磁盘并逐文件核对 SHA-256。删除候选不保证内容完整。RAW 分区镜像需手动选择正确范围和扇区。",
+          )}
         </p>
       </details>
     </section>

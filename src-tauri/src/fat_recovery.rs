@@ -2,6 +2,8 @@
 //! are not guessed: only contiguous free extents are offered as candidates.
 #[path = "fat_allocation.rs"]
 pub mod allocation;
+#[path = "fat_resize.rs"]
+pub mod resize;
 use crate::recovery::{Candidate, Locator, ScanMode, MAX_RESULTS};
 use crate::recovery_tree::{Directory, MAX_DEPTH, ROOT};
 pub(crate) use scan_progress::directory_metadata;
@@ -21,6 +23,15 @@ fn u32at(b: &[u8], n: usize) -> u32 {
 }
 fn u64at(b: &[u8], n: usize) -> u64 {
     u64::from_le_bytes(b[n..n + 8].try_into().unwrap())
+}
+pub(crate) fn exfat_boot_checksum(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| ![106, 107, 112].contains(i))
+        .fold(0u32, |checksum, (_, &byte)| {
+            checksum.rotate_right(1).wrapping_add(u32::from(byte))
+        })
 }
 fn at<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Result<Vec<u8>, String> {
     r.seek(SeekFrom::Start(offset)).map_err(e)?;
@@ -84,12 +95,7 @@ impl Fs {
             }
             // Validate the main boot region checksum; mutable flags and PercentInUse are excluded.
             let boot_region = at(r, 0, (sector * 12) as usize)?;
-            let mut checksum = 0u32;
-            for (i, v) in boot_region[..sector as usize * 11].iter().enumerate() {
-                if ![106, 107, 112].contains(&i) {
-                    checksum = checksum.rotate_right(1).wrapping_add(*v as u32);
-                }
-            }
+            let checksum = exfat_boot_checksum(&boot_region[..sector as usize * 11]);
             if boot_region[sector as usize * 11..]
                 .chunks_exact(4)
                 .any(|x| u32at(x, 0) != checksum)
@@ -699,7 +705,10 @@ mod tests {
                 .name,
             "FOLDER"
         );
-        assert!(message.contains("跳过 1"));
+        assert!(
+            message.contains("skipped 1 invalid or unsupported directory entries"),
+            "{message}"
+        );
         for file in found {
             let mut output = Vec::new();
             crate::recovery::extract(&mut Cursor::new(&b), &file, &mut output, 99, |_| Ok(()))
@@ -931,7 +940,10 @@ mod tests {
                 .name,
             "Folder"
         );
-        assert!(message.contains("跳过 1"));
+        assert!(
+            message.contains("skipped 1 invalid or unsupported directory entries"),
+            "{message}"
+        );
         for c in files {
             let mut out = vec![];
             crate::recovery::extract(&mut Cursor::new(&b), &c, &mut out, 99, |_| Ok(())).unwrap();

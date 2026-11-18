@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { HardDrive, LoaderCircle, StopCircle } from "lucide-react";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
 import {
   conversionFormats,
   type ImageOutputFormat,
@@ -22,6 +23,7 @@ export function ImageCreationDialog({
   onClose: () => void;
   onBusy: (busy: boolean) => void;
 }) {
+  const { t, catalogText } = useLocale();
   const [format, setFormat] = useState<ImageOutputFormat>("vhdxDynamic");
   const [capacity, setCapacity] = useState("8"),
     [unit, setUnit] = useState<CapacityUnit>("GiB"),
@@ -30,7 +32,9 @@ export function ImageCreationDialog({
     [table, setTable] = useState<ImageTable>("gpt");
   const [busy, setBusy] = useState(false),
     [stopping, setStopping] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState<{ message: string; polling?: boolean } | null>(
+      null,
+    );
   const [report, setReport] = useState<ImageConversionReport | null>(null);
   const job = useRef<string | null>(null),
     alive = useRef(true),
@@ -45,7 +49,7 @@ export function ImageCreationDialog({
   }
   function reset() {
     setReport(null);
-    setError("");
+    setError(null);
   }
   useEffect(() => {
     alive.current = true;
@@ -79,7 +83,10 @@ export function ImageCreationDialog({
         }
       } catch (e) {
         if (!disposed)
-          setError(`暂时无法读取任务状态：${String(e)}。请等待状态恢复。`);
+          setError({
+            message: e instanceof Error ? e.message : String(e),
+            polling: true,
+          });
       }
       if (!disposed) timer = setTimeout(poll, 350);
     }
@@ -124,7 +131,7 @@ export function ImageCreationDialog({
       setReport(created);
     } catch (e) {
       if (alive.current) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError({ message: e instanceof Error ? e.message : String(e) });
         activity(false);
       }
     }
@@ -136,25 +143,25 @@ export function ImageCreationDialog({
       await invoke("image_conversion_cancel", { id: job.current });
     } catch (e) {
       setStopping(false);
-      setError(String(e));
+      setError({ message: e instanceof Error ? e.message : String(e) });
     }
   }
   const phase =
     report?.state === "checkingSource"
-      ? "复核生成内容"
+      ? t("复核生成内容")
       : report?.state === "verifying"
-        ? "回读目标镜像"
+        ? t("回读目标镜像")
         : report?.state === "completed"
-          ? "创建完成"
+          ? t("创建完成")
           : report?.state === "canceled"
-            ? "创建已停止"
+            ? t("创建已停止")
             : report?.state === "failed"
-              ? "创建未完成"
-              : "生成镜像";
+              ? t("创建未完成")
+              : t("生成镜像");
   return (
     <Dialog
-      title="创建虚拟磁盘"
-      subtitle="选择容量与格式，保存为新的镜像文件"
+      title={t("创建虚拟磁盘")}
+      subtitle={t("选择容量与格式，保存为新的镜像文件")}
       onClose={() => {
         if (!working.current) onClose();
       }}
@@ -167,7 +174,7 @@ export function ImageCreationDialog({
               onClick={() => void stop()}
             >
               <StopCircle size={16} />
-              {stopping ? "正在停止…" : "停止创建"}
+              {stopping ? t("正在停止…") : t("停止创建")}
             </button>
           ) : (
             <button
@@ -176,18 +183,18 @@ export function ImageCreationDialog({
               onClick={() => void start()}
             >
               <HardDrive size={16} />
-              选择保存位置并创建
+              {t("选择保存位置并创建")}
             </button>
           )}
           <button className="button" disabled={busy} onClick={onClose}>
-            关闭
+            {t("关闭对话框")}
           </button>
         </>
       }
     >
       <fieldset className="maintenance-fields" disabled={busy}>
         <label>
-          镜像格式
+          {t("镜像格式")}
           <select
             value={format}
             onChange={(e) => {
@@ -197,16 +204,18 @@ export function ImageCreationDialog({
           >
             {conversionFormats.map((f) => (
               <option key={f.value} value={f.value}>
-                {f.label}
+                {catalogText(f.label)}
               </option>
             ))}
           </select>
         </label>
         <p className="image-conversion-note">
-          {conversionFormats.find((f) => f.value === format)?.detail}
+          {catalogText(
+            conversionFormats.find((f) => f.value === format)?.detail ?? "",
+          )}
         </p>
         <label>
-          容量
+          {t("容量")}
           <select
             value={preset}
             onChange={(e) => {
@@ -225,13 +234,13 @@ export function ImageCreationDialog({
             <option value="1GiB">1 GiB</option>
             <option value="8GiB">8 GiB</option>
             <option value="64GiB">64 GiB</option>
-            <option value="custom">自定义…</option>
+            <option value="custom">{t("自定义…")}</option>
           </select>
         </label>
         {preset === "custom" && (
           <div className="image-creation-capacity">
             <label>
-              容量数值
+              {t("容量数值")}
               <input
                 inputMode="decimal"
                 value={capacity}
@@ -242,7 +251,7 @@ export function ImageCreationDialog({
               />
             </label>
             <label>
-              单位
+              {t("单位")}
               <select
                 value={unit}
                 onChange={(e) => {
@@ -258,7 +267,7 @@ export function ImageCreationDialog({
           </div>
         )}
         <label>
-          初始布局
+          {t("初始布局")}
           <select
             value={table}
             onChange={(e) => {
@@ -268,13 +277,13 @@ export function ImageCreationDialog({
           >
             {Object.entries(tableLabels).map(([value, label]) => (
               <option key={value} value={value}>
-                {label}
+                {catalogText(label)}
               </option>
             ))}
           </select>
         </label>
         <label>
-          逻辑扇区
+          {t("逻辑扇区")}
           <select
             value={sector}
             onChange={(e) => {
@@ -288,12 +297,22 @@ export function ImageCreationDialog({
         </label>
         <p className="image-conversion-note">
           {table === "none"
-            ? "逻辑内容全部为零，不写入分区表。"
-            : "创建空分区表，尚无分区或文件系统。"}{" "}
-          镜像不会自动挂载；完成前会完整回读校验。
+            ? t("逻辑内容全部为零，不写入分区表。")
+            : t("创建空分区表，尚无分区或文件系统。")}{" "}
+          {t("镜像不会自动挂载；完成前会完整回读校验。")}
         </p>
       </fieldset>
-      <FormError message={invalid || error} />
+      <FormError
+        message={
+          invalid
+            ? catalogText(invalid)
+            : error?.polling
+              ? t("暂时无法读取任务状态：{error}。请等待状态恢复。", {
+                  error: catalogText(error.message),
+                })
+              : catalogText(error?.message ?? "")
+        }
+      />
       {(busy || report) && (
         <section
           ref={progress}
@@ -313,41 +332,54 @@ export function ImageCreationDialog({
                 max={report.options.size * 3}
               />
               <p>
-                写入 {formatSize(report.received)} · 内容复核{" "}
-                {formatSize(report.sourceVerified)} · 目标回读{" "}
-                {formatSize(report.verified)}
+                {t(
+                  "写入 {written} · 内容复核 {checked} · 目标回读 {readBack}",
+                  {
+                    written: formatSize(report.received),
+                    checked: formatSize(report.sourceVerified),
+                    readBack: formatSize(report.verified),
+                  },
+                )}
               </p>
             </>
           )}
-          <p>{report?.message ?? "请选择新文件的保存位置…"}</p>
+          <p>
+            {report
+              ? catalogText(report.message)
+              : t("请选择新文件的保存位置…")}
+          </p>
           {report?.result && (
             <dl className="detail-list">
-              <dt>输出文件</dt>
+              <dt>{t("输出文件")}</dt>
               <dd>{report.outputName}</dd>
-              <dt>初始布局</dt>
-              <dd>{tableLabels[report.creation!.table]}</dd>
-              <dt>逻辑容量</dt>
+              <dt>{t("初始布局")}</dt>
+              <dd>{catalogText(tableLabels[report.creation!.table])}</dd>
+              <dt>{t("逻辑容量")}</dt>
               <dd>{formatSize(report.result.logicalBytes)}</dd>
-              <dt>文件长度</dt>
+              <dt>{t("文件长度")}</dt>
               <dd>{formatSize(report.result.fileBytes)}</dd>
-              <dt>逻辑扇区</dt>
+              <dt>{t("逻辑扇区")}</dt>
               <dd>{report.options.sector} B</dd>
               {report.creation?.diskId && (
                 <>
-                  <dt>磁盘标识</dt>
+                  <dt>{t("磁盘标识")}</dt>
                   <dd className="image-conversion-hash">
                     {report.creation.diskId}
                   </dd>
                 </>
               )}
-              <dt>逻辑 SHA-256</dt>
+              <dt>{t("逻辑 SHA-256")}</dt>
               <dd className="image-conversion-hash">{report.result.sha256}</dd>
             </dl>
           )}
           {report && !report.result && (
             <small>
-              未完成文件：{report.partialName}
-              。停止或失败时保留，不会发布为成功镜像。
+              {t(
+                "未完成文件 {file}。停止或失败时保留该文件，不会发布为成功镜像。",
+                {
+                  file: report.partialName,
+                },
+              )}
             </small>
           )}
         </section>

@@ -76,6 +76,7 @@ export interface PartitionTarget {
   formatPartitions: number[];
   deletePartitions: number[];
   resizePartitions: number[];
+  fatResizePartitions: number[];
   extPartitions: number[];
   metadataPartitions: number[];
   availableDriveLetters: string[];
@@ -107,6 +108,7 @@ export type PartitionAction =
       options: FormatOptions;
     }
   | { type: "resize"; partition: number; size: number }
+  | { type: "fatResize"; partition: number; size: number }
   | {
       type: "extFormat";
       partition: number;

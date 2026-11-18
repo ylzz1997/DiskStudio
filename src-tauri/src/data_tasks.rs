@@ -360,8 +360,8 @@ pub fn open_backup() -> Result<Option<String>, String> {
             .map_err(|_| "请等待当前磁盘任务完成")?;
         idle(&state())?;
         let Some(path) = rfd::FileDialog::new()
-            .set_title("打开备份以浏览文件")
-            .add_filter("DiskStudio 备份", &["dsbackup"])
+            .set_title(crate::native_locale::text("打开备份以浏览文件"))
+            .add_filter(crate::native_locale::text("DiskStudio 备份"), &["dsbackup"])
             .pick_file()
         else {
             return Ok(None);
@@ -397,8 +397,11 @@ pub fn open_backup() -> Result<Option<String>, String> {
                         return Err("备份链超过 16 层".into());
                     }
                     let Some(path) = rfd::FileDialog::new()
-                        .set_title(format!("选择依赖的基础备份 · {parent}"))
-                        .add_filter("DiskStudio 备份", &["dsbackup"])
+                        .set_title(
+                            crate::native_locale::text("选择依赖的基础备份 · {id}")
+                                .replace("{id}", &parent.to_string()),
+                        )
+                        .add_filter(crate::native_locale::text("DiskStudio 备份"), &["dsbackup"])
                         .pick_file()
                     else {
                         return Ok(None);
@@ -934,7 +937,8 @@ pub fn export_directory_report(request: DirectoryReportRequest) -> Result<Option
             s.scan.as_ref().unwrap().1.clone(),
         )
     };
-    let html = crate::directory_report::render(&catalog, &files, mode, completion)?;
+    let locale = crate::native_locale::current();
+    let html = crate::directory_report::render(&catalog, &files, mode, completion, &locale)?;
     #[cfg(not(windows))]
     {
         let _ = (html, source);
@@ -943,8 +947,8 @@ pub fn export_directory_report(request: DirectoryReportRequest) -> Result<Option
     #[cfg(windows)]
     {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("保存目录清单到另一块磁盘（请使用新文件名）")
-            .add_filter("HTML 目录清单", &["html"])
+            .set_title(locale.text("保存目录清单到另一块磁盘（请使用新文件名）"))
+            .add_filter(locale.text("HTML 目录清单"), &["html"])
             .set_file_name("DiskStudio-directory.html")
             .save_file()
         else {
@@ -1240,6 +1244,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
     }
     #[cfg(windows)]
     {
+        let locale = crate::native_locale::current();
         let _guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "另一项磁盘任务正在运行。")?;
@@ -1266,8 +1271,8 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     }
                     let parent = if options.incremental {
                         let Some(path) = rfd::FileDialog::new()
-                            .set_title("选择上一次备份（完整或增量）")
-                            .add_filter("DiskStudio 备份", &["dsbackup"])
+                            .set_title(locale.text("选择上一次备份（完整或增量）"))
+                            .add_filter(locale.text("DiskStudio 备份"), &["dsbackup"])
                             .pick_file()
                         else {
                             return Ok(None);
@@ -1288,8 +1293,8 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         None
                     };
                     let Some(path) = rfd::FileDialog::new()
-                        .set_title("保存磁盘/分区备份")
-                        .add_filter("DiskStudio 备份", &["dsbackup"])
+                        .set_title(locale.text("保存磁盘/分区备份"))
+                        .add_filter(locale.text("DiskStudio 备份"), &["dsbackup"])
                         .set_file_name("DiskStudio-backup.dsbackup")
                         .save_file()
                     else {
@@ -1317,8 +1322,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         },
                     )?;
                     let path = folder.join(path.file_name().ok_or("文件名无效")?);
-                    let warning = format!(
-                        "{}{}{}{}{} 完成后重新读取并校验全部逻辑内容。",
+                    let warning = locale.sentences(&[
                         if options.hot {
                             "VSS 文件系统一致性快照，源卷可继续使用；不包含数据库等应用的事务一致性保证。"
                         } else {
@@ -1326,12 +1330,10 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         },
                         if options.incremental {
                             "只保存相对上次备份变化的数据块；还原必须保留完整依赖链。"
+                        } else if options.mode == crate::used_space::Mode::UsedSpace {
+                            "创建完整的已用空间备份。"
                         } else {
-                            if options.mode == crate::used_space::Mode::UsedSpace {
-                                "创建完整的已用空间备份。"
-                            } else {
-                                "完整备份包含空闲空间。"
-                            }
+                            "完整备份包含空闲空间。"
                         },
                         if options.compression {
                             "启用并行压缩。"
@@ -1347,8 +1349,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                             "使用密码加密；打开及还原时需要密码，程序不保存密码。"
                         } else {
                             ""
-                        }
-                    );
+                        },
+                        "完成后重新读取并校验全部逻辑内容。",
+                    ]);
                     (
                         "创建镜像备份",
                         r.label,
@@ -1386,15 +1389,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         src.label,
                         dst.label,
                         src.size,
-                        format!(
-                            "{}{}",
-                            overwrite_warning(),
+                        locale.sentences(&[
+                            OVERWRITE_WARNING,
                             if mode == crate::used_space::Mode::UsedSpace {
                                 "只跳过确认空闲的区域；目标空闲区不会被清除，未知文件系统完整复制。保持分区布局，不调整容量。"
                             } else {
                                 ""
-                            }
-                        ),
+                            },
+                        ]),
                         true,
                         Work::Clone {
                             source,
@@ -1406,8 +1408,8 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                 Request::Restore { destination } => {
                     let dst = platform::resolve(&destination, true, true)?;
                     let Some(path) = rfd::FileDialog::new()
-                        .set_title("选择 DiskStudio 备份")
-                        .add_filter("DiskStudio 备份", &["dsbackup"])
+                        .set_title(locale.text("选择 DiskStudio 备份"))
+                        .add_filter(locale.text("DiskStudio 备份"), &["dsbackup"])
                         .pick_file()
                     else {
                         return Ok(None);
@@ -1432,10 +1434,10 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                                 .to_string(),
                             dst.label,
                             h.size,
-                            format!(
-                                "写入前验证完整备份链、每个数据块及最终 SHA-256。{}",
-                                overwrite_warning()
-                            ),
+                            locale.sentences(&[
+                                "写入前验证完整备份链、每个数据块及最终 SHA-256。",
+                                OVERWRITE_WARNING,
+                            ]),
                             true,
                             Work::ArchiveRestore { destination, chain },
                         )
@@ -1459,7 +1461,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                                 .to_string(),
                             dst.label,
                             header.size,
-                            format!("写入前先验证备份 SHA-256。{}", overwrite_warning()),
+                            locale.sentences(&["写入前先验证备份 SHA-256。", OVERWRITE_WARNING]),
                             true,
                             Work::Restore {
                                 destination,
@@ -1514,17 +1516,29 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     }
                     let size = export.total_bytes;
                     let Some(folder) = rfd::FileDialog::new()
-                        .set_title(if browsing {
+                        .set_title(locale.text(if browsing {
                             "复制到另一块磁盘的目录"
                         } else {
                             "恢复到另一块磁盘的目录"
-                        })
+                        }))
                         .pick_folder()
                     else {
                         return Ok(None);
                     };
                     let folder = source.destination(&folder, size)?;
-                    let warning=format!("{} 输出到新建目录，并保存文件名映射与成功/失败清单；不覆盖已有文件。每个文件在发布前完整回读并核对 SHA-256；不重建权限、链接及扩展属性；文件与目录时间、受支持属性按复制选项保存并记录结果。{}",export.description(), if matches!(source, ScanSource::Image { .. }) { "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。" } else if browsing { "源卷未锁定，在线文件可能变化；这不是时间点快照，请核对副本内容。" } else { "已删除内容可能被覆盖或被 TRIM 清除，导出成功不代表原内容完整。" });
+                    let warning = [
+                        export.description(&locale),
+                        locale.sentences(&[
+                            "输出到新建目录，并保存文件名映射与成功/失败清单；不覆盖已有文件。每个文件在发布前完整回读并核对 SHA-256；不重建权限、链接及扩展属性；文件与目录时间、受支持属性按复制选项保存并记录结果。",
+                            if matches!(source, ScanSource::Image { .. }) {
+                                "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。"
+                            } else if browsing {
+                                "源卷未锁定，在线文件可能变化；这不是时间点快照，请核对副本内容。"
+                            } else {
+                                "已删除内容可能被覆盖或被 TRIM 清除，导出成功不代表原内容完整。"
+                            },
+                        ]),
+                    ].join(" ");
                     (
                         if export.directory_selection {
                             if browsing {
@@ -1568,9 +1582,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
         Ok(Some(plan))
     }
 }
-fn overwrite_warning() -> String {
-    "目标范围原有的文件系统及数据将被替换，不能撤销。执行前锁定卷并将整个目标磁盘脱机；完成、取消或失败后都保持脱机，避免重复 GPT 标识自动挂载。需在确认副本后由你决定何时联机。".into()
-}
+const OVERWRITE_WARNING: &str = "目标范围原有的文件系统及数据将被替换，不能撤销。执行前锁定卷并将整个目标磁盘脱机；完成、取消或失败后都保持脱机，避免重复 GPT 标识自动挂载。需在确认副本后由你决定何时联机。";
 fn validate_pair(a: &Selection, b: &Selection) -> Result<(), String> {
     if a.target == b.target {
         return Err("源和目标必须是不同的物理磁盘。".into());
@@ -1617,8 +1629,11 @@ fn choose_chain(
             return Err("备份链超过 16 层".into());
         }
         let Some(path) = rfd::FileDialog::new()
-            .set_title(format!("选择依赖的基础备份 · {id}"))
-            .add_filter("DiskStudio 备份", &["dsbackup"])
+            .set_title(
+                crate::native_locale::text("选择依赖的基础备份 · {id}")
+                    .replace("{id}", &id.to_string()),
+            )
+            .add_filter(crate::native_locale::text("DiskStudio 备份"), &["dsbackup"])
             .pick_file()
         else {
             return Ok(None);
@@ -1642,6 +1657,7 @@ pub(crate) fn run(
     work: Work,
 ) -> Result<(String, Option<String>), String> {
     let err = |e: std::io::Error| e.to_string();
+    let locale = crate::native_locale::current();
     match work {
         Work::ArchiveBackup {
             source,
@@ -1807,18 +1823,29 @@ pub(crate) fn run(
             drop(chain);
             progress(id, cancel, "保存已验证备份", r.size, r.size)?;
             publication.publish()?;
+            let mut summary = locale.sentences(&[
+                "备份完成，全部逻辑内容已通过 SHA-256 校验。",
+                if options.encryption {
+                    "文件已加密。"
+                } else {
+                    ""
+                },
+                if options.incremental {
+                    "还原时请保留全部基础备份。"
+                } else {
+                    ""
+                },
+            ]);
+            if let Some(plan) = &allocation {
+                summary.push(' ');
+                summary.push_str(&locale.format(
+                    "按已用空间备份：{free} B 确认空闲区域按零保存，不包含这些区域的已删除内容。",
+                    &[("free", &plan.skipped.to_string())],
+                ));
+                summary.push_str(&allocation_notes(plan, &locale));
+            }
             Ok((
-                format!(
-                    "备份完成，全部逻辑内容已通过 SHA-256 校验。{}{}{}\n{}",
-                    if options.encryption { "文件已加密。" } else { "" },
-                    if options.incremental {
-                        "还原时请保留全部基础备份。"
-                    } else {
-                        ""
-                    },
-                    allocation.as_ref().map(|p|format!("按已用空间备份：{} B 确认空闲区域按零保存，不包含这些区域的已删除内容。{}",p.skipped,allocation_notes(p))).unwrap_or_default(),
-                    path.display()
-                ),
+                format!("{summary}\n{}", path.display()),
                 Some(header.sha256),
             ))
         }
@@ -1898,7 +1925,11 @@ pub(crate) fn run(
             drop(file);
             rename_new(&partial, &path)?;
             Ok((
-                format!("备份完成，SHA-256 写后校验一致。\n{}", path.display()),
+                format!(
+                    "{}\n{}",
+                    locale.text("备份完成，SHA-256 写后校验一致。"),
+                    path.display()
+                ),
                 Some(hash),
             ))
         }
@@ -1991,7 +2022,10 @@ pub(crate) fn run(
                 Ok(())
             })?;
             let files: std::collections::HashMap<_, _> = files.iter().map(|c| (c.id, c)).collect();
-            let phase = format!("提取文件 · 并发 {}", export.options.workers);
+            let phase = locale.format(
+                "提取文件 · 并发 {workers}",
+                &[("workers", &export.options.workers.to_string())],
+            );
             let batch = recovery_export::execute_parallel_with_directories(
                 &export,
                 &mut output,
@@ -2017,7 +2051,17 @@ pub(crate) fn run(
                 },
                 |done| progress(id, cancel, &phase, done, total),
             )
-            .map_err(|e| format!("{e}\n输出目录：{}", output.display.display()))?;
+            .map_err(|e| {
+                format!(
+                    "{}\n{}",
+                    locale.text(&e),
+                    locale.format(
+                        "输出目录 {path}",
+                        &[("path", &output.display.to_string_lossy())]
+                    )
+                )
+            })?;
+            let created_directories = batch.directories.iter().filter(|o| o.created).count();
             let directory_warnings = batch
                 .directories
                 .iter()
@@ -2032,12 +2076,30 @@ pub(crate) fn run(
                 .count();
             let errors: Vec<_> = outcomes
                 .iter()
-                .filter_map(|o| o.error.as_ref().map(|e| format!("文件 {}：{e}", o.id)))
+                .filter_map(|o| {
+                    o.error.as_ref().map(|e| {
+                        locale.format(
+                            "文件 {id}：{error}",
+                            &[("id", &o.id.to_string()), ("error", locale.text(e))],
+                        )
+                    })
+                })
                 .take(10)
                 .collect();
+            let summary = locale.format(
+                "已导出 {saved} 个文件，失败 {failed} 个，跳过 {skipped} 个；创建 {folders} 个子目录。成功文件均已通过完整 SHA-256 回读校验；{fileWarnings} 个文件、{folderWarnings} 个目录有时间或属性保留提示，详见结果清单。不代表已删除的原始内容完整。结果见 DiskStudio-export.json。",
+                &[
+                    ("saved", &recovered.to_string()),
+                    ("failed", &failed.to_string()),
+                    ("skipped", &export.skipped.len().to_string()),
+                    ("folders", &created_directories.to_string()),
+                    ("fileWarnings", &metadata_warnings.to_string()),
+                    ("folderWarnings", &directory_warnings.to_string()),
+                ],
+            );
             let message = format!(
-                "已导出 {recovered} 个文件，失败 {failed} 个，跳过 {} 个；创建 {} 个子目录。成功文件均已通过完整 SHA-256 回读校验；{metadata_warnings} 个文件、{directory_warnings} 个目录有时间或属性保留提示，详见结果清单。不代表已删除的原始内容完整。结果见 DiskStudio-export.json。\n{}\n{}",
-                export.skipped.len(), export.folders.len().saturating_sub(1), output.display.display(),
+                "{summary}\n{}\n{}",
+                output.display.display(),
                 errors.join("\n")
             );
             if failed > 0 || !export.skipped.is_empty() {
@@ -2059,12 +2121,15 @@ fn exact_reader(source: &platform::Resolved) -> Result<crate::used_space::View<F
     .map_err(|e| e.to_string())
 }
 #[cfg(windows)]
-fn allocation_notes(plan: &crate::used_space::Plan) -> String {
+fn allocation_notes(
+    plan: &crate::used_space::Plan,
+    locale: &crate::native_locale::Locale,
+) -> String {
     plan.volumes
         .iter()
         .filter(|v| !v.note.is_empty())
         .take(16)
-        .map(|v| format!(" {}：{}", v.filesystem, v.note))
+        .map(|v| format!(" {} · {}", v.filesystem, locale.text(&v.note)))
         .collect()
 }
 #[cfg(windows)]
@@ -2081,6 +2146,7 @@ fn write_allocated(
     }
     progress(id, cancel, "锁定目标", 0, plan.copied())?;
     platform::offline(&target)?;
+    let locale = crate::native_locale::current();
     let result = (|| {
         let mut target =
             crate::used_space::View::bounded(target, dst.offset, dst.size, dst.disk.size)
@@ -2104,10 +2170,18 @@ fn write_allocated(
             },
         )?;
         plan.proof.verify(source, cancel)?;
-        Ok((format!("按已用空间克隆完成，复制 {} B，跳过 {} B。已复制范围及分配计划通过 SHA-256 完整回读校验；目标空闲区未清除。目标磁盘保持脱机，未修改分区容量或重复 GPT 标识。{}",plan.copied(),plan.skipped,allocation_notes(plan)),Some(hash)))
+        let mut summary = locale.format(
+            "按已用空间克隆完成，复制 {copied} B，跳过 {skipped} B。已复制范围及分配计划通过 SHA-256 完整回读校验；目标空闲区未清除。目标磁盘保持脱机，未修改分区容量或重复 GPT 标识。",
+            &[("copied", &plan.copied().to_string()), ("skipped", &plan.skipped.to_string())],
+        );
+        summary.push_str(&allocation_notes(plan, &locale));
+        Ok((summary, Some(hash)))
     })();
     result.map_err(|e: String| {
-        format!("{e}。目标磁盘保持脱机，可能仅完成部分覆盖；未自动重试或回滚。")
+        locale.format(
+            "目标磁盘保持脱机，可能仅完成部分覆盖；未自动重试或回滚。{error}",
+            &[("error", locale.text(&e))],
+        )
     })
 }
 #[cfg(windows)]
@@ -2121,6 +2195,7 @@ fn write_device(
 ) -> Result<(String, Option<String>), String> {
     progress(id, cancel, "锁定目标", 0, dst.size)?;
     platform::offline(&target)?;
+    let locale = crate::native_locale::current();
     let result = (|| {
         target
             .seek(SeekFrom::Start(dst.offset))
@@ -2141,10 +2216,13 @@ fn write_device(
         if hash != readback {
             return Err("写后 SHA-256 校验失败".into());
         }
-        Ok(("复制完成，目标全部字节已通过 SHA-256 校验。目标磁盘保持脱机；未自动更改 GPT 标识或扩展分区。".into(),Some(hash)))
+        Ok((locale.text("复制完成，目标全部字节已通过 SHA-256 校验。目标磁盘保持脱机；未自动更改 GPT 标识或扩展分区。").into(), Some(hash)))
     })();
     result.map_err(|e: String| {
-        format!("{e}。目标磁盘保持脱机，可能只完成部分覆盖，请勿当作完整副本使用。")
+        locale.format(
+            "目标磁盘保持脱机，可能只完成部分覆盖，请勿当作完整副本使用。{error}",
+            &[("error", locale.text(&e))],
+        )
     })
 }
 #[cfg(windows)]
@@ -2261,6 +2339,7 @@ mod tests {
             &s.candidates,
             s.scan_mode,
             crate::directory_report::Completion::Ended,
+            &crate::native_locale::Locale::new(crate::native_locale::Language::ZhCn),
         )
         .unwrap();
         assert!(html.contains("浏览现存文件"));
@@ -2334,7 +2413,14 @@ mod tests {
         s.scan_completion = crate::directory_report::Completion::Canceled;
         assert!(directory_report_snapshot(&s, "stale").is_err());
         let (catalog, files, mode, completion) = directory_report_snapshot(&s, "id").unwrap();
-        let html = crate::directory_report::render(&catalog, &files, mode, completion).unwrap();
+        let html = crate::directory_report::render(
+            &catalog,
+            &files,
+            mode,
+            completion,
+            &crate::native_locale::Locale::new(crate::native_locale::Language::ZhCn),
+        )
+        .unwrap();
         assert!(!html.contains(&s.scan_name));
         s.job = Some(Job {
             id: "other".into(),

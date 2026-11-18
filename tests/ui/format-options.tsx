@@ -39,6 +39,7 @@ const target: PartitionTarget = {
   formatPartitions: [1],
   deletePartitions: [1],
   resizePartitions: [1],
+  fatResizePartitions: [],
   extPartitions: [],
   metadataPartitions: [1],
   availableDriveLetters: [],

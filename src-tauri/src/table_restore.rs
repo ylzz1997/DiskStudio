@@ -171,6 +171,47 @@ pub fn archive_layout(archive: &Archive) -> Result<Layout, String> {
         .ok_or("GPT 条目表缺失")?;
     decode_layout(&header.bytes, &table.bytes, archive.sector)
 }
+
+/// Update an entry in both copies of a validated GPT archive. Callers compare
+/// the decoded result to their operation-specific expected layout.
+pub(crate) fn edit_gpt_entry(
+    current: &Archive,
+    layout: &Layout,
+    slot: u32,
+    edit: impl Fn(&mut [u8]),
+) -> Result<Archive, String> {
+    if current.includes_boot || !(1..=layout.count).contains(&slot) {
+        return Err("GPT 条目编辑范围无效。".into());
+    }
+    let at = (slot as usize - 1) * 128;
+    let mut after = current.clone();
+    let mut crc = None;
+    for extent in &mut after.extents {
+        if matches!(extent.kind, Kind::PrimaryEntries | Kind::BackupEntries) {
+            let table = extent
+                .bytes
+                .get_mut(..layout.count as usize * 128)
+                .ok_or("GPT 条目表不完整")?;
+            edit(&mut table[at..at + 128]);
+            let hash = crc32fast::hash(table);
+            if crc.is_some_and(|prior| prior != hash) {
+                return Err("GPT 条目副本不一致。".into());
+            }
+            crc = Some(hash);
+        }
+    }
+    let crc = crc.ok_or("缺少 GPT 条目表")?;
+    for extent in &mut after.extents {
+        if matches!(extent.kind, Kind::PrimaryHeader | Kind::BackupHeader) {
+            extent.bytes[88..92].copy_from_slice(&crc.to_le_bytes());
+            extent.bytes[16..20].fill(0);
+            let len = u32le(&extent.bytes, 12) as usize;
+            let crc = crc32fast::hash(&extent.bytes[..len]);
+            extent.bytes[16..20].copy_from_slice(&crc.to_le_bytes());
+        }
+    }
+    Ok(after)
+}
 fn read(
     reader: &mut (impl Read + Seek),
     offset: u64,

@@ -63,6 +63,18 @@ test('Windows installer sees one OS disk and read-only optical media', () => {
   assert.equal(blocks.find(b => b['node-name'] === 'installer')['read-only'], true);
   assert.doesNotMatch(args.join(' '), /DS-TEST/);
 });
+test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () => {
+  const args = buildArgs({ fourKn: true });
+  const blocks = args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
+  const paths = blocks.filter(b => b.driver === 'qcow2').map(b => b.file.filename);
+  assert.deepEqual(paths, ['system.qcow2', 'test-a-4kn.qcow2', 'test-b-4kn.qcow2'].map(file => path.join(root, 'windows', file)));
+  const nvme = args.filter(arg => arg.startsWith('nvme,'));
+  assert.deepEqual(nvme, disks.filter(d => d.bus === 'nvme').map(d =>
+    `nvme,drive=${d.id},serial=${d.serial},id=${d.id}_4kn,logical_block_size=4096,physical_block_size=4096`));
+  assert.equal(args[args.indexOf('-nic') + 1], 'none');
+  assert.throws(() => buildArgs({ fourKn: true, setup: true }), /4Kn/);
+  assert.throws(() => buildArgs({ fourKn: true, network: true }), /4Kn/);
+});
 test('running-test preflight rejects replaced disks, wrong capacities and extra devices', () => {
   const args = buildArgs();
   const blocks = args.flatMap((value, i) => {
@@ -74,6 +86,7 @@ test('running-test preflight rejects replaced disks, wrong capacities and extra 
       image: { 'virtual-size': disk ? disk.size * 1024 ** 3 : 0 } } }];
   });
   assert.doesNotThrow(() => validateTestBlocks(blocks));
+  assert.throws(() => validateTestBlocks(blocks, true));
   for (const change of [
     b => b.push({ removable: false, inserted: { file: '\\\\.\\PhysicalDrive0' } }),
     b => { b[1].inserted.file = b[0].inserted.file; },

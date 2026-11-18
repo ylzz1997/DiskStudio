@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Check,
   Activity,
+  ArrowLeftRight,
   ChevronDown,
   Copy,
   Database,
@@ -35,6 +36,7 @@ import type { PartitionOutcome } from "./partitionOutcome";
 import { readLocalState } from "./localRefresh";
 import { matchPartitionTarget } from "./partitionCapabilities";
 import {
+  diskTitle,
   LocalDiskHeader,
   LocalDiskContent,
   LocalDetails,
@@ -52,10 +54,13 @@ import { TableBackupDialog } from "./TableBackupDialog";
 import { TableInspectDialog } from "./TableInspectDialog";
 import { LostPartitionDialog } from "./LostPartitionDialog";
 import { DeviceStateDialog } from "./DeviceStateDialog";
+import { PartitionMoveDialog } from "./PartitionMoveDialog";
 import { MaintenanceDialog } from "./MaintenanceDialog";
 import { ImageConversionDialog } from "./ImageConversionDialog";
 import { ImageCreationDialog } from "./ImageCreationDialog";
 import { imageFiles, releaseImageFiles } from "./imageReader";
+import { LanguageProvider, useLanguageSettings } from "./i18n/LanguageProvider";
+import { languagePreference, languages } from "./i18n/languages";
 
 type Modal =
   | "details"
@@ -67,6 +72,7 @@ type Modal =
   | "tableInspect"
   | "lostPartitions"
   | "deviceState"
+  | "resumePartitionMove"
   | "maintenance"
   | "imageConversion"
   | "imageCreation"
@@ -79,6 +85,21 @@ function preference(key: string, fallback: string) {
   }
 }
 export default function App() {
+  return (
+    <LanguageProvider>
+      <Workspace />
+    </LanguageProvider>
+  );
+}
+
+function Workspace() {
+  const {
+    language,
+    preference: selectedLanguage,
+    setPreference,
+    t,
+    catalogText,
+  } = useLanguageSettings();
   const [page, setPage] = useState<"disks" | "recovery" | "backup">("disks");
   const [images, setImages] = useState<Disk[]>([]);
   const [snapshot, setSnapshot] = useState<DiskSnapshot | null>(null);
@@ -147,8 +168,8 @@ export default function App() {
       if (strict)
         throw new Error(
           !native
-            ? "当前环境无法读取本机元数据。"
-            : "另一项元数据刷新仍在进行，请稍后手动刷新。",
+            ? t("当前环境无法读取本机元数据。")
+            : t("另一项元数据刷新仍在进行，请稍后手动刷新。"),
         );
       return;
     }
@@ -184,7 +205,7 @@ export default function App() {
     if (!file || busyRef.current) return;
     operationBusy(true);
     try {
-      if (images.length >= 24) throw new Error("最多同时打开 24 个镜像。");
+      if (images.length >= 24) throw new Error(t("最多同时打开 24 个镜像。"));
       const opened = await openImage(file, companions);
       setImageParts(null);
       setImages((all) =>
@@ -196,7 +217,7 @@ export default function App() {
       setPartitionId("");
       if (opened.tableReport && opened.tableReport.state !== "passed")
         setTableReport(opened.tableReport);
-      notify("已读取镜像分区表，源文件保持只读。");
+      notify(t("已读取镜像分区表，源文件保持只读。"));
     } catch (e) {
       if (e instanceof MissingImageFilesError) {
         setImageParts({
@@ -230,7 +251,7 @@ export default function App() {
   }
   function windowAction(action: "minimize" | "toggleMaximize" | "close") {
     if (action === "close" && busyRef.current) {
-      notify("正在等待操作完成，请保持应用运行。");
+      notify(t("正在等待操作完成，请保持应用运行。"));
       return;
     }
     if (!native) return;
@@ -306,7 +327,7 @@ export default function App() {
       .onCloseRequested((e) => {
         if (busyRef.current) {
           e.preventDefault();
-          notify("正在等待操作完成，请保持应用运行。");
+          notify(t("正在等待操作完成，请保持应用运行。"));
         }
       })
       .then((fn) => (alive ? cleanups.push(fn) : fn()));
@@ -314,7 +335,7 @@ export default function App() {
       alive = false;
       cleanups.forEach((fn) => fn());
     };
-  }, []);
+  }, [t]);
   return (
     <div
       className={`app ${compact ? "compact" : ""} ${maximized ? "maximized" : ""}`}
@@ -331,12 +352,12 @@ export default function App() {
           <Database size={29} strokeWidth={2.1} />
           <span data-tauri-drag-region>DiskStudio</span>
         </div>
-        <nav className="main-nav" aria-label="功能导航">
+        <nav className="main-nav" aria-label={t("功能导航")}>
           {(
             [
-              { id: "disks", name: "磁盘管理" },
-              { id: "recovery", name: "文件恢复" },
-              { id: "backup", name: "备份与克隆" },
+              { id: "disks", name: t("磁盘管理") },
+              { id: "recovery", name: t("文件恢复") },
+              { id: "backup", name: t("备份与克隆") },
             ] as const
           ).map((item) => (
             <button
@@ -355,7 +376,7 @@ export default function App() {
           <div className="menu-anchor disk-menu-anchor">
             <button
               className="disk-menu-trigger"
-              aria-label="磁盘菜单"
+              aria-label={t("磁盘菜单")}
               aria-expanded={menu}
               disabled={busy}
               onClick={(e) => {
@@ -363,10 +384,10 @@ export default function App() {
                 setMenu(!menu);
               }}
             >
-              磁盘 <ChevronDown size={14} />
+              {t("磁盘")} <ChevronDown size={14} />
             </button>
             {menu && (
-              <div className="popover disk-menu" aria-label="磁盘菜单">
+              <div className="popover disk-menu" aria-label={t("磁盘菜单")}>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
                   onClick={() => {
@@ -375,7 +396,7 @@ export default function App() {
                   }}
                 >
                   <Copy size={16} />
-                  分区表备份与恢复…
+                  {t("分区表备份与恢复…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -385,7 +406,7 @@ export default function App() {
                   }}
                 >
                   <ShieldCheck size={16} />
-                  分区表检查与修复…
+                  {t("分区表检查与修复…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -395,9 +416,25 @@ export default function App() {
                   }}
                 >
                   <ScanLine size={16} />
-                  搜索丢失分区…
+                  {t("搜索丢失分区…")}
                 </button>
                 <div className="menu-divider" />
+                <button
+                  disabled={
+                    !physical ||
+                    disk?.hardware?.offline !== true ||
+                    !disk.hardware.identity ||
+                    !disk.hardware.layoutKey ||
+                    loading
+                  }
+                  onClick={() => {
+                    setMenu(false);
+                    setModal("resumePartitionMove");
+                  }}
+                >
+                  <ArrowLeftRight size={16} />
+                  {t("继续分区移动…")}
+                </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
                   onClick={() => {
@@ -406,7 +443,7 @@ export default function App() {
                   }}
                 >
                   <Settings2 size={16} />
-                  更改设备状态…
+                  {t("更改设备状态…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -416,7 +453,7 @@ export default function App() {
                   }}
                 >
                   <Activity size={16} />
-                  健康信息（SMART）…
+                  {t("健康信息（SMART）…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -426,7 +463,7 @@ export default function App() {
                   }}
                 >
                   <Database size={16} />
-                  扇区查看…
+                  {t("扇区查看…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -436,7 +473,7 @@ export default function App() {
                   }}
                 >
                   <ScanLine size={16} />
-                  坏道检测…
+                  {t("坏道检测…")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -446,16 +483,16 @@ export default function App() {
                   }}
                 >
                   <Settings2 size={16} />
-                  测速与磁盘维护…
+                  {t("测速与磁盘维护…")}
                 </button>
                 <div className="menu-divider" />
                 <button onClick={() => input.current?.click()}>
                   <FolderOpen size={16} />
-                  打开镜像…
+                  {t("打开镜像…")}
                 </button>
                 <button disabled={disk?.kind !== "image"} onClick={closeImage}>
                   <X size={16} />
-                  关闭当前镜像
+                  {t("关闭当前镜像")}
                 </button>
                 <button
                   disabled={!native}
@@ -465,7 +502,7 @@ export default function App() {
                   }}
                 >
                   <Copy size={16} />
-                  镜像格式转换…
+                  {t("镜像格式转换…")}
                 </button>
                 <button
                   disabled={!native}
@@ -475,7 +512,7 @@ export default function App() {
                   }}
                 >
                   <Database size={16} />
-                  创建虚拟磁盘…
+                  {t("创建虚拟磁盘…")}
                 </button>
                 <div className="menu-divider" />
                 <button
@@ -483,15 +520,15 @@ export default function App() {
                   onClick={() => void refreshLocal()}
                 >
                   <RefreshCcw size={16} />
-                  刷新磁盘列表
+                  {t("刷新磁盘列表")}
                 </button>
               </div>
             )}
           </div>
           <button
             className="icon-button"
-            title="设置"
-            aria-label="设置"
+            title={t("设置")}
+            aria-label={t("设置")}
             disabled={busy}
             onClick={() => setModal("settings")}
           >
@@ -499,18 +536,21 @@ export default function App() {
           </button>
         </div>
         <div className="window-controls">
-          <button aria-label="最小化" onClick={() => windowAction("minimize")}>
+          <button
+            aria-label={t("最小化")}
+            onClick={() => windowAction("minimize")}
+          >
             <Minus size={17} />
           </button>
           <button
-            aria-label={maximized ? "还原窗口" : "最大化"}
+            aria-label={maximized ? t("还原窗口") : t("最大化")}
             onClick={() => windowAction("toggleMaximize")}
           >
             {maximized ? <Copy size={14} /> : <Square size={14} />}
           </button>
           <button
             className="close-window"
-            aria-label="关闭窗口"
+            aria-label={t("关闭窗口")}
             onClick={() => windowAction("close")}
           >
             <X size={19} />
@@ -548,6 +588,14 @@ export default function App() {
       )}
       {modal === "deviceState" && disk && (
         <DeviceStateDialog
+          disk={disk}
+          onClose={() => setModal(null)}
+          onBusy={operationBusy}
+          onRefresh={refreshLocal}
+        />
+      )}
+      {modal === "resumePartitionMove" && disk && (
+        <PartitionMoveDialog
           disk={disk}
           onClose={() => setModal(null)}
           onBusy={operationBusy}
@@ -601,12 +649,12 @@ export default function App() {
       <div className="app-body">
         <aside className="sidebar">
           <div className="sidebar-title">
-            <span>磁盘</span>
+            <span>{t("磁盘")}</span>
             <span className="count">{disks.length}</span>
             <button
               className="icon-button add-disk"
-              aria-label="刷新本机磁盘信息"
-              title="重新读取 Windows 存储信息"
+              aria-label={t("刷新本机磁盘信息")}
+              title={t("重新读取 Windows 存储信息")}
               disabled={loading || !native || busy}
               onClick={() => void refreshLocal()}
             >
@@ -626,9 +674,9 @@ export default function App() {
                   <DiskIcon size={27} />
                   <span className="disk-copy">
                     <strong>
-                      {d.name}
+                      {diskTitle(d, t)}
                       {d.hardware?.isSystem && (
-                        <span className="sidebar-system">系统</span>
+                        <span className="sidebar-system">{t("系统")}</span>
                       )}
                     </strong>
                     <small title={d.hardware?.model ?? d.filename}>
@@ -637,7 +685,7 @@ export default function App() {
                     <span>
                       {formatSize(d.size)}
                       <i />
-                      {d.hardware?.bus ?? "镜像文件"}
+                      {d.hardware ? catalogText(d.hardware.bus) : t("镜像文件")}
                     </span>
                   </span>
                 </button>
@@ -645,14 +693,16 @@ export default function App() {
               {!disks.length && (
                 <div className="sidebar-message" role="status">
                   {loading
-                    ? "正在读取磁盘信息…"
+                    ? t("正在读取磁盘信息…")
                     : native
-                      ? "未发现可显示的磁盘"
-                      : "本机磁盘在桌面版中显示"}
+                      ? t("未发现可显示的磁盘")
+                      : t("本机磁盘在桌面版中显示")}
                 </div>
               )}
               {snapshot && readError && (
-                <p className="sidebar-message error">刷新失败，显示上次信息</p>
+                <p className="sidebar-message error">
+                  {t("刷新失败，显示上次信息")}
+                </p>
               )}
             </div>
           </div>
@@ -672,7 +722,7 @@ export default function App() {
                 <header className="disk-header">
                   <div className="disk-heading">
                     <DiskIcon size={39} />
-                    <h1>磁盘管理</h1>
+                    <h1>{t("磁盘管理")}</h1>
                   </div>
                 </header>
                 <Empty
@@ -683,12 +733,14 @@ export default function App() {
                       <DiskIcon size={34} />
                     )
                   }
-                  title={loading ? "正在读取本机磁盘" : "暂无可显示的磁盘"}
+                  title={
+                    loading ? t("正在读取本机磁盘") : t("暂无可显示的磁盘")
+                  }
                   text={
                     readError ||
                     (native
-                      ? "刷新磁盘列表，或通过磁盘菜单打开镜像。"
-                      : "请在 Windows 桌面应用中查看磁盘。")
+                      ? t("刷新磁盘列表，或通过磁盘菜单打开镜像。")
+                      : t("请在 Windows 桌面应用中查看磁盘。"))
                   }
                 >
                   {native && (
@@ -697,7 +749,7 @@ export default function App() {
                       disabled={loading || busy}
                       onClick={() => void refreshLocal()}
                     >
-                      刷新信息
+                      {t("刷新信息")}
                     </button>
                   )}
                 </Empty>
@@ -751,9 +803,9 @@ export default function App() {
                       target={target}
                       unavailableReason={
                         loading
-                          ? "正在读取磁盘操作能力…"
+                          ? t("正在读取磁盘操作能力…")
                           : (access?.reason ??
-                            "无法确认此磁盘的完整信息，请刷新后重试。")
+                            t("无法确认此磁盘的完整信息，请刷新后重试。"))
                       }
                       onBusy={operationBusy}
                       onRefresh={() => refreshLocal(true)}
@@ -770,14 +822,14 @@ export default function App() {
                     <div>
                       <h1>{disk.name}</h1>
                       <p>
-                        镜像文件
+                        {t("镜像文件")}
                         <i />
                         {formatSize(disk.size)}
                         <i />
                         {disk.scheme}
                         <i />
                         <span>{disk.filename}</span>
-                        <span className="readonly-badge">只读</span>
+                        <span className="readonly-badge">{t("只读")}</span>
                       </p>
                     </div>
                   </div>
@@ -786,7 +838,7 @@ export default function App() {
                     onClick={() => setModal("details")}
                   >
                     <Info size={18} />
-                    详细信息
+                    {t("详细信息")}
                   </button>
                 </header>
                 <ImageDiskContent
@@ -803,22 +855,26 @@ export default function App() {
             <span>
               <ShieldCheck size={16} />
               {page === "recovery"
-                ? "文件恢复 · 按需只读扫描"
+                ? t("文件恢复 · 按需只读扫描")
                 : page === "backup"
-                  ? "备份与克隆 · 执行前确认"
+                  ? t("备份与克隆 · 执行前确认")
                   : disk?.kind === "image"
-                    ? "镜像分区表 · 只读"
+                    ? t("镜像分区表 · 只读")
                     : browsingPartition === `${disk?.id}/${partition?.id}`
-                      ? "浏览文件 · 按需读取目录"
-                      : "Windows 分区管理"}
+                      ? t("浏览文件 · 按需读取目录")
+                      : t("Windows 分区管理")}
             </span>
             {disk?.kind !== "image" && (
               <span className="status-time" role="status">
                 {loading
-                  ? "正在读取…"
+                  ? t("正在读取…")
                   : snapshot
-                    ? `上次读取 ${new Date(snapshot.observedAt).toLocaleTimeString("zh-CN", { hour12: false })}`
-                    : "尚未读取"}
+                    ? t("上次读取 {time}", {
+                        time: new Date(snapshot.observedAt).toLocaleTimeString(
+                          language,
+                        ),
+                      })
+                    : t("尚未读取")}
               </span>
             )}
           </footer>
@@ -829,7 +885,7 @@ export default function App() {
         hidden
         type="file"
         accept=".img,.raw,.vhd,.avhd,.vhdx,.vdi,.vmdk,.hdd,.hds"
-        aria-label="选择磁盘镜像文件"
+        aria-label={t("选择磁盘镜像文件")}
         onChange={(e) => void importImage(e.target.files?.[0])}
       />
       <input
@@ -837,7 +893,7 @@ export default function App() {
         hidden
         type="file"
         multiple
-        aria-label="选择镜像数据文件"
+        aria-label={t("选择镜像数据文件")}
         onChange={(e) => {
           const added = Array.from(e.target.files ?? []);
           if (!imageParts || !added.length) return;
@@ -859,7 +915,9 @@ export default function App() {
       {imageParts && (
         <Dialog
           title={
-            imageParts.kind === "parent" ? "选择父盘文件" : "选择镜像数据文件"
+            imageParts.kind === "parent"
+              ? t("选择父盘文件")
+              : t("选择镜像数据文件")
           }
           subtitle={imageParts.primary.name}
           onClose={() => {
@@ -869,10 +927,12 @@ export default function App() {
           <div className="image-parts">
             <p>
               {imageParts.kind === "parent"
-                ? "此差分镜像需要以下父盘。可一次选择整条父盘链，也可逐层补齐。"
-                : "还需要以下数据文件。可以一次选择多个，或分次补齐。"}
+                ? t(
+                    "此差分镜像需要以下父盘。可一次选择整条父盘链，也可逐层补齐。",
+                  )
+                : t("还需要以下数据文件。可以一次选择多个，或分次补齐。")}
             </p>
-            <ul aria-label="缺少的数据文件">
+            <ul aria-label={t("缺少的数据文件")}>
               {imageParts.missing.map((name) => (
                 <li key={name}>
                   <Database size={17} />
@@ -881,7 +941,9 @@ export default function App() {
               ))}
             </ul>
             <p className="image-parts-note">
-              请选择同一离线镜像的配套文件。只读取所选文件，不修改源文件。
+              {t(
+                "请选择同一离线镜像的配套文件。只读取所选文件，不修改源文件。",
+              )}
             </p>
             <div className="dialog-actions">
               <button
@@ -889,7 +951,7 @@ export default function App() {
                 disabled={busy}
                 onClick={() => setImageParts(null)}
               >
-                取消
+                {t("取消")}
               </button>
               <button
                 className="button primary"
@@ -901,7 +963,9 @@ export default function App() {
                 ) : (
                   <FolderOpen size={17} />
                 )}
-                {imageParts.kind === "parent" ? "选择父盘文件" : "选择数据文件"}
+                {imageParts.kind === "parent"
+                  ? t("选择父盘文件")
+                  : t("选择数据文件")}
               </button>
             </div>
           </div>
@@ -914,15 +978,15 @@ export default function App() {
         >
           {toast.error ? <Info size={18} /> : <Check size={18} />}
           <span>{toast.text}</span>
-          <button aria-label="关闭通知" onClick={() => setToast(null)}>
+          <button aria-label={t("关闭通知")} onClick={() => setToast(null)}>
             <X size={15} />
           </button>
         </div>
       )}
       {modal === "details" && disk && (
         <Dialog
-          title="详细信息"
-          subtitle={disk.name}
+          title={t("详细信息")}
+          subtitle={diskTitle(disk, t)}
           onClose={closeModal}
           drawer
         >
@@ -935,7 +999,7 @@ export default function App() {
       )}
       {tableReport && (
         <Dialog
-          title="分区表检查"
+          title={t("分区表检查")}
           subtitle={tableReport.filename}
           onClose={() => setTableReport(null)}
           wide
@@ -952,19 +1016,15 @@ export default function App() {
       )}
       <BackupPasswordPrompt />
       {modal === "settings" && (
-        <Dialog
-          title="设置"
-          subtitle="让 DiskStudio 更适合你的习惯"
-          onClose={closeModal}
-        >
+        <Dialog title={t("设置")} onClose={closeModal}>
           <div className="settings-panel">
-            <span className="settings-label">外观</span>
+            <span className="settings-label">{t("外观")}</span>
             <div className="theme-options">
               {(
                 [
-                  ["light", "浅色", Sun],
-                  ["dark", "深色", Moon],
-                  ["system", "跟随系统", Monitor],
+                  ["light", t("浅色"), Sun],
+                  ["dark", t("深色"), Moon],
+                  ["system", t("跟随系统"), Monitor],
                 ] as const
               ).map(([value, label, Icon]) => (
                 <button
@@ -979,9 +1039,26 @@ export default function App() {
               ))}
             </div>
             <label className="setting-row">
+              <strong>{t("界面语言")}</strong>
+              <select
+                className="language-select"
+                value={selectedLanguage}
+                onChange={(e) =>
+                  setPreference(languagePreference(e.target.value))
+                }
+              >
+                <option value="system">{t("跟随系统语言")}</option>
+                {Object.entries(languages).map(([code, name]) => (
+                  <option key={code} value={code} lang={code}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="setting-row">
               <span>
-                <strong>紧凑列表</strong>
-                <small>在同一屏幕显示更多分区</small>
+                <strong>{t("紧凑列表")}</strong>
+                <small>{t("在同一屏幕显示更多分区")}</small>
               </span>
               <input
                 type="checkbox"
@@ -996,7 +1073,7 @@ export default function App() {
                 <strong>
                   DiskStudio <span>0.1.0</span>
                 </strong>
-                <p>磁盘与分区管理</p>
+                <p>{t("磁盘与分区管理")}</p>
               </div>
             </div>
           </div>

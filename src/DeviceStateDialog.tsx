@@ -10,6 +10,9 @@ import {
 } from "lucide-react";
 import { Dialog, FormError } from "./components";
 import { formatSize, type Disk } from "./types";
+import { useLocale } from "./i18n/LanguageProvider";
+import type { Translate } from "./i18n/translate";
+import { diskTitle } from "./LocalDiskView";
 type Action = "online" | "offline" | "readOnly" | "readWrite";
 interface State {
   offline: boolean;
@@ -51,8 +54,8 @@ const choices = [
     icon: UnlockKeyhole,
   },
 ] as const;
-const label = (s: State) =>
-  `${s.offline ? "脱机" : "联机"} · ${s.readOnly ? "只读" : "可读写"}`;
+const label = (state: State, t: Translate) =>
+  `${t(state.offline ? "脱机" : "联机")} · ${t(state.readOnly ? "只读" : "可读写")}`;
 export function DeviceStateDialog({
   disk,
   onClose,
@@ -64,6 +67,7 @@ export function DeviceStateDialog({
   onBusy: (b: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { language, t, catalogText } = useLocale();
   const [action, setAction] = useState<Action | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -144,20 +148,22 @@ export function DeviceStateDialog({
   }
   return (
     <Dialog
-      title="更改设备状态"
-      subtitle={`${disk.name} · ${formatSize(disk.size)}`}
+      title={t("更改设备状态")}
+      subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)}`}
       onClose={() => {
         if (!inFlight.current) onClose();
       }}
     >
       <p className="device-state-current">
-        当前状态{" "}
-        <strong>{known ? label({ offline, readOnly }) : "尚未确认"}</strong>
+        {t("当前状态")}{" "}
+        <strong>
+          {known ? label({ offline, readOnly }, t) : t("尚未确认")}
+        </strong>
       </p>
       <div
         className="device-state-options"
         role="group"
-        aria-label="目标设备状态"
+        aria-label={t("目标设备状态")}
       >
         {choices.map(({ value, title, detail, icon: Icon }) => (
           <button
@@ -176,52 +182,55 @@ export function DeviceStateDialog({
           >
             <Icon size={19} />
             <span>
-              <strong>{title}</strong>
-              <small>{detail}</small>
+              <strong>{t(title)}</strong>
+              <small>{t(detail)}</small>
             </span>
           </button>
         ))}
       </div>
       {protectedDisk ? (
         <p className="table-backup-intro">
-          系统磁盘或设备信息不完整，不能更改状态。
+          {t("系统磁盘或设备信息不完整，不能更改状态。")}
         </p>
       ) : (
         offline && (
           <p className="table-backup-intro">
-            更改只读属性需要先单独联机；每次只执行所确认的一项操作。
+            {t("更改只读属性需要先单独联机；每次只执行所确认的一项操作。")}
           </p>
         )
       )}
       {busy && (
         <p className="table-backup-progress" role="status">
           <LoaderCircle className="spin" size={17} />
-          正在核对设备并处理…
+          {t("正在核对设备并处理…")}
         </p>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {result && (
         <div className="table-backup-result" role="status">
           <CheckCircle2 size={19} />
-          <p>{result}</p>
+          <p>{catalogText(result)}</p>
         </div>
       )}
       {preview && (
-        <div className="table-backup-result" aria-label="设备状态预览">
+        <div className="table-backup-result" aria-label={t("设备状态预览")}>
           <strong>{preview.target}</strong>
           <p>
-            {formatSize(preview.size)} · {preview.partitions} 个分区
+            {formatSize(preview.size)} ·{" "}
+            {t("{count} 个分区", {
+              count: preview.partitions.toLocaleString(language),
+            })}
           </p>
           <p className="device-state-transition">
-            {label(preview.before)} <span aria-hidden="true">→</span>{" "}
-            <strong>{label(preview.after)}</strong>
+            {label(preview.before, t)} <span aria-hidden="true">→</span>{" "}
+            <strong>{label(preview.after, t)}</strong>
           </p>
-          <p className="table-backup-intro">{preview.warning}</p>
+          <p className="table-backup-intro">{catalogText(preview.warning)}</p>
         </div>
       )}
       <div className="dialog-actions">
         <button className="button" disabled={busy} onClick={onClose}>
-          关闭
+          {t("关闭对话框")}
         </button>
         {preview ? (
           <button
@@ -229,7 +238,7 @@ export function DeviceStateDialog({
             disabled={busy}
             onClick={() => void run(true)}
           >
-            确认{preview.title}
+            {t("确认变更")}
           </button>
         ) : (
           <button
@@ -237,7 +246,7 @@ export function DeviceStateDialog({
             disabled={busy || !action || unavailable(action)}
             onClick={() => void run(false)}
           >
-            预览变更
+            {t("预览变更")}
           </button>
         )}
       </div>

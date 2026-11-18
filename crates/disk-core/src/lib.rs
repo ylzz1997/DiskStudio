@@ -3,6 +3,7 @@
 pub mod fat_format;
 mod image;
 pub mod mbr;
+pub mod partition_move;
 pub mod table_check;
 pub use image::parse_image;
 use serde::{Deserialize, Serialize};

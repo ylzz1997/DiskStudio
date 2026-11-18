@@ -12,6 +12,8 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { Dialog, Empty, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { errorText } from "./partitionOutcome";
 import { formatSize } from "./types";
 import { FileProperties } from "./FileProperties";
 import { defaultExportOptions, type ExportOptions } from "./recoveryModel";
@@ -84,6 +86,8 @@ export function RecoveryResults({
   service?: RecoveryResultsService;
   browsing?: boolean;
 }) {
+  const { t, language, catalogText } = useLocale();
+  const count = (value = 0) => value.toLocaleString(language);
   const [filter, setFilter] = useState<RecoveryFilter>(() =>
     browsing
       ? {
@@ -130,6 +134,29 @@ export function RecoveryResults({
   const pageIds =
     results?.items.filter((c) => c.supported).map((c) => c.id) ?? [];
   const pageChecked = pageIds.filter((id) => checked.has(id)).length;
+  const directoryName = (directory: RecoveryDirectory) =>
+    directory.id === "root" ? t("根目录") : directory.name;
+  function directoryPath(directory: string | null) {
+    const path = directory ? results?.paths[directory] : undefined;
+    if (!path?.length) return t("目录未知");
+    return path[0] === "根目录"
+      ? [t("根目录"), ...path.slice(1)].join(" / ")
+      : path.join(" / ");
+  }
+  function candidateNote(note: string) {
+    const history = note.lastIndexOf("；保存时的历史观察");
+    if (history === -1 || language === "zh-CN") return catalogText(note);
+    return `${catalogText(note.slice(0, history))} · ${catalogText(note.slice(history + 1))}`;
+  }
+  function directoryEvidence(note: string) {
+    if (language === "zh-CN") return note;
+    const aliases = "同一文件有多个名称；选中后分别保存副本";
+    return note
+      .replace(aliases, catalogText(aliases))
+      .split("；")
+      .map(catalogText)
+      .join(" · ");
+  }
   useEffect(() => {
     if (checkAll.current)
       checkAll.current.indeterminate =
@@ -155,7 +182,7 @@ export function RecoveryResults({
         })
         .catch((e) => {
           if (alive) {
-            setError(String(e));
+            setError(errorText(e));
             setResults(null);
             setFolders(null);
           }
@@ -183,7 +210,7 @@ export function RecoveryResults({
       setChecked(selectedFiles(checked, ids, select));
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   }
   async function chooseMatching() {
@@ -195,7 +222,7 @@ export function RecoveryResults({
       if (token === selectionRequest.current)
         setChecked(selectedFiles(checked, ids, true));
     } catch (e) {
-      if (token === selectionRequest.current) setError(String(e));
+      if (token === selectionRequest.current) setError(errorText(e));
     } finally {
       if (token === selectionRequest.current) setChoosing(false);
     }
@@ -205,7 +232,7 @@ export function RecoveryResults({
       update(sizeFilter(min, max));
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   }
   function applyDate() {
@@ -213,7 +240,7 @@ export function RecoveryResults({
       update(dateFilter(fromDate, toDate));
       setError("");
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   }
   async function exportReport() {
@@ -226,7 +253,7 @@ export function RecoveryResults({
         setReportOpen(false);
       }
     } catch (e) {
-      setReportError(e instanceof Error ? e.message : String(e));
+      setReportError(errorText(e));
     } finally {
       setExporting(false);
     }
@@ -234,15 +261,15 @@ export function RecoveryResults({
   return (
     <section
       className="data-results"
-      aria-label={browsing ? "分区文件列表" : "恢复扫描结果"}
+      aria-label={browsing ? t("分区文件列表") : t("恢复扫描结果")}
     >
       <div className="results-header">
         <div>
           <h2>
-            {browsing ? "文件与目录" : "扫描结果"}{" "}
-            <span>{results?.scannedTotal.toLocaleString() ?? 0}</span>
+            {browsing ? t("文件与目录") : t("扫描结果")}{" "}
+            <span>{count(results?.scannedTotal)}</span>
           </h2>
-          <p>{results?.source ?? "正在读取扫描结果"}</p>
+          <p>{results ? catalogText(results.source) : t("正在读取扫描结果")}</p>
         </div>
         <div className="results-actions">
           <button
@@ -254,7 +281,7 @@ export function RecoveryResults({
             }}
           >
             <FileText size={16} />
-            导出目录清单
+            {t("导出目录清单")}
           </button>
           <button
             className="button primary"
@@ -264,8 +291,8 @@ export function RecoveryResults({
               setRecoverOpen(true);
             }}
           >
-            {browsing ? "复制所选" : "恢复所选"}
-            {checked.size ? ` (${checked.size})` : ""}
+            {browsing ? t("复制所选") : t("恢复所选")}
+            {checked.size ? ` (${count(checked.size)})` : ""}
           </button>
         </div>
       </div>
@@ -274,22 +301,22 @@ export function RecoveryResults({
           title={
             recoverFolder
               ? browsing
-                ? "复制目录"
-                : "恢复目录"
+                ? t("复制目录")
+                : t("恢复目录")
               : browsing
-                ? "复制所选文件"
-                : "恢复所选文件"
+                ? t("复制所选文件")
+                : t("恢复所选文件")
           }
           subtitle={
             recoverFolder
-              ? recoverFolder.name
-              : `已选择 ${checked.size.toLocaleString()} 个文件`
+              ? directoryName(recoverFolder)
+              : t("已选择 {count} 个文件", { count: count(checked.size) })
           }
           onClose={() => setRecoverOpen(false)}
         >
           {!recoverFolder && (
             <fieldset className="recovery-layout">
-              <legend>保存方式</legend>
+              <legend>{t("保存方式")}</legend>
               <label>
                 <input
                   type="radio"
@@ -298,8 +325,10 @@ export function RecoveryResults({
                   onChange={() => setLayout("tree")}
                 />
                 <span>
-                  保留原目录结构
-                  <small>按已确认的目录层级保存，目录未知的文件单独归组</small>
+                  {t("保留原目录结构")}
+                  <small>
+                    {t("按已确认的目录层级保存，目录未知的文件单独归组")}
+                  </small>
                 </span>
               </label>
               <label>
@@ -310,30 +339,37 @@ export function RecoveryResults({
                   onChange={() => setLayout("flat")}
                 />
                 <span>
-                  放在同一目录
-                  <small>所有所选文件放在一起，添加编号避免重名</small>
+                  {t("放在同一目录")}
+                  <small>{t("所有所选文件放在一起，添加编号避免重名")}</small>
                 </span>
               </label>
             </fieldset>
           )}
           <details className="recovery-copy-details">
-            <summary>复制范围与限制</summary>
+            <summary>{t("复制范围与限制")}</summary>
             <p className="report-dialog-description">
               {recoverFolder
-                ? "保留原目录结构，包含此目录下已读取的文件、子目录和空目录，不受搜索、筛选或文件勾选影响。尚未读取到的内容不会导出；不支持的文件将跳过并列入结果清单。"
-                : "仅包含所选文件及其父目录，不含未选文件或独立空目录。"}
-              保存到另一块磁盘的新文件夹，重名和不兼容名称会调整并记录。每个成功文件都需通过完整
-              SHA-256 回读校验。
+                ? t(
+                    "保留原目录结构，包含此目录下已读取的文件、子目录和空目录，不受搜索、筛选或文件勾选影响。尚未读取到的内容不会导出；不支持的文件将跳过并列入结果清单。",
+                  )
+                : t(
+                    "仅包含所选文件及其父目录，不含未选文件或独立空目录。",
+                  )}{" "}
+              {t(
+                "保存到另一块磁盘的新文件夹，重名和不兼容名称会调整并记录。每个成功文件都需通过完整 SHA-256 回读校验。",
+              )}
             </p>
             <p className="report-dialog-description">
-              同一文件的多个名称按选择分别保存为副本，不重建硬链接、权限或扩展属性；
+              {t(
+                "同一文件的多个名称按选择分别保存为副本，不重建硬链接、权限或扩展属性。",
+              )}{" "}
               {browsing
-                ? "在线文件可能在复制期间变化，这不是时间点快照。"
-                : "已删除文件的内容可能不完整。"}
+                ? t("在线文件可能在复制期间变化，这不是时间点快照。")
+                : t("已删除文件的内容可能不完整。")}
             </p>
           </details>
           <fieldset className="recovery-copy-options">
-            <legend>复制选项</legend>
+            <legend>{t("复制选项")}</legend>
             <label>
               <input
                 type="checkbox"
@@ -345,7 +381,7 @@ export function RecoveryResults({
                   })
                 }
               />
-              保留文件与目录时间
+              {t("保留文件与目录时间")}
             </label>
             <label>
               <input
@@ -358,10 +394,10 @@ export function RecoveryResults({
                   })
                 }
               />
-              保留受支持的属性
+              {t("保留受支持的属性")}
             </label>
             <label>
-              并发任务
+              {t("并发任务")}
               <select
                 value={exportOptions.workers}
                 onChange={(e) =>
@@ -377,12 +413,14 @@ export function RecoveryResults({
               </select>
             </label>
             <small>
-              时区未知的时间不作推算；无法保留的字段和输出精度变化会记录在清单中。
+              {t(
+                "时区未知的时间不作推算；无法保留的字段和输出精度变化会记录在清单中。",
+              )}
             </small>
           </fieldset>
           <div className="dialog-actions">
             <button className="button" onClick={() => setRecoverOpen(false)}>
-              取消
+              {t("取消")}
             </button>
             <button
               className="button primary"
@@ -396,47 +434,52 @@ export function RecoveryResults({
                 else onRecover([...checked], layout, undefined, exportOptions);
               }}
             >
-              选择保存位置
+              {t("选择保存位置")}
             </button>
           </div>
         </Dialog>
       )}
       {reportSaved && (
         <p role="status" className="report-saved">
-          目录清单已保存：{reportSaved}
+          {t("目录清单已保存：{path}", { path: reportSaved })}
         </p>
       )}
       {reportOpen && (
         <Dialog
-          title="导出目录清单"
-          subtitle="保存为可离线浏览和搜索的 HTML 文件"
+          title={t("导出目录清单")}
+          subtitle={t("保存为可离线浏览和搜索的 HTML 文件")}
           onClose={() => {
             if (!exporting) setReportOpen(false);
           }}
         >
           <p className="report-dialog-description">
-            包含本次{browsing ? "目录读取" : "扫描"}已读取的全部{" "}
-            {results?.scannedTotal.toLocaleString() ?? 0}{" "}
-            个文件及已知目录，不受当前筛选或勾选影响。清单不包含文件内容，也不会重新读取源盘。
+            {t(
+              "清单包含本次已读取的全部 {count} 个文件及已知目录，不受当前筛选或勾选影响。清单不包含文件内容，也不会重新读取源盘。",
+              {
+                count: count(results?.scannedTotal),
+              },
+            )}
           </p>
           <p className="report-dialog-description">
-            目录和删除状态可能不完整。请保存到另一块磁盘，避免覆盖源盘上仍可能恢复的数据；已有文件不会被覆盖。
+            {t(
+              "目录和删除状态可能不完整。请保存到另一块磁盘，避免覆盖源盘上仍可能恢复的数据；已有文件不会被覆盖。",
+            )}
           </p>
-          <FormError message={reportError} />
+          <FormError message={catalogText(reportError)} />
           <div className="dialog-actions">
             <button
               className="button"
               disabled={exporting}
               onClick={() => setReportOpen(false)}
             >
-              取消
+              {t("取消")}
             </button>
             <button
               className="button primary"
               disabled={exporting || busy || running}
               onClick={() => void exportReport()}
             >
-              {exporting ? "正在保存…" : "保存 HTML"}
+              {exporting ? t("正在保存…") : t("保存 HTML")}
             </button>
           </div>
         </Dialog>
@@ -445,12 +488,12 @@ export function RecoveryResults({
         <label className="recovery-search">
           <Search size={16} />
           <input
-            aria-label={browsing ? "筛选分区文件" : "筛选恢复文件"}
+            aria-label={browsing ? t("筛选分区文件") : t("筛选恢复文件")}
             maxLength={200}
             placeholder={
               filter.nameMatch === "extension"
-                ? "扩展名，例如 txt 或 .jpg"
-                : "搜索已读取的文件名"
+                ? t("扩展名，例如 txt 或 .jpg")
+                : t("搜索已读取的文件名")
             }
             value={query}
             onChange={(e) => {
@@ -461,53 +504,53 @@ export function RecoveryResults({
         </label>
         {!browsing && (
           <select
-            aria-label="删除状态筛选"
+            aria-label={t("删除状态筛选")}
             value={filter.state}
             onChange={(e) =>
               update({ state: e.target.value as RecoveryFilter["state"] })
             }
           >
-            <option value="all">全部状态</option>
-            <option value="deleted">已删除</option>
-            <option value="existing">现存文件</option>
-            <option value="unknown">状态未知</option>
+            <option value="all">{t("全部状态")}</option>
+            <option value="deleted">{t("已删除")}</option>
+            <option value="existing">{t("现存文件")}</option>
+            <option value="unknown">{t("状态未知")}</option>
           </select>
         )}
         <select
-          aria-label="文件类型筛选"
-          title="按扩展名分类"
+          aria-label={t("文件类型筛选")}
+          title={t("按扩展名分类")}
           value={filter.kind}
           onChange={(e) =>
             update({ kind: e.target.value as RecoveryFilter["kind"] })
           }
         >
-          <option value="all">全部类型</option>
-          <option value="documents">文档</option>
-          <option value="images">图片</option>
-          <option value="videos">视频</option>
-          <option value="audio">音频</option>
-          <option value="archives">压缩包</option>
-          <option value="other">其他</option>
+          <option value="all">{t("全部类型")}</option>
+          <option value="documents">{t("文档")}</option>
+          <option value="images">{t("图片")}</option>
+          <option value="videos">{t("视频")}</option>
+          <option value="audio">{t("音频")}</option>
+          <option value="archives">{t("压缩包")}</option>
+          <option value="other">{t("其他")}</option>
         </select>
         <select
-          aria-label="文件排序"
+          aria-label={t("文件排序")}
           value={filter.sortBy}
           onChange={(e) =>
             update({ sortBy: e.target.value as RecoveryFilter["sortBy"] })
           }
         >
-          <option value="scan">扫描顺序</option>
-          <option value="name">文件名</option>
-          <option value="size">文件大小</option>
-          <option value="extension">扩展名</option>
-          <option value="modified">修改时间</option>
+          <option value="scan">{t("扫描顺序")}</option>
+          <option value="name">{t("文件名")}</option>
+          <option value="size">{t("文件大小")}</option>
+          <option value="extension">{t("扩展名")}</option>
+          <option value="modified">{t("修改时间")}</option>
         </select>
         <button
           className="button"
           aria-label={
             filter.sortDirection === "asc"
-              ? "当前升序，切换为降序"
-              : "当前降序，切换为升序"
+              ? t("当前升序，切换为降序")
+              : t("当前降序，切换为升序")
           }
           onClick={() =>
             update({
@@ -515,7 +558,7 @@ export function RecoveryResults({
             })
           }
         >
-          {filter.sortDirection === "asc" ? "↑ 升序" : "↓ 降序"}
+          {filter.sortDirection === "asc" ? t("↑ 升序") : t("↓ 降序")}
         </button>
         <button
           className="button"
@@ -523,15 +566,15 @@ export function RecoveryResults({
           onClick={() => setAdvanced(!advanced)}
         >
           <SlidersHorizontal size={15} />
-          更多筛选
+          {t("更多筛选")}
         </button>
       </div>
       {advanced && (
         <div className="recovery-advanced">
           <label>
-            名称匹配
+            {t("名称匹配")}
             <select
-              aria-label="名称匹配方式"
+              aria-label={t("名称匹配方式")}
               value={filter.nameMatch}
               onChange={(e) =>
                 update({
@@ -539,10 +582,10 @@ export function RecoveryResults({
                 })
               }
             >
-              <option value="contains">包含文字</option>
-              <option value="exact">完整名称</option>
-              <option value="prefix">名称开头</option>
-              <option value="extension">完整扩展名</option>
+              <option value="contains">{t("包含文字")}</option>
+              <option value="exact">{t("完整名称")}</option>
+              <option value="prefix">{t("名称开头")}</option>
+              <option value="extension">{t("完整扩展名")}</option>
             </select>
           </label>
           <label>
@@ -551,7 +594,7 @@ export function RecoveryResults({
               checked={filter.caseSensitive}
               onChange={(e) => update({ caseSensitive: e.target.checked })}
             />
-            区分大小写
+            {t("区分大小写")}
           </label>
           <form
             onSubmit={(e) => {
@@ -559,24 +602,24 @@ export function RecoveryResults({
               applySize();
             }}
           >
-            <span>容量 (MiB)</span>
+            <span>{t("容量 (MiB)")}</span>
             <input
-              aria-label="最小文件容量 MiB"
+              aria-label={t("最小文件容量 MiB")}
               inputMode="decimal"
-              placeholder="最小"
+              placeholder={t("最小")}
               value={min}
               onChange={(e) => setMin(e.target.value)}
             />
             <span>—</span>
             <input
-              aria-label="最大文件容量 MiB"
+              aria-label={t("最大文件容量 MiB")}
               inputMode="decimal"
-              placeholder="最大"
+              placeholder={t("最大")}
               value={max}
               onChange={(e) => setMax(e.target.value)}
             />
             <button className="button" type="submit">
-              应用
+              {t("应用")}
             </button>
           </form>
           <form
@@ -587,7 +630,7 @@ export function RecoveryResults({
             }}
           >
             <select
-              aria-label="日期筛选字段"
+              aria-label={t("日期筛选字段")}
               value={filter.dateField}
               onChange={(e) =>
                 update({
@@ -595,14 +638,14 @@ export function RecoveryResults({
                 })
               }
             >
-              <option value="modified">修改日期</option>
-              <option value="created">创建日期</option>
-              <option value="accessed">访问日期</option>
-              <option value="changed">元数据变更日期</option>
+              <option value="modified">{t("修改日期")}</option>
+              <option value="created">{t("创建日期")}</option>
+              <option value="accessed">{t("访问日期")}</option>
+              <option value="changed">{t("元数据变更日期")}</option>
             </select>
             <input
               type="date"
-              aria-label="开始日期"
+              aria-label={t("开始日期")}
               min="0001-01-01"
               max="9999-12-31"
               value={fromDate}
@@ -611,14 +654,14 @@ export function RecoveryResults({
             <span>—</span>
             <input
               type="date"
-              aria-label="结束日期"
+              aria-label={t("结束日期")}
               min="0001-01-01"
               max="9999-12-31"
               value={toDate}
               onChange={(e) => setToDate(e.target.value)}
             />
             <button className="button" type="submit">
-              应用日期
+              {t("应用日期")}
             </button>
           </form>
           <label>
@@ -627,7 +670,7 @@ export function RecoveryResults({
               checked={filter.supportedOnly}
               onChange={(e) => update({ supportedOnly: e.target.checked })}
             />
-            仅可导出
+            {t("仅可导出")}
           </label>
           <button
             className="button text-button"
@@ -648,44 +691,44 @@ export function RecoveryResults({
               setError("");
             }}
           >
-            重置筛选
+            {t("重置筛选")}
           </button>
           <p className="recovery-query-note">
-            日期范围包含首尾两天，按记录显示的日期筛选，不换算时区；未记录日期的文件不匹配。
-            修改时间排序仅比较带明确时区的完整时间，其他值始终排在末尾。名称按文字匹配，*
-            和 ? 不作通配符。
+            {t(
+              "日期范围包含首尾两天，按记录显示的日期筛选，不换算时区；未记录日期的文件不匹配。修改时间排序仅比较带明确时区的完整时间，其他值始终排在末尾。名称按文字匹配，* 和 ? 不作通配符。",
+            )}
           </p>
         </div>
       )}
-      {error && <FormError message={error} />}
+      {error && <FormError message={catalogText(error)} />}
       <div className="recovery-browser">
         <nav
           className="recovery-directories"
-          aria-label={browsing ? "分区目录" : "扫描目录"}
+          aria-label={browsing ? t("分区目录") : t("扫描目录")}
         >
           <button
             className={filter.folder === null ? "active" : ""}
             onClick={() => navigate(null)}
           >
             <List size={16} />
-            <span>{browsing ? "全部文件" : "全部结果"}</span>
-            <small>{results?.scannedTotal ?? 0}</small>
+            <span>{browsing ? t("全部文件") : t("全部结果")}</span>
+            <small>{count(results?.scannedTotal)}</small>
           </button>
           <button
             className={filter.folder === "unknown" ? "active" : ""}
             onClick={() => navigate("unknown")}
           >
             <FileSearch size={16} />
-            <span>目录未知</span>
-            <small>{folders?.unknownFiles ?? 0}</small>
+            <span>{t("目录未知")}</span>
+            <small>{count(folders?.unknownFiles)}</small>
           </button>
-          <div className="directory-divider">原目录</div>
+          <div className="directory-divider">{t("原目录")}</div>
           <button
             className={filter.folder === "root" ? "active" : ""}
             onClick={() => navigate("root")}
           >
             <FolderOpen size={16} />
-            <span>根目录</span>
+            <span>{t("根目录")}</span>
           </button>
           {folders?.path
             .filter((d) => d.id !== "root")
@@ -698,7 +741,7 @@ export function RecoveryResults({
               >
                 <ChevronRight size={13} />
                 <span>{d.name}</span>
-                {d.deleted && <small>已删除</small>}
+                {d.deleted && <small>{t("已删除")}</small>}
               </button>
             ))}
           <div className="directory-children" aria-busy={loading}>
@@ -710,15 +753,15 @@ export function RecoveryResults({
               >
                 <Folder size={16} />
                 <span>{d.name}</span>
-                <small>{d.files}</small>
+                <small>{count(d.files)}</small>
                 <ChevronRight size={12} />
               </button>
             ))}
             {folders?.items.length === 0 && (
               <p>
                 {filter.folder === "unknown"
-                  ? "无法确认原目录的文件"
-                  : "没有下级目录"}
+                  ? t("无法确认原目录的文件")
+                  : t("没有下级目录")}
               </p>
             )}
           </div>
@@ -726,20 +769,20 @@ export function RecoveryResults({
             <div className="directory-pages">
               <button
                 className="icon-button"
-                aria-label="上一页目录"
+                aria-label={t("上一页目录")}
                 disabled={loading || folders.offset === 0}
                 onClick={() => setFolderOffset(folders.offset - 100)}
               >
                 <ChevronLeft size={16} />
               </button>
               <span>
-                {folders.offset + 1}–
-                {Math.min(folders.offset + 100, folders.total)} /{" "}
-                {folders.total}
+                {count(folders.offset + 1)}–
+                {count(Math.min(folders.offset + 100, folders.total))} /{" "}
+                {count(folders.total)}
               </span>
               <button
                 className="icon-button"
-                aria-label="下一页目录"
+                aria-label={t("下一页目录")}
                 disabled={loading || folders.offset + 100 >= folders.total}
                 onClick={() => setFolderOffset(folders.offset + 100)}
               >
@@ -751,16 +794,16 @@ export function RecoveryResults({
         <div className="recovery-file-pane" aria-busy={loading}>
           {currentFolder && (
             <div className="recovery-directory-actions">
-              <span title={currentFolder.name}>
+              <span title={directoryName(currentFolder)}>
                 <FolderOpen size={16} />
-                <strong>{currentFolder.name}</strong>
+                <strong>{directoryName(currentFolder)}</strong>
               </span>
               <button
                 className="button text-button"
                 disabled={disabled}
                 onClick={() => setDirectoryProperties(currentFolder)}
               >
-                目录属性
+                {t("目录属性")}
               </button>
               <button
                 className="button"
@@ -775,23 +818,28 @@ export function RecoveryResults({
                   setRecoverOpen(true);
                 }}
               >
-                {browsing ? "复制此目录…" : "恢复此目录…"}
+                {browsing ? t("复制此目录…") : t("恢复此目录…")}
               </button>
             </div>
           )}
           <div className="recovery-selection">
             <span>
               {loading
-                ? "正在筛选…"
-                : `${results?.total.toLocaleString() ?? 0} 个匹配`}
-              {checked.size ? ` · 已选 ${checked.size}` : ""}
+                ? t("正在筛选…")
+                : t("匹配数 {count}", { count: count(results?.total) })}
+              {checked.size > 0 && (
+                <>
+                  {" · "}
+                  {t("已选 {count}", { count: count(checked.size) })}
+                </>
+              )}
             </span>
             <button
               className="button text-button"
               disabled={disabled || !results?.total}
               onClick={() => void chooseMatching()}
             >
-              选择全部匹配
+              {t("选择全部匹配")}
             </button>
             {checked.size > 0 && (
               <button
@@ -799,7 +847,7 @@ export function RecoveryResults({
                 disabled={busy || choosing}
                 onClick={() => setChecked(new Set())}
               >
-                清空选择
+                {t("清空选择")}
               </button>
             )}
           </div>
@@ -810,7 +858,7 @@ export function RecoveryResults({
                 checked={filter.descendants}
                 onChange={(e) => update({ descendants: e.target.checked })}
               />
-              包含子目录
+              {t("包含子目录")}
             </label>
           )}
           {results?.items.length ? (
@@ -825,8 +873,8 @@ export function RecoveryResults({
                           type="checkbox"
                           aria-label={
                             browsing
-                              ? "选择当前页可复制文件"
-                              : "选择当前页可恢复文件"
+                              ? t("选择当前页可复制文件")
+                              : t("选择当前页可恢复文件")
                           }
                           disabled={disabled || !pageIds.length}
                           checked={
@@ -835,107 +883,121 @@ export function RecoveryResults({
                           onChange={(e) => toggle(pageIds, e.target.checked)}
                         />
                       </th>
-                      <th>文件名 / 目录</th>
-                      <th>大小</th>
-                      <th>修改时间</th>
-                      <th>来源 / 状态</th>
+                      <th>{t("文件名 / 目录")}</th>
+                      <th>{t("大小")}</th>
+                      <th>{t("修改时间")}</th>
+                      <th>{t("来源 / 状态")}</th>
                       <th />
                     </tr>
                   </thead>
                   <tbody>
-                    {results.items.map((c) => (
-                      <tr
-                        key={c.id}
-                        className={checked.has(c.id) ? "selected" : ""}
-                      >
-                        <td>
-                          <input
-                            type="checkbox"
-                            aria-label={`选择 ${c.name}`}
-                            disabled={disabled || !c.supported}
-                            checked={checked.has(c.id)}
-                            onChange={(e) => toggle([c.id], e.target.checked)}
-                          />
-                        </td>
-                        <td>
-                          <span className="recovery-file">
-                            <FileText size={18} />
-                            <strong title={c.name}>{c.name}</strong>
-                          </span>
-                          <button
-                            className="recovery-path"
-                            disabled={loading}
-                            title={
-                              c.directoryNote ||
-                              (c.directory
-                                ? results.paths[c.directory]?.join(" / ")
-                                : "目录未知")
-                            }
-                            onClick={() => navigate(c.directory ?? "unknown")}
-                          >
-                            {c.directory
-                              ? (results.paths[c.directory]?.join(" / ") ??
-                                "目录未知")
-                              : "目录未知"}
-                          </button>
-                          <small className="recovery-note">
-                            {c.note}
-                            {c.directoryNote ? ` · ${c.directoryNote}` : ""}
-                          </small>
-                        </td>
-                        <td>{formatSize(c.size)}</td>
-                        <td
-                          className="file-time"
-                          title={
-                            c.metadata?.modified
-                              ? `${c.metadata.modified.zone} · 精度 ${c.metadata.modified.precision}`
-                              : "未记录或无法解析"
-                          }
+                    {results.items.map((c) => {
+                      const filesystem =
+                        /^(FAT(?:12|16|32)?|exFAT|Ext) 目录$/.exec(
+                          c.method,
+                        )?.[1];
+                      const directoryNote = directoryEvidence(c.directoryNote);
+                      return (
+                        <tr
+                          key={c.id}
+                          className={checked.has(c.id) ? "selected" : ""}
                         >
-                          {c.metadata?.modified?.text.split(".")[0] ?? "—"}
-                          <small>{c.metadata?.modified?.zone ?? ""}</small>
-                        </td>
-                        <td>
-                          {c.method}
-                          <small>{fileState(c)}</small>
-                          {!!c.metadata?.attributes.length && (
-                            <small className="file-attributes">
-                              {c.metadata.attributes.join(" · ")}
+                          <td>
+                            <input
+                              type="checkbox"
+                              aria-label={t("选择 {name}", { name: c.name })}
+                              disabled={disabled || !c.supported}
+                              checked={checked.has(c.id)}
+                              onChange={(e) => toggle([c.id], e.target.checked)}
+                            />
+                          </td>
+                          <td>
+                            <span className="recovery-file">
+                              <FileText size={18} />
+                              <strong title={c.name}>{c.name}</strong>
+                            </span>
+                            <button
+                              className="recovery-path"
+                              disabled={loading}
+                              title={
+                                directoryNote || directoryPath(c.directory)
+                              }
+                              onClick={() => navigate(c.directory ?? "unknown")}
+                            >
+                              {directoryPath(c.directory)}
+                            </button>
+                            <small className="recovery-note">
+                              {candidateNote(c.note)}
+                              {directoryNote ? ` · ${directoryNote}` : ""}
                             </small>
-                          )}
-                        </td>
-                        <td>
-                          <button
-                            className="button text-button"
-                            onClick={() => setProperties(c)}
+                          </td>
+                          <td>{formatSize(c.size)}</td>
+                          <td
+                            className="file-time"
+                            title={
+                              c.metadata?.modified
+                                ? t("{zone} · 精度 {precision}", {
+                                    zone: catalogText(c.metadata.modified.zone),
+                                    precision: catalogText(
+                                      c.metadata.modified.precision,
+                                    ),
+                                  })
+                                : t("未记录或无法解析")
+                            }
                           >
-                            属性
-                          </button>
-                          <button
-                            className="button text-button"
-                            disabled={disabled || !c.supported}
-                            onClick={() => onPreview(c)}
-                          >
-                            预览
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                            {c.metadata?.modified?.text.split(".")[0] ?? "—"}
+                            <small>
+                              {catalogText(c.metadata?.modified?.zone ?? "")}
+                            </small>
+                          </td>
+                          <td>
+                            {filesystem
+                              ? t("{filesystem} 目录", { filesystem })
+                              : catalogText(c.method)}
+                            <small>{catalogText(fileState(c))}</small>
+                            {!!c.metadata?.attributes.length && (
+                              <small className="file-attributes">
+                                {c.metadata.attributes
+                                  .map(catalogText)
+                                  .join(" · ")}
+                              </small>
+                            )}
+                          </td>
+                          <td>
+                            <button
+                              className="button text-button"
+                              onClick={() => setProperties(c)}
+                            >
+                              {t("属性")}
+                            </button>
+                            <button
+                              className="button text-button"
+                              disabled={disabled || !c.supported}
+                              onClick={() => onPreview(c)}
+                            >
+                              {t("预览")}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
               <div className="results-pagination">
                 <span>
-                  {results.offset + 1}–
-                  {Math.min(
-                    results.offset + results.items.length,
-                    results.total,
+                  {count(results.offset + 1)}–
+                  {count(
+                    Math.min(
+                      results.offset + results.items.length,
+                      results.total,
+                    ),
                   )}{" "}
-                  / {results.total}
+                  / {count(results.total)}
                 </span>
                 <button
                   className="icon-button"
-                  aria-label="上一页文件"
+                  aria-label={t("上一页文件")}
                   disabled={loading || results.offset === 0}
                   onClick={() => setOffset(results.offset - 100)}
                 >
@@ -943,7 +1005,7 @@ export function RecoveryResults({
                 </button>
                 <button
                   className="icon-button"
-                  aria-label="下一页文件"
+                  aria-label={t("下一页文件")}
                   disabled={loading || results.offset + 100 >= results.total}
                   onClick={() => setOffset(results.offset + 100)}
                 >
@@ -956,30 +1018,27 @@ export function RecoveryResults({
               icon={<FileSearch size={30} />}
               title={
                 loading
-                  ? "正在读取结果"
+                  ? t("正在读取结果")
                   : running
-                    ? "正在寻找文件"
-                    : "没有匹配的文件"
+                    ? t("正在寻找文件")
+                    : t("没有匹配的文件")
               }
-              text="可更改目录或筛选条件。目录未知的文件不会被猜测归入其他目录。"
+              text={t(
+                "可更改目录或筛选条件。目录未知的文件不会被猜测归入其他目录。",
+              )}
             />
           )}
         </div>
       </div>
       <p className="recovery-export-note">
-        可按已确认的原目录结构{browsing ? "复制" : "恢复"}
-        ，或集中保存。目录关系来自本次{browsing ? "读取" : "扫描"}
-        ，可能不完整；名称调整和导出结果会记录在清单中。
+        {t(
+          "可按已确认的原目录结构保存，或集中保存。目录关系来自本次读取，可能不完整。名称调整和导出结果会记录在清单中。",
+        )}
       </p>
       {properties && (
         <FileProperties
           file={properties}
-          directory={
-            properties.directory
-              ? (results?.paths[properties.directory]?.join(" / ") ??
-                "目录未知")
-              : "目录未知"
-          }
+          directory={directoryPath(properties.directory)}
           onClose={() => setProperties(null)}
         />
       )}
@@ -990,8 +1049,8 @@ export function RecoveryResults({
           directory={
             folders?.path
               .filter((d) => d.id !== directoryProperties.id)
-              .map((d) => d.name)
-              .join(" / ") || "根目录"
+              .map(directoryName)
+              .join(" / ") || t("根目录")
           }
           onClose={() => setDirectoryProperties(null)}
         />

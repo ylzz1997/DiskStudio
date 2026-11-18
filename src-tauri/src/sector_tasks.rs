@@ -149,8 +149,8 @@ pub fn export(id: String) -> Result<Option<String>, String> {
                 .cloned()
                 .ok_or("当前扇区已被替换，请重新读取。")?;
             let Some(path) = rfd::FileDialog::new()
-                .set_title("导出当前扇区到另一块磁盘")
-                .add_filter("扇区数据", &["bin"])
+                .set_title(crate::native_locale::text("导出当前扇区到另一块磁盘"))
+                .add_filter(crate::native_locale::text("扇区数据"), &["bin"])
                 .set_file_name(format!("DiskStudio-sector-{}.bin", page.sector))
                 .save_file()
             else {
@@ -303,8 +303,10 @@ pub fn start(request: SearchRequest) -> Result<String, String> {
                     )?;
                     if let Err(e) = platform::resolve(&request.source, false, false) {
                         result.state = "failed".into();
-                        result.message =
-                            format!("结束时设备或布局核对失败：{e}；匹配仅对应已读取数据。");
+                        result.message = crate::native_locale::diagnostic(
+                            "结束时设备或布局核对失败。匹配仅对应已读取数据。{error}",
+                            &e,
+                        );
                     }
                     Ok(result)
                 },

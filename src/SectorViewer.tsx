@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { MessageError } from "./i18n/translate";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
+import { errorText } from "./partitionOutcome";
 import { formatSize, type Disk } from "./types";
 import {
   differingBytes,
@@ -30,6 +34,8 @@ export function SectorViewer({
   onBusy: (busy: boolean) => void;
   onRefresh: () => Promise<unknown>;
 }) {
+  const { t, language, catalogText } = useLocale();
+  const integer = (value: number) => value.toLocaleString(language);
   const [partition, setPartition] = useState(
     initialPartition === undefined ? "" : String(initialPartition),
   );
@@ -41,8 +47,16 @@ export function SectorViewer({
   const [byte, setByte] = useState(0),
     [little, setLittle] = useState(true);
   const [busy, setBusyState] = useState(false),
-    [error, setError] = useState(""),
-    [message, setMessage] = useState("");
+    [error, setError] = useState<unknown>(null),
+    [notice, setNotice] = useState<
+      { kind: "export"; path: string } | { kind: "write"; count: number } | null
+    >(null);
+  const errorMessage =
+    error instanceof MessageError
+      ? t(error.key, error.variables)
+      : error == null
+        ? ""
+        : catalogText(errorText(error).trim());
   const [encoding, setEncoding] =
       useState<SectorConditionInput["encoding"]>("hex"),
     [pattern, setPattern] = useState(""),
@@ -75,7 +89,7 @@ export function SectorViewer({
   }
   function selection(): SectorSelection {
     if (!disk.hardware?.identity || !disk.hardware.layoutKey)
-      throw Error("请刷新磁盘信息后重试。");
+      throw Error(t("请刷新磁盘信息后重试。"));
     return {
       target: disk.hardware.identity,
       layoutKey: disk.hardware.layoutKey,
@@ -98,7 +112,7 @@ export function SectorViewer({
             setBusy(next.result.state === "running");
           }
         } catch (e) {
-          if (alive) setError(String(e));
+          if (alive) setError(e);
         }
       }
       if (alive) timer = setTimeout(() => void poll(), 400);
@@ -116,8 +130,8 @@ export function SectorViewer({
     control.current.id = "";
     setPosition("0");
     setStart("0");
-    setMessage("");
-    setError("");
+    setNotice(null);
+    setError(null);
     setCount(
       String(
         (value
@@ -130,7 +144,7 @@ export function SectorViewer({
     setSearch(null);
     setResultPage(0);
     control.current.id = "";
-    setError("");
+    setError(null);
   }
   function updateCondition(
     index: number,
@@ -145,12 +159,12 @@ export function SectorViewer({
     if (control.current.busy) return;
     control.current.pending = true;
     setBusy(true);
-    setError("");
-    setMessage("");
+    setError(null);
+    setNotice(null);
     try {
       return await work();
     } catch (e) {
-      setError(String(e));
+      setError(e);
     } finally {
       control.current.pending = false;
       setBusy(false);
@@ -175,8 +189,8 @@ export function SectorViewer({
     if (control.current.busy || editing) return;
     control.current.pending = true;
     setBusy(true);
-    setError("");
-    setMessage("");
+    setError(null);
+    setNotice(null);
     try {
       const options = surfaceRange(start, count, size, disk.sectorSize);
       const id = await invoke<string>("sector_search", {
@@ -202,7 +216,7 @@ export function SectorViewer({
       setResultPage(0);
       setSearch(await invoke<SectorSearch | null>("sector_status"));
     } catch (e) {
-      setError(String(e));
+      setError(e);
       setBusy(false);
     } finally {
       control.current.pending = false;
@@ -212,12 +226,22 @@ export function SectorViewer({
     page && anchor ? differingBytes(page.bytes, anchor.bytes) : [],
   );
   const running = search?.result.state === "running";
+  const searchMessage =
+    search &&
+    (search.result.state === "completed"
+      ? t(
+          search.direction === "backward"
+            ? "所选范围已反向搜索完成，找到 {count} 个匹配基准位置。"
+            : "所选范围已搜索完成，找到 {count} 个匹配基准位置。",
+          { count: integer(search.result.hits.length) },
+        )
+      : catalogText(search.result.message));
   const hex = (n: number, width = 2) =>
     n.toString(16).toUpperCase().padStart(width, "0");
   function backToEdit() {
     if (plan) void invoke("sector_discard_write", { token: plan.token });
     setPlan(null);
-    setError("");
+    setError(null);
   }
   async function previewWrite() {
     if (!page || !draft) return;
@@ -238,11 +262,8 @@ export function SectorViewer({
       const token = plan.token;
       setPlan(null);
       try {
-        const result = await invoke<{ message: string; sha256: string }>(
-          "sector_execute_write",
-          { token },
-        );
-        setMessage(result.message);
+        await invoke("sector_execute_write", { token });
+        setNotice({ kind: "write", count: plan.changes.length });
       } finally {
         setDraft(null);
         setPage(null);
@@ -254,24 +275,31 @@ export function SectorViewer({
     return (
       <Dialog
         wide
-        title="确认扇区修改"
+        title={t("确认扇区修改")}
         subtitle={plan.target}
         onClose={() => {
           if (!control.current.busy) backToEdit();
         }}
       >
-        <p className="surface-message">{plan.warning}</p>
+        <p className="surface-message">{catalogText(plan.warning)}</p>
         <p className="surface-note">
-          相对 LBA {plan.relativeSector} · 绝对 LBA {plan.absoluteSector} · 写入{" "}
-          {plan.sectorSize} B · 改动 {plan.changes.length} 字节
+          {t("相对 LBA {relative} · 绝对 LBA {absolute}", {
+            relative: integer(plan.relativeSector),
+            absolute: integer(plan.absoluteSector),
+          })}
+          {" · "}
+          {t("写入 {size} B · 改动 {count} 字节", {
+            size: integer(plan.sectorSize),
+            count: integer(plan.changes.length),
+          })}
         </p>
         <div className="sector-change-table">
           <table>
             <thead>
               <tr>
-                <th>字节偏移</th>
-                <th>原值</th>
-                <th>新值</th>
+                <th>{t("字节偏移")}</th>
+                <th>{t("原值")}</th>
+                <th>{t("新值")}</th>
               </tr>
             </thead>
             <tbody>
@@ -288,21 +316,21 @@ export function SectorViewer({
           </table>
         </div>
         <details className="sector-hashes">
-          <summary>整个扇区 SHA-256</summary>
-          <p>原内容：{plan.beforeSha256}</p>
-          <p>新内容：{plan.afterSha256}</p>
+          <summary>{t("整个扇区 SHA-256")}</summary>
+          <p>{t("原内容 {hash}", { hash: plan.beforeSha256 })}</p>
+          <p>{t("新内容 {hash}", { hash: plan.afterSha256 })}</p>
         </details>
-        <FormError message={error} />
+        <FormError message={errorMessage} />
         <div className="sector-file-actions">
           <button className="button" disabled={busy} onClick={backToEdit}>
-            返回编辑
+            {t("返回编辑")}
           </button>
           <button
             className="button primary"
             disabled={busy}
             onClick={() => void saveWrite()}
           >
-            确认写入
+            {t("确认写入")}
           </button>
         </div>
       </Dialog>
@@ -310,12 +338,12 @@ export function SectorViewer({
   return (
     <Dialog
       wide
-      title={editing ? "编辑扇区" : "扇区查看"}
-      subtitle={`${disk.name} · ${formatSize(disk.size)}`}
+      title={editing ? t("编辑扇区") : t("扇区查看")}
+      subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)}`}
       onClose={() => {
         if (control.current.busy) return;
         if (changes.length) {
-          setError("还有未保存的改动，请先预览保存或丢弃改动。");
+          setError(t("还有未保存的改动，请先预览保存或丢弃改动。"));
           return;
         }
         onClose();
@@ -323,19 +351,19 @@ export function SectorViewer({
     >
       <div className="sector-top">
         <label>
-          查看范围
+          {t("查看范围")}
           <select
             value={partition}
             disabled={busy || editing}
             onChange={(e) => choose(e.target.value)}
           >
-            <option value="">整个磁盘</option>
+            <option value="">{t("整个磁盘")}</option>
             {disk.partitions
               .filter((p) => p.number !== undefined)
               .map((p) => (
                 <option key={p.id} value={p.number}>
-                  分区 {p.number} · {p.driveLetter ? `${p.driveLetter}: ` : ""}
-                  {p.name} · {formatSize(p.size)}
+                  {t("分区 {number}", { number: p.number! })} ·{" "}
+                  {partitionTitle(p, catalogText)} · {formatSize(p.size)}
                 </option>
               ))}
           </select>
@@ -346,14 +374,14 @@ export function SectorViewer({
             disabled={editing}
             onClick={() => setTab("view")}
           >
-            查看
+            {t("查看")}
           </button>
           <button
             className={tab === "search" ? "active" : ""}
             disabled={editing}
             onClick={() => setTab("search")}
           >
-            搜索
+            {t("搜索")}
           </button>
         </div>
       </div>
@@ -361,16 +389,16 @@ export function SectorViewer({
         <>
           <div className="sector-location">
             <label>
-              位置
+              {t("位置")}
               <input
                 value={position}
                 disabled={busy}
                 onChange={(e) => setPosition(e.target.value)}
-                placeholder="0 或 0x0000"
+                placeholder={t("0 或 0x0000")}
               />
             </label>
             <label>
-              单位
+              {t("单位")}
               <select
                 value={unit}
                 disabled={busy}
@@ -386,8 +414,8 @@ export function SectorViewer({
                   );
                 }}
               >
-                <option value="sector">相对 LBA</option>
-                <option value="byte">相对字节</option>
+                <option value="sector">{t("相对 LBA")}</option>
+                <option value="byte">{t("相对字节")}</option>
               </select>
             </label>
             <button
@@ -395,7 +423,7 @@ export function SectorViewer({
               disabled={busy || editing}
               onClick={() => void read()}
             >
-              读取
+              {t("读取")}
             </button>
           </div>
           {page ? (
@@ -403,7 +431,9 @@ export function SectorViewer({
               {draft && (
                 <div className="sector-edit-bar">
                   <label>
-                    从字节 {byte} 开始（十六进制）
+                    {t("从字节 {index} 开始（十六进制）", {
+                      index: integer(byte),
+                    })}
                     <input
                       value={editHex}
                       maxLength={12288}
@@ -417,29 +447,35 @@ export function SectorViewer({
                     onClick={() => {
                       try {
                         setDraft(stageSectorBytes(draft, byte, editHex));
-                        setError("");
+                        setError(null);
                       } catch (e) {
-                        setError(String(e));
+                        setError(e);
                       }
                     }}
                   >
-                    暂存改动
+                    {t("暂存改动")}
                   </button>
                   <span className="surface-note">
-                    {changes.length} 字节未保存
+                    {t("未保存字节 {count}", {
+                      count: integer(changes.length),
+                    })}
                   </span>
                 </div>
               )}
               <div className="sector-page-meta">
                 <span>
-                  LBA {page.sector} · 绝对 LBA{" "}
-                  {page.sourceOffset / page.sectorSize + page.sector}
+                  {t("相对 LBA {relative} · 绝对 LBA {absolute}", {
+                    relative: integer(page.sector),
+                    absolute: integer(
+                      page.sourceOffset / page.sectorSize + page.sector,
+                    ),
+                  })}
                 </span>
                 <span>{page.sectorSize} B</span>
               </div>
               <div
                 className="sector-hex"
-                aria-label="十六进制与 ASCII 字节"
+                aria-label={t("十六进制与 ASCII 字节")}
                 role="region"
               >
                 {Array.from({ length: page.bytes.length / 16 }, (_, row) => (
@@ -456,8 +492,14 @@ export function SectorViewer({
                             <button
                               key={i}
                               className={`${index === byte ? "selected" : ""} ${differences.has(index) ? "different" : ""} ${draft && draft[index] !== page.bytes[index] ? "edited" : ""}`}
-                              aria-label={`字节 ${index}：${hex(value)}`}
-                              title={`偏移 ${index} / 0x${hex(index)}`}
+                              aria-label={t("字节 {index}：{value}", {
+                                index: integer(index),
+                                value: hex(value),
+                              })}
+                              title={t("偏移 {decimal} / 0x{hex}", {
+                                decimal: integer(index),
+                                hex: hex(index),
+                              })}
                               onClick={() => {
                                 setByte(index);
                                 if (draft) setEditHex(hex(draft[index]));
@@ -485,14 +527,14 @@ export function SectorViewer({
                   disabled={busy || editing || page.sector === 0}
                   onClick={() => void read(0)}
                 >
-                  首扇区
+                  {t("首扇区")}
                 </button>
                 <button
                   className="button"
                   disabled={busy || editing || page.sector === 0}
                   onClick={() => void read(page.sector - 1)}
                 >
-                  上一扇区
+                  {t("上一扇区")}
                 </button>
                 <button
                   className="button"
@@ -501,7 +543,7 @@ export function SectorViewer({
                   }
                   onClick={() => void read(page.sector + 1)}
                 >
-                  下一扇区
+                  {t("下一扇区")}
                 </button>
                 <button
                   className="button"
@@ -510,27 +552,29 @@ export function SectorViewer({
                   }
                   onClick={() => void read(size / disk.sectorSize - 1)}
                 >
-                  末扇区
+                  {t("末扇区")}
                 </button>
               </div>
               <details className="sector-interpreter">
-                <summary>字节解释 · 偏移 {byte}</summary>
+                <summary>
+                  {t("字节解释 · 偏移 {offset}", { offset: integer(byte) })}
+                </summary>
                 <label>
-                  字节序
+                  {t("字节序")}
                   <select
                     value={little ? "little" : "big"}
                     onChange={(e) => setLittle(e.target.value === "little")}
                   >
-                    <option value="little">小端 LE</option>
-                    <option value="big">大端 BE</option>
+                    <option value="little">{t("小端 LE")}</option>
+                    <option value="big">{t("大端 BE")}</option>
                   </select>
                 </label>
                 <table>
                   <thead>
                     <tr>
-                      <th>位数</th>
-                      <th>无符号整数</th>
-                      <th>有符号整数</th>
+                      <th>{t("位数")}</th>
+                      <th>{t("无符号整数")}</th>
+                      <th>{t("有符号整数")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -552,17 +596,17 @@ export function SectorViewer({
                       disabled={busy}
                       onClick={() => {
                         setDraft(null);
-                        setError("");
+                        setError(null);
                       }}
                     >
-                      丢弃改动
+                      {t("丢弃改动")}
                     </button>
                     <button
                       className="button primary"
                       disabled={busy || !changes.length}
                       onClick={() => void previewWrite()}
                     >
-                      预览修改
+                      {t("预览修改")}
                     </button>
                   </>
                 ) : (
@@ -571,16 +615,16 @@ export function SectorViewer({
                     disabled={busy || page.source.partition === null}
                     title={
                       page.source.partition === null
-                        ? "请先选择普通 GPT 数据分区"
-                        : "先在内存编辑，预览后确认写入"
+                        ? t("请先选择普通 GPT 数据分区")
+                        : t("先在内存编辑，预览后确认写入")
                     }
                     onClick={() => {
                       setDraft([...page.bytes]);
                       setEditHex(hex(page.bytes[byte]));
-                      setMessage("");
+                      setNotice(null);
                     }}
                   >
-                    编辑字节
+                    {t("编辑字节")}
                   </button>
                 )}
                 <button
@@ -588,10 +632,10 @@ export function SectorViewer({
                   disabled={busy || editing}
                   onClick={() => {
                     setAnchor(page);
-                    setMessage("");
+                    setNotice(null);
                   }}
                 >
-                  作为比较基准
+                  {t("作为比较基准")}
                 </button>
                 <button
                   className="button"
@@ -602,30 +646,34 @@ export function SectorViewer({
                         "sector_export",
                         { id: page.id },
                       );
-                      if (path) setMessage(`已导出并校验 SHA-256：${path}`);
+                      if (path) setNotice({ kind: "export", path });
                     })
                   }
                 >
-                  导出当前扇区
+                  {t("导出当前扇区")}
                 </button>
               </div>
               {anchor && (
                 <p className="surface-note sector-comparison">
-                  基准：{anchor.label} · LBA {anchor.sector} ·{" "}
-                  {anchor.sectorSize} B<br />
-                  差异 {differences.size} 字节
+                  {t("基准 {name} · LBA {lba} · {size} B", {
+                    name: anchor.label,
+                    lba: integer(anchor.sector),
+                    size: integer(anchor.sectorSize),
+                  })}
+                  <br />
+                  {t("差异字节 {count}", { count: integer(differences.size) })}
                   <button
                     className="link-button"
                     onClick={() => setAnchor(null)}
                   >
-                    清除基准
+                    {t("清除基准")}
                   </button>
                 </p>
               )}
             </>
           ) : (
             <div className="sector-empty">
-              输入位置后读取一个扇区。支持十六进制、ASCII 和字节解释。
+              {t("输入位置后读取一个扇区。支持十六进制、ASCII 和字节解释。")}
             </div>
           )}
         </>
@@ -633,12 +681,14 @@ export function SectorViewer({
         <>
           <div className="sector-search-pattern">
             <label>
-              搜索内容
+              {t("搜索内容")}
               <input
                 value={pattern}
                 disabled={busy}
                 placeholder={
-                  encoding === "hex" ? "如 46 4? ?? 33 32" : "输入要查找的文本"
+                  encoding === "hex"
+                    ? t("如 46 4? ?? 33 32")
+                    : t("输入要查找的文本")
                 }
                 onChange={(e) => {
                   setPattern(e.target.value);
@@ -647,7 +697,7 @@ export function SectorViewer({
               />
             </label>
             <label>
-              编码
+              {t("编码")}
               <select
                 value={encoding}
                 disabled={busy}
@@ -656,8 +706,8 @@ export function SectorViewer({
                   invalidateSearch();
                 }}
               >
-                <option value="hex">十六进制（支持 ?）</option>
-                <option value="utf8">UTF-8 文本</option>
+                <option value="hex">{t("十六进制（支持 ?）")}</option>
+                <option value="utf8">{t("UTF-8 文本")}</option>
                 <option value="utf16Le">UTF-16 LE</option>
               </select>
             </label>
@@ -673,11 +723,11 @@ export function SectorViewer({
                   invalidateSearch();
                 }}
               />
-              忽略 ASCII 字母大小写
+              {t("忽略 ASCII 字母大小写")}
             </label>
           )}
           <div className="sector-presets">
-            常用标记：
+            {t("常用标记")}
             {Object.entries({
               GPT: "45 46 49 20 50 41 52 54",
               NTFS: "4E 54 46 53 20 20 20 20",
@@ -699,7 +749,7 @@ export function SectorViewer({
                   invalidateSearch();
                 }}
               >
-                {name}
+                {catalogText(name)}
               </button>
             ))}
             <button
@@ -722,7 +772,7 @@ export function SectorViewer({
                 invalidateSearch();
               }}
             >
-              FAT32 引导特征
+              {t("FAT32 引导特征")}
             </button>
           </div>
           <details
@@ -731,11 +781,13 @@ export function SectorViewer({
             onToggle={(e) => setAdvanced(e.currentTarget.open)}
           >
             <summary>
-              多条件与相对偏移 · {extraConditions.length + 1} 项
+              {t("多条件与相对偏移 · {count} 项", {
+                count: extraConditions.length + 1,
+              })}
             </summary>
             <div className="sector-condition-options">
               <label>
-                组合方式
+                {t("组合方式")}
                 <select
                   value={matchMode}
                   disabled={busy}
@@ -744,12 +796,12 @@ export function SectorViewer({
                     invalidateSearch();
                   }}
                 >
-                  <option value="all">同时满足全部</option>
-                  <option value="any">满足任意一项</option>
+                  <option value="all">{t("同时满足全部")}</option>
+                  <option value="any">{t("满足任意一项")}</option>
                 </select>
               </label>
               <label>
-                首项相对偏移（字节）
+                {t("首项相对偏移（字节）")}
                 <input
                   value={conditionOffset}
                   disabled={busy}
@@ -764,7 +816,7 @@ export function SectorViewer({
               <div className="sector-condition" key={index}>
                 <div className="sector-condition-fields">
                   <label>
-                    条件 {index + 2}
+                    {t("条件 {number}", { number: index + 2 })}
                     <input
                       value={condition.value}
                       disabled={busy}
@@ -774,7 +826,7 @@ export function SectorViewer({
                     />
                   </label>
                   <label>
-                    编码
+                    {t("编码")}
                     <select
                       value={condition.encoding}
                       disabled={busy}
@@ -784,13 +836,13 @@ export function SectorViewer({
                         })
                       }
                     >
-                      <option value="hex">Hex（支持 ?）</option>
+                      <option value="hex">{t("十六进制（支持 ?）")}</option>
                       <option value="utf8">UTF-8</option>
                       <option value="utf16Le">UTF-16 LE</option>
                     </select>
                   </label>
                   <label>
-                    相对偏移（字节）
+                    {t("相对偏移（字节）")}
                     <input
                       value={condition.offset}
                       disabled={busy}
@@ -802,7 +854,7 @@ export function SectorViewer({
                   <button
                     className="button"
                     disabled={busy}
-                    aria-label={`移除条件 ${index + 2}`}
+                    aria-label={t("移除条件 {number}", { number: index + 2 })}
                     onClick={() => {
                       setExtraConditions((rows) =>
                         rows.filter((_, i) => i !== index),
@@ -810,7 +862,7 @@ export function SectorViewer({
                       invalidateSearch();
                     }}
                   >
-                    移除
+                    {t("移除")}
                   </button>
                 </div>
                 {condition.encoding !== "hex" && (
@@ -825,7 +877,7 @@ export function SectorViewer({
                         })
                       }
                     />
-                    忽略 ASCII 字母大小写
+                    {t("忽略 ASCII 字母大小写")}
                   </label>
                 )}
               </div>
@@ -846,15 +898,17 @@ export function SectorViewer({
                 invalidateSearch();
               }}
             >
-              添加条件
+              {t("添加条件")}
             </button>
             <p className="surface-note">
-              偏移相对于同一个匹配基准位置；结果定位到该基准。特征匹配不等于文件系统有效。
+              {t(
+                "偏移相对于同一个匹配基准位置；结果定位到该基准。特征匹配不等于文件系统有效。",
+              )}
             </p>
           </details>
           <div className="sector-search-range">
             <label>
-              搜索方向
+              {t("搜索方向")}
               <select
                 value={direction}
                 disabled={busy}
@@ -863,12 +917,12 @@ export function SectorViewer({
                   invalidateSearch();
                 }}
               >
-                <option value="forward">从头向后</option>
-                <option value="backward">从尾向前</option>
+                <option value="forward">{t("从头向后")}</option>
+                <option value="backward">{t("从尾向前")}</option>
               </select>
             </label>
             <label>
-              起始相对 LBA
+              {t("起始相对 LBA")}
               <input
                 value={start}
                 disabled={busy}
@@ -879,7 +933,7 @@ export function SectorViewer({
               />
             </label>
             <label>
-              扇区数量
+              {t("扇区数量")}
               <input
                 value={count}
                 disabled={busy}
@@ -894,11 +948,11 @@ export function SectorViewer({
                 className="button"
                 onClick={() =>
                   void invoke("data_cancel", { id: search.id }).catch((e) =>
-                    setError(String(e)),
+                    setError(e),
                   )
                 }
               >
-                停止搜索
+                {t("停止搜索")}
               </button>
             ) : (
               <button
@@ -908,7 +962,7 @@ export function SectorViewer({
                 }
                 onClick={() => void begin()}
               >
-                开始搜索
+                {t("开始搜索")}
               </button>
             )}
           </div>
@@ -918,19 +972,32 @@ export function SectorViewer({
                 className="surface-progress"
                 max={search.result.totalBytes}
                 value={search.result.checkedBytes}
-                aria-label="搜索进度"
+                aria-label={t("搜索进度")}
               />
               <p className="surface-note" role="status">
-                {search.query.conditions.length} 项条件 ·{" "}
-                {search.query.mode === "all" ? "全部" : "任意"} ·{" "}
-                {search.direction === "backward" ? "从尾向前" : "从头向后"} ·{" "}
-                {formatSize(search.result.checkedBytes)} /{" "}
+                {t("条件数 {count}", { count: search.query.conditions.length })}{" "}
+                ·{" "}
+                {t(
+                  search.query.mode === "all" ? "同时满足全部" : "满足任意一项",
+                )}{" "}
+                ·{" "}
+                {search.direction === "backward"
+                  ? t("从尾向前")
+                  : t("从头向后")}{" "}
+                · {formatSize(search.result.checkedBytes)} /{" "}
                 {formatSize(search.result.totalBytes)} ·{" "}
-                {search.result.hits.length} 个匹配
-                {running ? " · 正在搜索…" : ""}
+                {t("匹配数 {count}", {
+                  count: integer(search.result.hits.length),
+                })}
+                {running && (
+                  <>
+                    {" · "}
+                    {t("正在搜索")}
+                  </>
+                )}
               </p>
-              {search.result.message && (
-                <p className="surface-message">{search.result.message}</p>
+              {searchMessage && (
+                <p className="surface-message">{searchMessage}</p>
               )}
               <div className="sector-results">
                 {search.result.hits
@@ -965,7 +1032,7 @@ export function SectorViewer({
                     disabled={resultPage === 0}
                     onClick={() => setResultPage((p) => p - 1)}
                   >
-                    上一页
+                    {t("上一页")}
                   </button>
                   <span>
                     {resultPage + 1} /{" "}
@@ -978,7 +1045,7 @@ export function SectorViewer({
                     }
                     onClick={() => setResultPage((p) => p + 1)}
                   >
-                    下一页
+                    {t("下一页")}
                   </button>
                 </div>
               )}
@@ -988,15 +1055,20 @@ export function SectorViewer({
       )}
       <p className="surface-note">
         {tab === "view"
-          ? "位置相对于所选范围；在线卷的内容可能变化。"
+          ? t("位置相对于所选范围；在线卷的内容可能变化。")
           : encoding === "hex"
-            ? "? 匹配一个十六进制位，?? 匹配一个字节；最多保留 1024 项。"
-            : "文本按所选编码匹配，最多保留 1024 项；遇到读取错误会停止。"}
+            ? t("? 匹配一个十六进制位，?? 匹配一个字节；最多保留 1024 项。")
+            : t("文本按所选编码匹配，最多保留 1024 项；遇到读取错误会停止。")}
       </p>
-      <FormError message={error} />
-      {message && (
+      <FormError message={errorMessage} />
+      {notice && (
         <p className="surface-note" role="status">
-          {message}
+          {notice.kind === "export"
+            ? t("已导出并校验 SHA-256：{path}", { path: notice.path })
+            : t(
+                "已保存 {count} 个字节改动，整个扇区 SHA-256 回读一致。磁盘保持脱机，请核对后再手动联机。",
+                { count: integer(notice.count) },
+              )}
         </p>
       )}
     </Dialog>

@@ -119,6 +119,12 @@
   ],
   "features": [
     {
+      "id": "localization",
+      "status": "implemented-limited",
+      "detail": "界面及离线目录清单支持简繁中文、英日韩葡西德法意俄。界面语言可跟随系统或手动设置并保留。常用确认、结果、扫描摘要及 NVMe 指标已接入词库；部分底层诊断仍为英文回退或保留提供者原文。首轮 4Kn 来宾核对 11 个语言选项、在 A 读取 SMART、在 B 的空闲范围新建 16 MiB 分区并完整 FAT12 格式化，读回全部 16 MiB。最终候选在同一来宾确认英文设置重启后保留、B/3 目录只读浏览和英文结果、B 的只读和可读写往返及后验。两轮分别记录，其他语言组合未逐项在原生来宾复测。",
+      "evidence": ".vm/alpha-i18n-status.json"
+    },
+    {
       "id": "inventory",
       "status": "implemented",
       "detail": "固定 WMI 元数据；Windows 状态与 SMART 分开"
@@ -201,18 +207,38 @@
     },
     {
       "id": "partition-move",
-      "status": "planned",
-      "detail": "保留数据移动起点、重叠复制顺序与中断恢复"
+      "status": "implemented-limited",
+      "detail": "普通 GPT Windows 数据分区已接入同盘起点移动和显式续作。范围重叠时按方向复制，每块持久化并以 SHA-256 回读后才写入双槽断点。续作前由已搬移和剩余范围重建完整源摘要。保留分区身份与容量，先更新备份 GPT，再更新主 GPT，核对两份表和 Windows 原生布局。中断后只接受与记录匹配的已写入前缀。引导变更计划覆盖 NTFS、FAT12/16/32 的非零隐藏扇区计数，以及 exFAT 两份引导区的偏移和校验和。Windows 入口核对磁盘、完整布局及卷锁，持久脱机，要求断点位于另一物理磁盘并由当前 Windows 用户的凭据验证，前端只提交范围及单次令牌。界面提供新起点预览、阶段进度、停止与断点续作。512 B、4Kn 通过内存测试，含 FAT12 重叠复制与 GPT 续作。首轮 b5ec7564 通过 678 项检查，在隔离 VM 原生界面将 A/24 的 512 MiB FAT16 向右重叠移动 64 MiB。独立核对主备 GPT、分区起点、FAT 引导和 131,089 字节样本通过，B 的 GPT 保留。该轮停止请求到达时复制已完成。重启后 A 仍脱机。e47addd6 修正离线时 WMI 字段为空导致的复核拒绝，续作使用原生磁盘属性、无关联卷检查及经过认证的完整 GPT 记录核验保护。679 项集中测试和新正式构建通过。两轮本地、留档和 VM payload 散列均一致。新构建重启后只读复核原断点的完整数据、卷引导和 GPT，A/B 写入计数不变。同一构建在 A/25（FAT16）重叠移动中于 220 MiB 停止，原 GPT 和断点独立检查通过。正常重启后原生界面从 220 MiB 继续，A 只写入剩余 292 MiB 和五个 512 字节元数据扇区。独立核对 131,089 字节样本、卷引导、A 的新 GPT 和 B 的原 GPT 均通过，A 保持脱机。相同正式程序的 4Kn exFAT 样本 A/6 已向右重叠移动 4 MiB（548→552 MiB），独立核对主备引导区位置和校验和、131,089 字节样本、两盘 GPT，A 保持脱机。4Kn NTFS 原准备在独立原始文件检查处停止，随后在同一夹具上通过只读复查，A/B 写入计数不变。相同正式程序将 A/7 的 128 MiB NTFS 向左重叠移动 4 MiB（796→792 MiB），独立核对主备引导、131,089 字节样本和两盘 GPT。两项后验期间 A/B 写入计数不变，A 均保持脱机。4Kn FAT12 准备因 Windows 重编号停止，按原字节范围和现有 GPT 证明完成准备后，只提交一次原生移动。A/5 的 8 MiB FAT12 从 664 移至 668 MiB，独立读回引导、65,553 字节原样本和两盘 GPT 均通过。A 保持脱机，后验未增加 A/B 写入。同一正式程序在 4Kn A/3 的 320 MiB FAT32 上执行向左重叠移动（212→208 MiB），在 52 MiB 处主动停止。独立核对非零断点、原 GPT 和 A 脱机状态。正常重启后 A 写入计数为零，原生界面从 52 MiB 继续。A 只写入剩余 268 MiB 与六个 4096 字节元数据扇区。独立读回主备 FAT32 引导区、65,553 字节原样本和两盘 GPT 通过，A 保持脱机，后验未增加 A/B 写入。主动停止后正常重启的续作已覆盖 512 B 和 4Kn，掉电和介质错误尚待原生验收。",
+      "evidence": [
+        ".vm/partition-move-core-status.json",
+        ".vm/partition-move-windows-status.json",
+        ".vm/partition-move-resume-status.json",
+        ".vm/partition-move-4kn-status.json",
+        ".vm/partition-move-4kn-fat-status.json"
+      ]
     },
     {
       "id": "partition-split-merge",
-      "status": "planned",
-      "detail": "拆分、合并与跨分区空闲空间重新分配"
+      "status": "in-progress",
+      "detail": "已实现拆分、相邻及非相邻未分配空间分配、从供给卷释放空间和相邻 NTFS 分区合并。拆分先缩小原卷再创建尾部分区，可指定新卷格式。非相邻空闲空间从紧邻空闲的一侧逐项移动，再扩大目标。各操作接通一次确认、逐步执行与复核、停止及桌面菜单。步骤按 GPT GUID 和精确字节范围识别，核对卷关联、主备 GPT、原生布局、分页保护和非目标字段。搬移在另一物理盘保存独立断点，完整回读后临时联机以完成后续步骤，批次结束确认脱机。合并把被吸收卷迁入保留卷根目录下的新目录，恢复文件和目录的时间、属性与安全描述符，并重新读取两个锁定的卷。只有确认源内容未变、目标目录仍匹配其名称和记录号、目录清单及各数据流 SHA-256 相符后，才持锁提交 Windows 删除分区方法。删除后核对 GPT 与保留卷绑定，再按计划移动或扩容。无法安全还原的名称、权限或元数据会中止合并，残留副本留在新目录。46 项定向 Rust 测试、5 项定向前端测试、Windows 应用与来宾驱动编译和前端类型检查通过。首轮正式构建通过 711 项集中检查并核对来宾二进制。4Kn 来宾 A/9 并入 A/8 的原生预览及取消通过。实际执行被源卷 TxF 日志识别拦截，独立诊断确认目标目录未创建、两盘 GPT 和源样本完整；修正 TxF 卷根属性及安全描述符流后，隔离来宾通过完整源清单和样本迁移。Windows 在还原所有者时返回错误 1307，独立读回通过两盘 GPT、源文件与 DACL、暂存样本和硬链接。所有者修正版 2eab3b6f… 通过 719 项集中检查，同一正式程序在 4Kn 来宾用全新的 A/10 与 A/11 夹具通过向右合并。A/11 移除，A/10 扩至 384 MiB，独立读回核对四份字节样本、命名流、硬链接、所有者与 DACL、写入时间及两盘 GPT。左侧合并、故障注入以及拆分和空间分配的原生验收仍待完成。",
+      "evidence": [
+        ".vm/partition-reallocation-planner-status.json",
+        ".vm/partition-reallocation-execution-status.json",
+        ".vm/partition-merge-catalogue-status.json",
+        ".vm/partition-merge-output-status.json",
+        ".vm/partition-merge-batch-status.json"
+      ]
     },
     {
       "id": "fat-exfat-resize",
-      "status": "planned",
-      "detail": "FAT/exFAT 保留数据缩放，不能只改分区表"
+      "status": "implemented-limited",
+      "detail": "支持普通非系统 GPT 数据分区上干净且可验证的 FAT12/16/32、单 FAT exFAT 末端缩放。保持文件系统类型与簇大小，支持搬移占用尾部簇、扩展 FAT 与增减 exFAT 位图链。扩表时保留簇编号，按高地址到低地址搬移并核对 SHA-256。45c36059 完成四类卷的空闲尾部缩放，27012e24 完成 FAT16/FAT32/exFAT 的占用尾部搬移，FAT12 首轮夹具空间不足。正式构建 d6b64df6 通过 664 项集中检查并在 512 字节扇区上完成 FAT12（A/20，1→2→1 MiB）、FAT16（A/22，64→160→64 MiB）、FAT32（A/23，320→448→320 MiB）和 exFAT（A/21，96→1088→96 MiB）扩表往返。FAT12 首次扩容后遇到夹具清理路径错误，核对原样本并通过绑定的文件句柄释放空间后才执行首次缩容。相同构建在另一对隔离 4Kn NVMe 测试盘上通过四类扩表往返，exFAT 位图 1→9→1 簇。FAT16 和 FAT32 各有一次预览因卷状态或主备引导不一致停止，之后只读复核并从未提交的缩放步骤续验。4Kn 原生界面通过 FAT16 64→65 MiB 预览并取消，写入计数未变。两种扇区配置均独立核对原样本和 GPT，A 在每次缩放后脱机，B 写入计数均未增加。故障注入、大容量及其他簇大小组合仍待验收，MBR、TexFAT 和跨类型转换不在此能力范围。",
+      "evidence": [
+        ".vm/fat-resize-batch-status.json",
+        ".vm/fat-relocation-batch-status.json",
+        ".vm/fat-capacity-batch-status.json",
+        ".vm/fat-sectors-batch-status.json"
+      ]
     },
     {
       "id": "partition-table-convert",

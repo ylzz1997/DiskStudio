@@ -569,7 +569,17 @@ pub fn continue_scan<R: Read + Seek + 'static>(
     }
     cp.sealed = true;
     tick(cp.entries, cp.entries)?;
-    Ok(format!("Ext 扫描完成：{} 个现存文件，{} 个暂不支持提取，跳过 {} 个符号链接或特殊文件、{} 个不支持的目录。{}未执行删除恢复或日志重放。",cp.count,cp.unsupported,cp.special,cp.skipped_directories,if cp.count == MAX_RESULTS || cp.entries == MAX_ENTRIES { "已达到结果或目录项上限；" } else { "" }))
+    let locale = crate::native_locale::current();
+    let mut summary = locale.format(
+        "Ext 扫描完成：{count} 个现存文件，{unsupported} 个暂不支持提取，跳过 {special} 个符号链接或特殊文件、{directories} 个不支持的目录。未执行删除恢复或日志重放。",
+        &[("count", &cp.count.to_string()), ("unsupported", &cp.unsupported.to_string()),
+          ("special", &cp.special.to_string()), ("directories", &cp.skipped_directories.to_string())],
+    );
+    if cp.count == MAX_RESULTS || cp.entries == MAX_ENTRIES {
+        summary.push(' ');
+        summary.push_str(locale.text("已达到结果或目录项上限。"));
+    }
+    Ok(summary)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

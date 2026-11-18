@@ -2,6 +2,34 @@
 (() => {
   const data = JSON.parse(document.getElementById("report-data").textContent);
   const el = (id) => document.getElementById(id);
+  const language = document.documentElement.lang;
+  const number = new Intl.NumberFormat(language);
+  function t(message, values) {
+    const template = Object.hasOwn(data.messages, message) ? data.messages[message] : message;
+    return values ? template.replace(/\{([a-zA-Z][\w]*)\}/g, (part, key) =>
+      Object.hasOwn(values, key) ? String(values[key]) : part) : template;
+  }
+  const directoryName = (directory) => directory.id === "root" ? t("根目录") : directory.name;
+  const directoryLabel = (directory) => directoryName(directory) + (directory.deleted ? " · " + t("已删除") : "");
+  function candidateMethod(method) {
+    const filesystem = /^(FAT(?:12|16|32)?|exFAT|Ext) 目录$/.exec(method)?.[1];
+    return filesystem ? t("{filesystem} 目录", { filesystem }) : t(method);
+  }
+  function candidateNote(note) {
+    const at = note.lastIndexOf("；保存时的历史观察");
+    if (at === -1 || language === "zh-CN") return t(note);
+    return `${t(note.slice(0, at))} · ${t(note.slice(at + 1))}`;
+  }
+  function directoryNote(note) {
+    if (language === "zh-CN") return note;
+    const aliases = "同一文件有多个名称；选中后分别保存副本";
+    return note.replace(aliases, t(aliases)).split("；").map(part => t(part)).join(" · ");
+  }
+  function stamp(value) {
+    return value
+      ? `${value.text} · ${t("{zone} · 精度 {precision}", { zone: t(value.zone), precision: t(value.precision) })}`
+      : t("未记录或无法解析");
+  }
   const dirs = new Map(data.directories.map((d) => [d.id, d]));
   const children = new Map();
   for (const d of data.directories) {
@@ -10,7 +38,7 @@
       children.get(d.parent).push(d);
     }
   }
-  for (const list of children.values()) list.sort((a,b) => a.name.localeCompare(b.name, "zh-CN") || a.id.localeCompare(b.id));
+  for (const list of children.values()) list.sort((a,b) => a.name.localeCompare(b.name, language) || a.id.localeCompare(b.id));
   const paths = new Map();
   function path(id) {
     if (paths.has(id)) return paths.get(id);
@@ -45,18 +73,18 @@
     el("all").classList.toggle("active", folder === null);
     el("unknown").classList.toggle("active", folder === "unknown");
     const chain = folder === "unknown" ? [] : path(folder || "root");
-    el("breadcrumbs").replaceChildren(...chain.map(d => button(d.name + (d.deleted ? " · 已删除" : ""), d.id)));
+    el("breadcrumbs").replaceChildren(...chain.map(d => button(directoryLabel(d), d.id)));
     const list = children.get(folder || "root") || [];
     directoryOffset = Math.min(directoryOffset, Math.floor(Math.max(0, list.length - 1) / pageSize) * pageSize);
     el("directories").replaceChildren(...list.slice(directoryOffset, directoryOffset + pageSize).map(d => {
-      const b = button(d.name + (d.deleted ? " · 已删除" : ""), d.id);
-      b.append(text("small", `${(counts.get(d.id) || 0).toLocaleString()} 个文件（含子目录）`));
+      const b = button(directoryLabel(d), d.id);
+      b.append(text("small", t("文件数 {count}（含子目录）", { count: number.format(counts.get(d.id) || 0) })));
       return b;
     }));
-    el("dir-page").textContent = `${list.length ? directoryOffset + 1 : 0}–${Math.min(directoryOffset + pageSize, list.length)} / ${list.length}`;
+    el("dir-page").textContent = `${number.format(list.length ? directoryOffset + 1 : 0)}–${number.format(Math.min(directoryOffset + pageSize, list.length))} / ${number.format(list.length)}`;
     el("dir-prev").disabled = directoryOffset === 0;
     el("dir-next").disabled = directoryOffset + pageSize >= list.length;
-    el("location").textContent = folder === null ? "所有已扫描文件" : folder === "unknown" ? "目录未知" : chain.map(d => d.name).join(" / ");
+    el("location").textContent = folder === null ? t("全部文件") : folder === "unknown" ? t("目录未知") : chain.map(directoryName).join(" / ");
   }
   function renderFiles() {
     let query;
@@ -68,9 +96,9 @@
       });
       el("query-error").hidden = true;
     } catch (error) {
-      el("query-error").textContent = error.message;
+      el("query-error").textContent = t(error.message);
       el("query-error").hidden = false;
-      el("files").replaceChildren(); el("count").textContent = "筛选无效";
+      el("files").replaceChildren(); el("count").textContent = t("筛选无效");
       el("prev").disabled = el("next").disabled = true;
       el("empty").hidden = true;
       return;
@@ -84,40 +112,46 @@
     el("files").replaceChildren(...matched.slice(offset, offset + pageSize).map(f => {
       const row = document.createElement("tr");
       const name = text("td", f.name);
-      name.append(text("small", `编号 ${f.id} · ${f.method}`));
+      name.append(text("small", `${t("编号 {number}", { number: f.id })} · ${candidateMethod(f.method)}`));
       const directory = document.createElement("td");
-      directory.append(button(f.directory === "unknown" ? "目录未知" : path(f.directory).map(d => d.name).join(" / "), f.directory));
-      const status = text("td", f.state);
-      if (!f.supported) status.append(text("small", "当前引擎不支持导出内容"));
-      if (f.note) status.append(text("small", f.note));
-      if (f.directoryNote) status.append(text("small", f.directoryNote));
+      directory.append(button(f.directory === "unknown" ? t("目录未知") : path(f.directory).map(directoryName).join(" / "), f.directory));
+      const status = text("td", t(f.state));
+      if (!f.supported) status.append(text("small", t("当前引擎不支持导出内容")));
+      if (f.note) status.append(text("small", candidateNote(f.note)));
+      if (f.directoryNote) status.append(text("small", directoryNote(f.directoryNote)));
       const metadata = document.createElement("td");
-      const stamp = value => value ? `${value.text} · ${value.zone} · 精度 ${value.precision}` : "未记录或无法解析";
-      metadata.append(text("span", `修改：${stamp(f.metadata?.modified)}`));
+      metadata.append(text("span", `${t("修改时间")} · ${stamp(f.metadata?.modified)}`));
       const detail = document.createElement("details");
-      detail.append(text("summary", "全部属性"));
-      for (const [key, label] of [["created", "创建"], ["accessed", "访问"], ["changed", "元数据变更"]])
-        detail.append(text("small", `${label}：${stamp(f.metadata?.[key])}`));
-      detail.append(text("small", `属性：${f.metadata?.source ? f.metadata.attributes.join("、") || "无已识别标志" : "未知"}`));
-      if (f.metadata?.rawFlags) detail.append(text("small", `原始标志：${f.metadata.rawFlags}`));
-      if (f.metadata?.permissions) detail.append(text("small", `POSIX 权限：${f.metadata.permissions}`));
-      for (const [key, label] of [["uid", "UID"], ["gid", "GID"], ["links", "链接数"]])
-        if (f.metadata?.[key] != null) detail.append(text("small", `${label}：${f.metadata[key]}`));
-      detail.append(text("small", `信息来源：${f.metadata?.source || "未提供"}`));
+      detail.append(text("summary", t("全部属性")));
+      for (const [key, label] of [["created", "创建时间"], ["accessed", "访问时间"], ["changed", "元数据变更"]])
+        detail.append(text("small", `${t(label)} · ${stamp(f.metadata?.[key])}`));
+      const attributes = f.metadata?.source
+        ? f.metadata.attributes.map(attribute => t(attribute)).join(" · ") || t("无已识别标志")
+        : t("未知");
+      detail.append(text("small", `${t("属性")} · ${attributes}`));
+      if (f.metadata?.rawFlags) detail.append(text("small", t("原始标志 {flags}", { flags: f.metadata.rawFlags })));
+      if (f.metadata?.permissions) detail.append(text("small", `${t("POSIX 权限")} · ${f.metadata.permissions}`));
+      for (const [key, label] of [["uid", "UID"], ["gid", "GID"], ["links", "链接计数"]])
+        if (f.metadata?.[key] != null) detail.append(text("small", `${t(label)} · ${f.metadata[key]}`));
+      detail.append(text("small", `${t("信息来源")} · ${t(f.metadata?.source || "未提供")}`));
       metadata.append(detail);
-      row.append(name, directory, text("td", BigInt(f.bytes).toLocaleString()), metadata, status);
+      row.append(name, directory, text("td", number.format(BigInt(f.bytes))), metadata, status);
       return row;
     }));
     el("empty").hidden = matched.length > 0;
-    el("count").textContent = `${matched.length ? offset + 1 : 0}–${Math.min(offset + pageSize, matched.length)} / ${matched.length.toLocaleString()} 个文件`;
+    el("count").textContent = `${number.format(matched.length ? offset + 1 : 0)}–${number.format(Math.min(offset + pageSize, matched.length))} / ${t("文件数 {count}", { count: number.format(matched.length) })}`;
     el("prev").disabled = offset === 0;
     el("next").disabled = offset + pageSize >= matched.length;
   }
   function render() { renderFolders(); renderFiles(); }
-  el("summary").textContent = `${data.mode} · ${data.files.length.toLocaleString()} 个文件 · ${Math.max(0, data.directories.length - 1).toLocaleString()} 个已知目录`;
-  el("completion").textContent = data.completion;
-  el("all").textContent = `所有文件 (${data.files.length.toLocaleString()})`;
-  el("unknown").textContent = `目录未知 (${(counts.get("unknown") || 0).toLocaleString()})`;
+  el("summary").textContent = [
+    t(data.mode),
+    t("文件数 {count}", { count: number.format(data.files.length) }),
+    t("已知目录数 {count}", { count: number.format(Math.max(0, data.directories.length - 1)) }),
+  ].join(" · ");
+  el("completion").textContent = t(data.completion);
+  el("all").textContent = `${t("全部文件")} (${number.format(data.files.length)})`;
+  el("unknown").textContent = `${t("目录未知")} (${number.format(counts.get("unknown") || 0)})`;
   el("all").addEventListener("click", () => navigate(null));
   el("unknown").addEventListener("click", () => navigate("unknown"));
   let timer;

@@ -40,7 +40,7 @@ export async function runPartitionOperation(
   try {
     await refresh();
   } catch (error) {
-    outcome = { ...outcome, refreshError: `列表刷新失败：${errorText(error)}` };
+    outcome = { ...outcome, refreshError: errorText(error) };
     publish(outcome);
   }
   return outcome;

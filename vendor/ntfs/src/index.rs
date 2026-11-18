@@ -86,6 +86,11 @@ where
         NtfsIndexEntries::new(self)
     }
 
+    /// Returns the size in bytes of the records referenced by this index.
+    pub fn index_record_size(&self) -> u32 {
+        self.index_record_size
+    }
+
     /// Returns an [`NtfsIndexFinder`] structure to efficiently find an entry in this index.
     pub fn finder<'i>(&'i self) -> NtfsIndexFinder<'n, 'f, 'i, E> {
         NtfsIndexFinder::new(self)
@@ -161,6 +166,11 @@ where
                 // Does this entry have a subnode that needs to be iterated first?
                 if let Some(subnode_vcn) = entry.subnode_vcn() {
                     let subnode_vcn = iter_try!(subnode_vcn);
+                    if self.inner_iterators.len() >= 64 {
+                        return Some(Err(NtfsError::IndexDepthExceeded {
+                            position: self.index.index_root_position,
+                        }));
+                    }
 
                     // Read the subnode from the filesystem and get an iterator for it.
                     let index_allocation_item =

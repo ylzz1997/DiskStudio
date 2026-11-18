@@ -5,6 +5,7 @@ use super::{
     policy::{self, Disk, LegacyIdentity, Partition},
     *,
 };
+use crate::native_locale;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::{
@@ -14,6 +15,8 @@ use std::{
 use wmi::WMIConnection;
 #[path = "device_state_windows.rs"]
 pub(crate) mod device_state;
+#[path = "fat_resize_windows.rs"]
+mod fat_resize;
 #[path = "format_windows.rs"]
 pub(crate) mod format_windows;
 #[path = "maintenance_windows.rs"]
@@ -22,6 +25,8 @@ pub(crate) mod maintenance;
 pub(crate) mod partition_attributes;
 #[path = "quick_partition_windows.rs"]
 pub(crate) mod quick;
+#[path = "partition_reallocation_windows.rs"]
+pub(crate) mod reallocation;
 #[path = "volume_manage.rs"]
 mod volume_manage;
 #[path = "volume_snapshot.rs"]
@@ -36,7 +41,7 @@ struct Pending {
     binding: String,
     plan: Plan,
     deadline: Instant,
-    ext_proof: Option<String>,
+    filesystem_proof: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -203,6 +208,16 @@ pub(crate) struct SectorContext {
     pub selected: Partition,
     pub fingerprint: String,
     volumes: Vec<(u32, Volume)>,
+}
+impl SectorContext {
+    pub(crate) fn selected_filesystem(&self) -> Option<&str> {
+        self.volumes
+            .iter()
+            .find(|(number, _)| *number == self.selected.partition_number)?
+            .1
+            .file_system
+            .as_deref()
+    }
 }
 pub(crate) struct TableReadContext {
     pub resolved: crate::data_windows::Resolved,
@@ -418,21 +433,11 @@ pub(crate) fn table_restore_context(
     source: &crate::data_tasks::Selection,
     retained: Option<(&TableReadContext, &crate::data_windows::Locks)>,
 ) -> Result<(TableReadContext, String, Vec<String>), String> {
-    let ctx = table_read_context(source, retained)?;
-    let disk = &ctx.resolved.disk;
-    if disk.is_read_only != Some(false) || disk.partition_style != Some(2) {
-        return Err("分区表恢复需要可写的非系统 GPT 磁盘。".into());
-    }
-    let rows: Vec<TableDiskGuid> =
-        WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage")
-            .map_err(err)?
-            .raw_query("SELECT __PATH,Number,PartitionStyle,Guid FROM MSFT_Disk")
-            .map_err(err)?;
-    let target = unique_table_guid(&rows, disk)?;
+    let (ctx, target) = gpt_table_read_context(source, retained)?;
     let protected = ctx
         .parts
         .iter()
-        .filter(|p| !table_partition_editable(p, disk))
+        .filter(|p| !table_partition_editable(p, &ctx.resolved.disk))
         .map(|p| {
             p.guid
                 .as_deref()
@@ -441,6 +446,24 @@ pub(crate) fn table_restore_context(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((ctx, target, protected))
+}
+
+pub(crate) fn gpt_table_read_context(
+    source: &crate::data_tasks::Selection,
+    retained: Option<(&TableReadContext, &crate::data_windows::Locks)>,
+) -> Result<(TableReadContext, String), String> {
+    let ctx = table_read_context(source, retained)?;
+    let disk = &ctx.resolved.disk;
+    if disk.is_read_only != Some(false) || disk.partition_style != Some(2) {
+        return Err("此操作需要可写的非系统 GPT 磁盘。".into());
+    }
+    let rows: Vec<TableDiskGuid> =
+        WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage")
+            .map_err(err)?
+            .raw_query("SELECT __PATH,Number,PartitionStyle,Guid FROM MSFT_Disk")
+            .map_err(err)?;
+    let target = unique_table_guid(&rows, disk)?;
+    Ok((ctx, target))
 }
 fn unique_table_guid(rows: &[TableDiskGuid], disk: &Disk) -> Result<String, String> {
     let mut ids = std::collections::HashSet::new();
@@ -790,10 +813,18 @@ impl Session {
             {
                 return Err("未找到可确认的 Windows 卷，不能执行此操作。".into());
             }
-            if matches!(r.action, Action::Format { .. } | Action::Delete { .. }) {
+            if matches!(
+                r.action,
+                Action::Format { .. } | Action::Delete { .. } | Action::FatResize { .. }
+            ) {
                 if let Some(v) = &v {
                     self.protect_paging(p, v)?;
                 }
+            }
+            if matches!(r.action, Action::FatResize { .. })
+                && !fat_resize::supported(v.as_ref().and_then(|v| v.file_system.as_deref()))
+            {
+                return Err("此操作需要由 Windows 唯一识别的 FAT 或 exFAT 卷。".into());
             }
             if let Action::Format {
                 file_system,
@@ -1052,6 +1083,15 @@ pub fn status() -> Result<Status, String> {
                 } else {
                     vec![]
                 },
+                fat_resize_partitions: if available {
+                    let ps = parts.as_ref().unwrap();
+                    ps.iter()
+                        .filter(|p| policy::sector_writable(d, ps, p).is_ok())
+                        .map(|p| p.partition_number)
+                        .collect()
+                } else {
+                    vec![]
+                },
                 ext_partitions: if available {
                     let ps = parts.as_ref().unwrap();
                     ps.iter()
@@ -1086,6 +1126,7 @@ pub fn status() -> Result<Status, String> {
     })
 }
 pub fn prepare(mut request: Request) -> Result<Plan, String> {
+    let locale = native_locale::current();
     let _lock = OPERATION.try_lock().map_err(|_| "另一项操作正在执行。")?;
     quick::invalidate()?;
     // Invalidate an older preview even when the new request fails validation.
@@ -1105,16 +1146,28 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
             volume_manage::normalize_label(v.file_system.as_deref().ok_or("文件系统未知")?, label)?;
     }
     let (binding, _) = s.bind(&request)?;
-    let ext_proof = if crate::extfs::is_action(&request.action) {
+    let (filesystem_proof, filesystem_summary) = if crate::extfs::is_action(&request.action) {
         let d = s.disk(&request.target)?;
-        Some(crate::extfs::preview(
+        (
+            Some(crate::extfs::preview(
+                &request,
+                d,
+                &policy::layout(d, &s.partitions)?,
+                s.partition(&request.target, request.action.partition().unwrap())?,
+            )?),
+            None,
+        )
+    } else if let Action::FatResize { partition, .. } = request.action {
+        let d = s.disk(&request.target)?;
+        let (proof, summary) = fat_resize::preview(
             &request,
             d,
             &policy::layout(d, &s.partitions)?,
-            s.partition(&request.target, request.action.partition().unwrap())?,
-        )?)
+            s.partition(&request.target, partition)?,
+        )?;
+        (Some(proof), Some(summary))
     } else {
-        None
+        (None, None)
     };
     let before = request
         .action
@@ -1124,11 +1177,12 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
     let after = match request.action {
         Action::Create { size, .. }
         | Action::Resize { size, .. }
+        | Action::FatResize { size, .. }
         | Action::ExtResize { size, .. } => Some(size),
         Action::Delete { .. } => Some(0),
         _ => before,
     };
-    let mut warning = match request.action {
+    let warning = match request.action {
         Action::Initialize {} => "将在空白磁盘写入 GPT 分区表。",
         Action::Create { kind: PartitionKind::Linux, .. } => "创建 Linux 数据分区表项，不分配 Windows 盘符；创建后可选择格式化为 Ext2/3/4。",
         Action::Create { .. } => "创建真实数据分区，有可用的 C–Z 盘符时自动分配；盘符用完时创建无盘符分区。文件系统需另行格式化。",
@@ -1138,16 +1192,28 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
         Action::Resize { .. } => {
             "由 Windows 同时调整分区和 NTFS 文件系统；执行期间请勿关闭应用或计算机。"
         }
+        Action::FatResize { .. } => "将锁定整盘的卷，执行后磁盘保持脱机。扩容先调整 GPT，缩容先调整文件系统。请先备份，执行期间请勿关闭程序或计算机。",
         Action::Delete { .. } => "删除所选数据分区及其卷，分区内的数据将无法正常访问。",
         Action::ExtFormat { .. } => "所选分区的现有数据将被清除，并建立所选 Ext 文件系统。会锁定整块磁盘的卷并使磁盘脱机，完成后保持脱机。执行期间请勿关闭程序或计算机。",
         Action::ExtResize { .. } => "已检查 Ext 文件系统。扩容先扩大分区再扩大文件系统；缩容先缩小文件系统再缩小分区。保留现有文件，不移动起始位置。会锁定整块磁盘并保持脱机；断电或 I/O 失败仍可能损坏数据，请先备份，执行期间请勿关闭程序。",
-    }.to_string();
+    };
+    let mut warning = locale.text(warning).to_owned();
+    if let Some(summary) = filesystem_summary {
+        warning.push(' ');
+        warning.push_str(&summary);
+    }
     if let Action::SetLabel { partition, label } = &request.action {
         let v = s.volume(s.partition(&request.target, *partition)?)?;
-        warning.push_str(&format!(
-            " 卷标：{:?} → {:?}（空字符串表示清除卷标）。",
-            v.file_system_label.unwrap_or_default(),
-            label
+        warning.push(' ');
+        warning.push_str(&locale.format(
+            "卷标：{old} → {new}（空字符串表示清除卷标）。",
+            &[
+                (
+                    "old",
+                    &format!("{:?}", v.file_system_label.unwrap_or_default()),
+                ),
+                ("new", &format!("{label:?}")),
+            ],
         ));
     }
     if let Action::SetDriveLetter { partition, letter } = &request.action {
@@ -1157,11 +1223,23 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
             .as_deref()
             .map(policy::clean)
             .filter(|s| !s.is_empty())
-            .unwrap_or("无");
-        warning.push_str(&format!(
-            " 盘符：{old} → {}。",
-            letter.as_ref().map(|l| l.0.as_str()).unwrap_or("无")
-        ));
+            .unwrap_or_else(|| locale.text("无"));
+        warning.push(' ');
+        warning.push_str(
+            &locale.format(
+                "盘符：{old} → {new}。",
+                &[
+                    ("old", old),
+                    (
+                        "new",
+                        letter
+                            .as_ref()
+                            .map(|l| l.0.as_str())
+                            .unwrap_or_else(|| locale.text("无")),
+                    ),
+                ],
+            ),
+        );
     }
     if let Action::Format {
         file_system,
@@ -1171,7 +1249,7 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
         options,
     } = &request.action
     {
-        warning = options.warning(*file_system, *cluster_size);
+        warning = options.warning_in(&locale, *file_system, *cluster_size);
         if let Some(kind) = file_system.fat_type() {
             let p = s.partition(&request.target, *partition)?;
             let d = s.disk(&request.target)?;
@@ -1185,22 +1263,23 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
                 0,
             )
             .map_err(err)?;
-            warning.push_str(&format!(
-                " 实际簇大小为 {} 字节；会独占锁定所选卷并核对两份完整 FAT 分配表。",
-                geometry.cluster_size()
+            warning.push(' ');
+            warning.push_str(&locale.format(
+                "实际簇大小为 {bytes} 字节；会独占锁定所选卷并核对两份完整 FAT 分配表。",
+                &[("bytes", &geometry.cluster_size().to_string())],
             ));
         }
     }
+    let disk = s.disk(&request.target)?;
     let plan = Plan {
         token: uuid::Uuid::new_v4().to_string(),
         title: request.action.title().into(),
         target_name: format!(
-            "磁盘 {} · {}",
-            s.disk(&request.target)?.number,
-            s.disk(&request.target)?
-                .friendly_name
+            "{} · {}",
+            locale.format("磁盘 {number}", &[("number", &disk.number.to_string())]),
+            disk.friendly_name
                 .as_deref()
-                .unwrap_or("未提供型号")
+                .unwrap_or_else(|| locale.text("未提供型号"))
         ),
         serial: s
             .disk(&request.target)?
@@ -1224,7 +1303,7 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
         binding,
         plan: plan.clone(),
         deadline: Instant::now() + Duration::from_secs(300),
-        ext_proof,
+        filesystem_proof,
     });
     Ok(plan)
 }
@@ -1246,7 +1325,7 @@ pub fn execute(token: String) -> Result<Outcome, String> {
     if binding != pending.binding {
         return Err("目标分区或卷已改变，请重新预览。".into());
     }
-    execute_bound(r, s, binding, volume, pending.ext_proof)
+    execute_bound(r, s, binding, volume, pending.filesystem_proof)
 }
 
 // Caller retains OPERATION for the complete single operation or batch. A batch
@@ -1256,7 +1335,7 @@ fn execute_bound(
     s: Session,
     binding: String,
     volume: Option<Volume>,
-    ext_proof: Option<String>,
+    filesystem_proof: Option<String>,
 ) -> Result<Outcome, String> {
     let d = s.disk(&r.target)?;
     if matches!(
@@ -1271,7 +1350,16 @@ fn execute_bound(
             d,
             &policy::layout(d, &s.partitions)?,
             s.partition(&r.target, r.action.partition().unwrap())?,
-            ext_proof.as_deref().ok_or("缺少 Ext 文件系统预览")?,
+            filesystem_proof.as_deref().ok_or("缺少 Ext 文件系统预览")?,
+        );
+    }
+    if let Action::FatResize { partition, .. } = r.action {
+        return fat_resize::execute(
+            &r,
+            d,
+            &policy::layout(d, &s.partitions)?,
+            s.partition(&r.target, partition)?,
+            filesystem_proof.as_deref().ok_or("缺少 FAT 文件系统预览")?,
         );
     }
     let mut format_readback = None;
@@ -1319,7 +1407,12 @@ fn execute_bound(
                     is_hidden: false,
                 },
             )
-            .map_err(|e| format!("{e} 新分区可能已经存在；请先刷新核对分区列表，不要重复创建。"))?;
+            .map_err(|e| {
+                native_locale::diagnostic(
+                    "{error} 新分区可能已经存在；请先刷新核对分区列表，不要重复创建。",
+                    &e,
+                )
+            })?;
         }
         Action::Format {
             label,
@@ -1371,7 +1464,7 @@ fn execute_bound(
                     &v.path,
                     "Format",
                     format_options::FormatInput::new(*file_system, label, *cluster_size, *options),
-                ).map_err(|e| format!("{e} Windows 格式化请求可能已部分执行；请先检查实际状态，不要重复提交。不会自动重试或回滚。"))?;
+                ).map_err(|e| native_locale::diagnostic("{error} Windows 格式化请求可能已部分执行；请先检查实际状态，不要重复提交。不会自动重试或回滚。", &e))?;
             }
         }
         Action::Resize { partition, size } => {
@@ -1395,6 +1488,7 @@ fn execute_bound(
         )?,
         Action::ExtFormat { .. }
         | Action::ExtResize { .. }
+        | Action::FatResize { .. }
         | Action::SetLabel { .. }
         | Action::SetDriveLetter { .. } => unreachable!(),
     }
@@ -1415,19 +1509,22 @@ fn execute_bound(
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    let locale = native_locale::current();
     Ok(Outcome {
         verified,
         message: if verified {
-            format!(
-                "{}已完成，并已重新读取 Windows 存储信息核对。{}",
-                r.action.title(),
-                format_readback
-                    .map(|proof| format!(
-                        " 完整回读 {} 字节，SHA-256：{}。",
-                        proof.bytes, proof.sha256
-                    ))
-                    .unwrap_or_default()
-            )
+            let mut message = locale.format(
+                "{action}已完成，并已重新读取 Windows 存储信息核对。",
+                &[("action", locale.text(r.action.title()))],
+            );
+            if let Some(proof) = format_readback {
+                message.push(' ');
+                message.push_str(&locale.format(
+                    "完整回读 {bytes} 字节，SHA-256：{hash}。",
+                    &[("bytes", &proof.bytes.to_string()), ("hash", &proof.sha256)],
+                ));
+            }
+            message
         } else if matches!(
             r.action,
             Action::Create {
@@ -1435,14 +1532,18 @@ fn execute_bound(
                 ..
             }
         ) {
-            "新建请求已提交，但分区及 Windows 卷关联尚未核对完整。请刷新检查，不要重复创建或继续格式化。".into()
+            locale.text("新建请求已提交，但分区及 Windows 卷关联尚未核对完整。请刷新检查，不要重复创建或继续格式化。").into()
         } else {
-            format!(
-                "结果尚未核对完整。请刷新检查实际状态，不要重复提交。{}",
-                verification_error
-                    .map(|reason| format!(" 核对原因：{reason}"))
-                    .unwrap_or_default()
-            )
+            let mut message = locale
+                .text("结果尚未核对完整。请刷新检查实际状态，不要重复提交。")
+                .to_owned();
+            if let Some(reason) = verification_error {
+                message.push(' ');
+                message.push_str(
+                    &locale.format("核对原因：{error}", &[("error", locale.text(&reason))]),
+                );
+            }
+            message
         },
     })
 }
@@ -1531,6 +1632,7 @@ fn verify(current: &Session, r: &Request, before: &Session) -> Result<bool, Stri
         }
         Action::ExtFormat { .. }
         | Action::ExtResize { .. }
+        | Action::FatResize { .. }
         | Action::SetLabel { .. }
         | Action::SetDriveLetter { .. } => false,
     })
@@ -1921,7 +2023,7 @@ mod tests {
             binding: "test".into(),
             plan,
             deadline: Instant::now() - Duration::from_secs(1),
-            ext_proof: None,
+            filesystem_proof: None,
         });
         assert!(execute("once".into()).unwrap_err().contains("5 分钟"));
         assert!(execute("once".into()).is_err());

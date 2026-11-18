@@ -45,31 +45,50 @@ impl FormatOptions {
         }
         fs.validate(size, sector, label, effective)
     }
-    pub fn warning(self, fs: FileSystem, cluster: u32) -> String {
-        let mut message = match self.mode {
-            FormatMode::Quick => "将快速建立新的文件系统；不会逐扇区覆盖原有数据。".to_owned(),
-            FormatMode::Full if fs.fat_type().is_some() => "将覆盖所选卷的全部逻辑扇区，建立 FAT 文件系统并完整回读 SHA-256；所需时间与卷容量有关。".to_owned(),
-            FormatMode::Full => "将由 Windows 执行完整格式化并写入卷内全部扇区，所需时间与卷容量有关；提供者调用期间不能取消。".to_owned(),
+    #[cfg(windows)]
+    pub fn warning_in(
+        self,
+        locale: &crate::native_locale::Locale,
+        fs: FileSystem,
+        cluster: u32,
+    ) -> String {
+        let mode = match self.mode {
+            FormatMode::Quick => "将快速建立新的文件系统；不会逐扇区覆盖原有数据。",
+            FormatMode::Full if fs.fat_type().is_some() => "将覆盖所选卷的全部逻辑扇区，建立 FAT 文件系统并完整回读 SHA-256；所需时间与卷容量有关。",
+            FormatMode::Full => "将由 Windows 执行完整格式化并写入卷内全部扇区，所需时间与卷容量有关；提供者调用期间不能取消。",
         };
-        message.push_str(" 所选分区的现有文件将被清除。格式化不等同于 SSD 硬件安全擦除。执行期间请勿关闭应用或计算机。");
+        let mut message = locale.sentences(&[mode, "所选分区的现有文件将被清除。格式化不等同于 SSD 硬件安全擦除。执行期间请勿关闭应用或计算机。"]);
         if fs == FileSystem::Ntfs {
-            message.push_str(&format!(
-                " NTFS 新文件默认压缩：{}；卷的 8.3 短文件名设置：{}。",
-                if self.ntfs_compression {
-                    "开启"
-                } else {
-                    "关闭"
-                },
-                if self.ntfs_short_names {
-                    "开启"
-                } else {
-                    "关闭"
-                }
+            message.push(' ');
+            message.push_str(&locale.format(
+                "NTFS 新文件默认压缩：{compression}；卷的 8.3 短文件名设置：{shortNames}。",
+                &[
+                    (
+                        "compression",
+                        locale.text(if self.ntfs_compression {
+                            "开启"
+                        } else {
+                            "关闭"
+                        }),
+                    ),
+                    (
+                        "shortNames",
+                        locale.text(if self.ntfs_short_names {
+                            "开启"
+                        } else {
+                            "关闭"
+                        }),
+                    ),
+                ],
             ));
             if self.ntfs_compression && cluster == 0 {
-                message.push_str(" 为支持压缩，本次实际采用 4096 字节簇。");
+                message.push(' ');
+                message.push_str(locale.text("为支持压缩，本次实际采用 4096 字节簇。"));
             }
-            message.push_str(" 短文件名的实际创建还受 Windows 全局策略影响；不会修改全局策略。");
+            message.push(' ');
+            message.push_str(
+                locale.text("短文件名的实际创建还受 Windows 全局策略影响；不会修改全局策略。"),
+            );
         }
         message
     }
@@ -224,6 +243,31 @@ impl FileSystem {
 mod tests {
     use super::*;
     const G: u64 = 1024 * 1024 * 1024;
+
+    #[cfg(windows)]
+    #[test]
+    fn localized_confirmation_describes_the_selected_format() {
+        use crate::native_locale::{Language, Locale};
+        let locale = Locale::new(Language::En);
+        let options = FormatOptions {
+            mode: FormatMode::Full,
+            ntfs_compression: true,
+            ntfs_short_names: false,
+        };
+        let ntfs = options.warning_in(&locale, FileSystem::Ntfs, 0);
+        assert!(ntfs.contains("Windows performs a full format"));
+        assert!(ntfs.contains("compression for new files: On"));
+        assert!(ntfs.contains("8.3 short names: Off"));
+        assert!(ntfs.contains("4096 bytes"));
+        let fat = FormatOptions {
+            mode: FormatMode::Full,
+            ..Default::default()
+        }
+        .warning_in(&locale, FileSystem::Fat32, 4096);
+        assert!(fat.contains("every logical sector"));
+        assert!(fat.contains("SHA-256"));
+        assert!(!fat.contains("8.3"));
+    }
     #[test]
     fn full_format_and_ntfs_options_have_strict_typed_boundaries() {
         let options = FormatOptions {

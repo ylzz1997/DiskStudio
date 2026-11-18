@@ -332,15 +332,16 @@ fn one_step(
 
 // Deliberately no retry/resume entry point. The consumed confirmation authorizes
 // this exact ordered run only; the caller gets a durable per-step outcome.
-fn run_steps(
-    steps: &[Step],
-    mut run: impl FnMut(&Step) -> Result<(), String>,
+pub(super) fn run_steps<S>(
+    steps: &[S],
+    mut title: impl FnMut(&S) -> String,
+    mut run: impl FnMut(&S) -> Result<(), String>,
     mut progress: impl FnMut(Progress),
 ) -> Outcome {
     let mut lines = Vec::new();
     let mut failed = false;
     for (index, step) in steps.iter().enumerate() {
-        let title = step.title();
+        let title = title(step);
         if failed {
             lines.push(format!("{}. 未执行：{title}", index + 1));
         } else {
@@ -417,6 +418,7 @@ pub fn execute(token: String, mut progress: impl FnMut(Progress)) -> Result<Outc
     let mut expected = pending.state;
     Ok(run_steps(
         &pending.preview.steps,
+        Step::title,
         |step| {
             let session = Session::open()?;
             if State::read(&session, &pending.request.target)? != expected {
@@ -586,6 +588,7 @@ mod tests {
         let mut calls = 0;
         let result = run_steps(
             &steps,
+            Step::title,
             |_| {
                 calls += 1;
                 if calls == 2 {
@@ -600,7 +603,7 @@ mod tests {
         assert!(!result.verified);
         assert_eq!(result.message.matches("未执行").count(), 2);
         assert_eq!(result.message.matches("已完成并核对").count(), 1);
-        let result = run_steps(&steps, |_| Ok(()), |_| {});
+        let result = run_steps(&steps, Step::title, |_| Ok(()), |_| {});
         assert!(result.verified);
     }
     #[test]
@@ -610,6 +613,7 @@ mod tests {
         let mut calls = 0;
         let outcome = run_steps(
             &steps,
+            Step::title,
             |_| {
                 calls += 1;
                 if calls == 3 {
@@ -646,6 +650,7 @@ mod tests {
         let mut calls = 0;
         let result = run_steps(
             &steps,
+            Step::title,
             |_| {
                 calls += 1;
                 Ok(())

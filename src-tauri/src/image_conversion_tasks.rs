@@ -124,12 +124,12 @@ mod platform {
         let result = (|| {
             let extension = options.format.extension();
             let Some(path) = rfd::FileDialog::new()
-                .set_title(if creation.is_some() {
+                .set_title(crate::native_locale::text(if creation.is_some() {
                     "创建虚拟磁盘（新文件）"
                 } else {
                     "保存转换后的镜像（新文件）"
-                })
-                .add_filter("虚拟磁盘镜像", &[extension])
+                }))
+                .add_filter(crate::native_locale::text("虚拟磁盘镜像"), &[extension])
                 .set_file_name(format!(
                     "{}.{extension}",
                     if creation.is_some() {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 pub const MIB: u64 = 1024 * 1024;
 pub const GIB: u64 = 1024 * MIB;
+pub(crate) const MIN_RESIZE_SIZE: u64 = 64 * MIB;
 pub const BASIC_DATA: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
 pub const LINUX_DATA: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
 pub const LINUX_SWAP: &str = "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f";
@@ -309,6 +310,7 @@ pub fn validate(disk: &Disk, partitions: &[Partition], action: &Action) -> Resul
             .ok_or("分区已发生变化，请刷新后重试。")?;
         let allowed = match action {
             Action::Resize { .. } => resizable(p),
+            Action::FatResize { .. } => sector_writable(disk, &parts, p).is_ok(),
             Action::Format { .. } | Action::SetLabel { .. } | Action::SetDriveLetter { .. } => {
                 formattable(p)
             }
@@ -319,8 +321,16 @@ pub fn validate(disk: &Disk, partitions: &[Partition], action: &Action) -> Resul
         if !allowed {
             return Err("此分区不支持所选操作；运行中的 Windows 卷不能格式化或删除，EFI、保留、隐藏及状态未知的分区受保护。".into());
         }
-        if let Action::Resize { size, .. } | Action::ExtResize { size, .. } = action {
-            if *size < 64 * MIB
+        if let Action::Resize { size, .. }
+        | Action::ExtResize { size, .. }
+        | Action::FatResize { size, .. } = action
+        {
+            let minimum = if matches!(action, Action::FatResize { .. }) {
+                MIB
+            } else {
+                MIN_RESIZE_SIZE
+            };
+            if *size < minimum
                 || size % MIB != 0
                 || *size == p.size
                 || p.offset
@@ -841,6 +851,40 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn fat_resize_needs_a_non_system_disk_and_cannot_overlap_another_partition() {
+        let mut d = disks()[1].clone();
+        d.partition_style = Some(2);
+        d.number_of_partitions = Some(2);
+        let p = part();
+        let mut other = part();
+        other.partition_number = 2;
+        other.path = "partition-2".into();
+        other.guid = Some("second-guid".into());
+        other.offset = 4 * GIB;
+        let parts = [p, other];
+        let request = Action::FatResize {
+            partition: 1,
+            size: MIB,
+        };
+        assert!(validate(&d, &parts, &request).is_ok());
+        assert!(validate(
+            &d,
+            &parts,
+            &Action::FatResize {
+                partition: 1,
+                size: 4 * GIB
+            },
+        )
+        .is_err());
+        d.is_system = Some(true);
+        assert!(validate(&d, &parts, &request).is_err());
+        d.is_system = Some(false);
+        let mut parts = parts;
+        parts[0].is_shadow_copy = None;
+        assert!(validate(&d, &parts, &request).is_err());
     }
     #[test]
     fn linux_partition_deletion_does_not_imply_filesystem_support() {

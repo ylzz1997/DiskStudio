@@ -3,21 +3,32 @@ import type { FormEvent } from "react";
 import {
   ArrowLeftRight,
   Check,
+  GitMerge,
   LoaderCircle,
   Plus,
   RefreshCcw,
   Trash2,
   MoreHorizontal,
+  Split,
   Tag,
   ALargeSmall,
 } from "lucide-react";
 import { Dialog, FormError, Hint } from "./components";
 import { executePartition, preparePartition } from "./backend";
 import { PartitionAttributesDialog } from "./PartitionAttributesDialog";
+import { PartitionMoveDialog } from "./PartitionMoveDialog";
+import {
+  PartitionReallocationDialog,
+  mergeCandidates,
+  reallocationCandidate,
+} from "./PartitionReallocationDialog";
 import { QuickPartitionDialog } from "./QuickPartitionDialog";
 import { runPartitionOperation } from "./partitionOutcome";
 import type { PartitionOutcome } from "./partitionOutcome";
 import { formatSize, GiB, MiB } from "./types";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
+import { isFatResizeFilesystem } from "./filesystemSupport";
 import {
   defaultFormatOptions,
   effectiveFormatCluster,
@@ -43,7 +54,7 @@ const titles = {
   delete: "删除分区",
   setLabel: "修改卷标",
   setDriveLetter: "管理盘符",
-};
+} as const;
 export function PartitionActions({
   disk,
   partition,
@@ -66,10 +77,11 @@ export function PartitionActions({
     executePartition: typeof executePartition;
   };
 }) {
+  const { language, t, catalogText } = useLocale();
   const [kind, setKind] = useState<keyof typeof titles | null>(null);
   const [size, setSize] = useState("2");
   const [offset, setOffset] = useState(0);
-  const [label, setLabel] = useState("新建卷");
+  const [label, setLabel] = useState("");
   const [fileSystem, setFileSystem] = useState<WindowsFileSystem>("NTFS");
   const [clusterSize, setClusterSize] = useState(0);
   const [formatOptions, setFormatOptions] = useState<FormatOptions>({
@@ -88,6 +100,10 @@ export function PartitionActions({
   const [driveLetter, setDriveLetter] = useState("");
   const [more, setMore] = useState(false);
   const [attributes, setAttributes] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [reallocation, setReallocation] = useState<
+    "split" | "allocate" | "merge" | null
+  >(null);
   const [quick, setQuick] = useState(false);
   const moreAnchor = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -109,11 +125,18 @@ export function PartitionActions({
     setMore(false);
   }, [disk.id, partition?.id]);
   const available = !!target?.available;
-  const reason = target?.reason ?? (!available ? unavailableReason : null);
+  const sourceReason =
+    target?.reason ?? (!available ? unavailableReason : null);
+  const reason = sourceReason ? catalogText(sourceReason) : null;
   const extCandidate =
     available &&
     partition?.number != null &&
     !!target?.extPartitions?.includes(partition.number);
+  const fatResizeCandidate =
+    available &&
+    partition?.number != null &&
+    isFatResizeFilesystem(partition.fs) &&
+    !!target?.fatResizePartitions.includes(partition.number);
   const canMetadata =
     available &&
     partition?.number != null &&
@@ -128,9 +151,41 @@ export function PartitionActions({
         (target![`${action}Partitions`].includes(partition.number) ||
           (extCandidate && action !== "delete"));
   const canResize =
-    supports("resize") && (partition?.fs === "NTFS" || extCandidate);
+    supports("resize") &&
+    (partition?.fs === "NTFS" || extCandidate || fatResizeCandidate);
+  const minimumMiB = kind === "create" || fatResizeCandidate ? 1 : 64;
+  const useMiB = kind === "resize" && fatResizeCandidate;
+  const capacityUnit = useMiB ? MiB : GiB;
   const canFormat = supports("format");
+  const canMove =
+    canFormat &&
+    disk.hardware?.isSystem === false &&
+    !!partition &&
+    (partition.fs.toUpperCase() === "NTFS" ||
+      isFatResizeFilesystem(partition.fs));
   const canDelete = supports("delete");
+  const reallocationPartition =
+    disk.scheme === "GPT" &&
+    target &&
+    partition &&
+    reallocationCandidate(partition, target)
+      ? partition
+      : null;
+  const canAllocate =
+    !!reallocationPartition &&
+    !!target &&
+    (target.freeRanges.some((range) => range.size >= MiB) ||
+      (disk.hardware?.isSystem === false &&
+        disk.partitions.some(
+          (other) =>
+            other.id !== partition?.id &&
+            other.size >= 65 * MiB &&
+            reallocationCandidate(other, target),
+        )));
+  const canMerge =
+    !!reallocationPartition &&
+    !!target &&
+    mergeCandidates(disk, reallocationPartition, target).length > 0;
   const destructive = kind === "format" || kind === "delete";
   const selectedRange = target?.freeRanges.find((r) => r.offset === offset);
   function open(type: keyof typeof titles) {
@@ -146,7 +201,8 @@ export function PartitionActions({
       String(
         type === "create"
           ? Math.min(2, (target!.freeRanges[0]?.size ?? 0) / GiB)
-          : (partition?.size ?? GiB) / GiB,
+          : (partition?.size ?? GiB) /
+              (type === "resize" && fatResizeCandidate ? MiB : GiB),
       ),
     );
     const fs =
@@ -166,7 +222,11 @@ export function PartitionActions({
           ? "NEWVOLUME"
           : partition?.fs === fs
             ? partition.name
-            : "新建卷",
+            : language === "zh-CN"
+              ? "新建卷"
+              : language === "zh-TW"
+                ? "新磁碟區"
+                : "New Volume",
     );
   }
   function close() {
@@ -181,23 +241,27 @@ export function PartitionActions({
     if (!kind || busy || !target?.available) return;
     setError("");
     try {
-      const bytes = Number(size) * GiB;
+      const bytes = Number(size) * capacityUnit;
       if (
         (kind === "create" || kind === "resize") &&
         (!Number.isSafeInteger(bytes) ||
-          bytes < (kind === "create" ? 1 : 64) * MiB ||
+          bytes < minimumMiB * MiB ||
           bytes % MiB !== 0)
       )
         throw new Error(
-          `容量至少 ${kind === "create" ? 1 : 64} MiB，并须为整 MiB；例如 0.5、1 或 2 GiB。`,
+          t("容量至少 {minimum} MiB，并须为整 MiB。", { minimum: minimumMiB }),
         );
       let action: PartitionAction;
       if (kind === "initialize") action = { type: kind };
       else if (kind === "create")
         action = { type: kind, offset, size: bytes, kind: partitionKind };
       else {
-        if (!supports(kind) || partition?.number == null)
-          throw new Error("所选分区不支持此操作。");
+        if (
+          !supports(kind) ||
+          (kind === "resize" && !canResize) ||
+          partition?.number == null
+        )
+          throw new Error(t("所选分区不支持此操作。"));
         if (kind === "setLabel") {
           const normalized = partition.fs.toUpperCase().startsWith("FAT")
             ? label.trim().toUpperCase()
@@ -245,7 +309,11 @@ export function PartitionActions({
               };
         } else if (kind === "resize")
           action = {
-            type: extCandidate ? "extResize" : kind,
+            type: extCandidate
+              ? "extResize"
+              : fatResizeCandidate
+                ? "fatResize"
+                : kind,
             partition: partition.number,
             size: bytes,
           };
@@ -289,18 +357,20 @@ export function PartitionActions({
     <>
       <div className="partition-toolbar">
         <div className="partition-target">
-          <strong>{disk.scheme === "RAW" ? "尚未初始化" : "分区操作"}</strong>
+          <strong>
+            {disk.scheme === "RAW" ? t("尚未初始化") : t("分区操作")}
+          </strong>
         </div>
         <div className="partition-action-buttons">
           {disk.scheme === "RAW" ? (
             <button
               className="button primary"
               disabled={!available}
-              title={reason ?? "初始化磁盘"}
+              title={reason ?? t("初始化磁盘")}
               onClick={() => open("initialize")}
             >
               <Plus size={16} />
-              初始化磁盘
+              {t("初始化磁盘")}
             </button>
           ) : (
             <>
@@ -313,12 +383,12 @@ export function PartitionActions({
                 title={
                   reason ??
                   (target?.freeRanges.some((r) => r.size >= MiB)
-                    ? "新建分区"
-                    : "没有足够的连续未分配空间")
+                    ? t("新建分区")
+                    : t("没有足够的连续未分配空间"))
                 }
               >
                 <Plus size={16} />
-                新建分区
+                {t("新建分区")}
               </button>
               <button
                 className="button"
@@ -327,12 +397,12 @@ export function PartitionActions({
                 title={
                   reason ??
                   (canResize
-                    ? "调整分区大小"
-                    : "支持 NTFS 和符合条件的 Ext2/3/4 数据分区")
+                    ? t("调整分区大小")
+                    : t("支持 NTFS 和符合条件的 FAT、exFAT、Ext 数据分区"))
                 }
               >
                 <ArrowLeftRight size={16} />
-                调整大小
+                {t("调整大小")}
               </button>
               <button
                 className="button"
@@ -341,14 +411,16 @@ export function PartitionActions({
                   reason ??
                   (canFormat
                     ? extCandidate
-                      ? "格式化为 Ext2/3/4"
-                      : "快速格式化为 NTFS、FAT12/16/32 或 exFAT"
-                    : "支持普通 Windows 数据分区和符合条件的 Linux 数据分区；系统卷受保护")
+                      ? t("格式化为 Ext2/3/4")
+                      : t("快速格式化为 NTFS、FAT12/16/32 或 exFAT")
+                    : t(
+                        "支持普通 Windows 数据分区和符合条件的 Linux 数据分区；系统卷受保护",
+                      ))
                 }
                 onClick={() => open("format")}
               >
                 <RefreshCcw size={15} />
-                格式化
+                {t("格式化")}
               </button>
               <button
                 className="button"
@@ -356,26 +428,26 @@ export function PartitionActions({
                 title={
                   reason ??
                   (canDelete
-                    ? "删除所选分区"
-                    : "运行中的 Windows、EFI、保留和隐藏分区不可删除")
+                    ? t("删除所选分区")
+                    : t("运行中的 Windows、EFI、保留和隐藏分区不可删除"))
                 }
                 onClick={() => open("delete")}
               >
                 <Trash2 size={15} />
-                删除
+                {t("删除")}
               </button>
               <div className="menu-anchor" ref={moreAnchor}>
                 <button
                   className="button"
-                  aria-label="更多分区操作"
+                  aria-label={t("更多分区操作")}
                   aria-expanded={more}
                   disabled={!available}
                   onClick={() => setMore(!more)}
                 >
-                  <MoreHorizontal size={16} /> 更多
+                  <MoreHorizontal size={16} /> {t("更多")}
                 </button>
                 {more && (
-                  <div className="popover" aria-label="更多分区操作">
+                  <div className="popover" aria-label={t("更多分区操作")}>
                     <button
                       disabled={disk.scheme !== "GPT"}
                       onClick={() => {
@@ -384,21 +456,68 @@ export function PartitionActions({
                       }}
                     >
                       <Plus size={16} />
-                      快速分区
+                      {t("快速分区")}
+                    </button>
+                    <button
+                      disabled={!canMove}
+                      title={t("普通 GPT 数据分区支持移动起点")}
+                      onClick={() => {
+                        setMore(false);
+                        setMoving(true);
+                      }}
+                    >
+                      <ArrowLeftRight size={16} />
+                      {t("移动分区…")}
+                    </button>
+                    <button
+                      disabled={
+                        !reallocationPartition ||
+                        reallocationPartition.size < 65 * MiB
+                      }
+                      title={t("从普通 NTFS 分区释放尾部空间并新建分区")}
+                      onClick={() => {
+                        setMore(false);
+                        setReallocation("split");
+                      }}
+                    >
+                      <Split size={16} />
+                      {t("拆分分区…")}
+                    </button>
+                    <button
+                      disabled={!canMerge}
+                      title={t("将相邻 NTFS 分区的文件迁入所选分区后合并容量")}
+                      onClick={() => {
+                        setMore(false);
+                        setReallocation("merge");
+                      }}
+                    >
+                      <GitMerge size={16} />
+                      {t("合并分区…")}
+                    </button>
+                    <button
+                      disabled={!canAllocate}
+                      title={t("给所选 NTFS 分区分配同一块磁盘的空间")}
+                      onClick={() => {
+                        setMore(false);
+                        setReallocation("allocate");
+                      }}
+                    >
+                      <ArrowLeftRight size={16} />
+                      {t("重新分配空间…")}
                     </button>
                     <button
                       disabled={!canMetadata}
                       onClick={() => open("setDriveLetter")}
                     >
                       <ALargeSmall size={16} />
-                      管理盘符
+                      {t("管理盘符")}
                     </button>
                     <button
                       disabled={!canMetadata}
                       onClick={() => open("setLabel")}
                     >
                       <Tag size={16} />
-                      修改卷标
+                      {t("修改卷标")}
                     </button>
                     <button
                       disabled={
@@ -413,7 +532,7 @@ export function PartitionActions({
                       }}
                     >
                       <MoreHorizontal size={16} />
-                      分区属性
+                      {t("分区属性")}
                     </button>
                   </div>
                 )}
@@ -431,6 +550,27 @@ export function PartitionActions({
           onRefresh={onRefresh}
         />
       )}
+      {moving && partition && (
+        <PartitionMoveDialog
+          disk={disk}
+          partition={partition}
+          onClose={() => setMoving(false)}
+          onBusy={onBusy}
+          onRefresh={onRefresh}
+        />
+      )}
+      {reallocation && reallocationPartition && target && (
+        <PartitionReallocationDialog
+          mode={reallocation}
+          disk={disk}
+          partition={reallocationPartition}
+          target={target}
+          onClose={() => setReallocation(null)}
+          onBusy={onBusy}
+          onRefresh={onRefresh}
+          onOutcome={onOutcome}
+        />
+      )}
       {quick && target && (
         <QuickPartitionDialog
           disk={disk}
@@ -443,26 +583,30 @@ export function PartitionActions({
       )}
       {kind && target && (
         <Dialog
-          title={plan ? "确认分区操作" : titles[kind]}
-          subtitle={`${disk.name} · ${disk.hardware?.model ?? ""} · ${formatSize(disk.size)}`}
+          title={t(plan ? "确认分区操作" : titles[kind])}
+          subtitle={`${diskTitle(disk, t)} · ${disk.hardware?.model ?? ""} · ${formatSize(disk.size)}`}
           onClose={close}
         >
           {busy ? (
             <div className="partition-progress" role="status">
               <LoaderCircle size={28} className="spin" />
               <strong>
-                {executing ? "正在执行分区操作" : "正在检查目标并准备预览"}
+                {executing
+                  ? t("正在执行分区操作")
+                  : t("正在检查目标并准备预览")}
               </strong>
               <p>
                 {executing
                   ? kind === "format" &&
                     !extCandidate &&
                     formatOptions.mode === "full"
-                    ? "正在完整格式化，耗时与卷容量有关。请保持应用和计算机运行；执行中的操作不能取消。"
-                    : "请保持应用和计算机运行。执行中的操作不能取消。"
+                    ? t(
+                        "正在完整格式化，耗时与卷容量有关。请保持应用和计算机运行；执行中的操作不能取消。",
+                      )
+                    : t("请保持应用和计算机运行。执行中的操作不能取消。")
                   : extCandidate
-                    ? "正在核对分区边界和文件系统；这一步不会写入磁盘。"
-                    : "正在向 Windows 核对目标和允许的操作范围。"}
+                    ? t("正在核对分区边界和文件系统；这一步不会写入磁盘。")
+                    : t("正在向 Windows 核对目标和允许的操作范围。")}
               </p>
             </div>
           ) : plan ? (
@@ -470,21 +614,22 @@ export function PartitionActions({
               <div className="destructive-summary">
                 <Check size={25} />
                 <div>
-                  <strong>{plan.title}</strong>
+                  <strong>{catalogText(plan.title)}</strong>
                   <p>
                     {plan.targetName}
-                    {plan.partition != null && ` · 分区 ${plan.partition}`}
+                    {plan.partition != null &&
+                      ` · ${t("分区 {partition}", { partition: plan.partition })}`}
                   </p>
                 </div>
               </div>
               <dl className="detail-list partition-plan-details">
-                <dt>目标序列号</dt>
+                <dt>{t("目标序列号")}</dt>
                 <dd>{plan.serial}</dd>
                 {plan.beforeSize != null &&
                   kind !== "setLabel" &&
                   kind !== "setDriveLetter" && (
                     <>
-                      <dt>原容量</dt>
+                      <dt>{t("原容量")}</dt>
                       <dd>{formatSize(plan.beforeSize)}</dd>
                     </>
                   )}
@@ -492,18 +637,18 @@ export function PartitionActions({
                   kind !== "setLabel" &&
                   kind !== "setDriveLetter" && (
                     <>
-                      <dt>操作后容量</dt>
+                      <dt>{t("操作后容量")}</dt>
                       <dd>{formatSize(plan.afterSize)}</dd>
                     </>
                   )}
                 {kind === "format" && (
                   <>
-                    <dt>文件系统 / 卷标</dt>
+                    <dt>{t("文件系统 / 卷标")}</dt>
                     <dd>
                       {extCandidate ? extFileSystem : fileSystem} ·{" "}
                       {label.trim()}
                     </dd>
-                    <dt>{extCandidate ? "块大小" : "簇大小"}</dt>
+                    <dt>{extCandidate ? t("块大小") : t("簇大小")}</dt>
                     <dd>
                       {extCandidate
                         ? formatSize(blockSize)
@@ -513,8 +658,8 @@ export function PartitionActions({
                               formatOptions,
                             ) === 0
                           ? fileSystem.startsWith("FAT")
-                            ? "按容量自动选择（见下方预览）"
-                            : "Windows 默认"
+                            ? t("按容量自动选择（见下方预览）")
+                            : t("Windows 默认")
                           : formatSize(
                               effectiveFormatCluster(
                                 fileSystem,
@@ -525,23 +670,25 @@ export function PartitionActions({
                     </dd>
                     {!extCandidate && (
                       <>
-                        <dt>格式化方式</dt>
+                        <dt>{t("格式化方式")}</dt>
                         <dd>
                           {formatOptions.mode === "full"
-                            ? "完整格式化"
-                            : "快速格式化"}
+                            ? t("完整格式化")
+                            : t("快速格式化")}
                         </dd>
                       </>
                     )}
                     {!extCandidate && fileSystem === "NTFS" && (
                       <>
-                        <dt>新文件默认压缩</dt>
+                        <dt>{t("新文件默认压缩")}</dt>
                         <dd>
-                          {formatOptions.ntfsCompression ? "开启" : "关闭"}
+                          {formatOptions.ntfsCompression
+                            ? t("开启")
+                            : t("关闭")}
                         </dd>
-                        <dt>卷的 8.3 短文件名</dt>
+                        <dt>{t("卷的 8.3 短文件名")}</dt>
                         <dd>
-                          {formatOptions.ntfsShortNames ? "开启" : "关闭"}
+                          {formatOptions.ntfsShortNames ? t("开启") : t("关闭")}
                         </dd>
                       </>
                     )}
@@ -549,10 +696,10 @@ export function PartitionActions({
                 )}
               </dl>
               <Hint>
-                {plan.warning}
-                {kind !== "setLabel" &&
-                  kind !== "setDriveLetter" &&
-                  " 变更会实际写入所选磁盘，执行后无法撤销。"}
+                {catalogText(plan.warning)}
+                {kind !== "setLabel" && kind !== "setDriveLetter" && (
+                  <> {t("变更会实际写入所选磁盘，执行后无法撤销。")}</>
+                )}
               </Hint>
               {destructive && (
                 <label className="partition-ack">
@@ -561,20 +708,20 @@ export function PartitionActions({
                     checked={acknowledged}
                     onChange={(e) => setAcknowledged(e.target.checked)}
                   />
-                  我确认此分区的数据可以清除
+                  {t("我确认此分区的数据可以清除")}
                 </label>
               )}
-              <FormError message={error} />
+              <FormError message={catalogText(error)} />
               <div className="dialog-actions">
                 <button className="button" onClick={() => setPlan(null)}>
-                  返回修改
+                  {t("返回修改")}
                 </button>
                 <button
                   className={`button ${destructive ? "danger" : "primary"}`}
                   disabled={destructive && !acknowledged}
                   onClick={() => void execute()}
                 >
-                  确认执行
+                  {t("确认执行")}
                 </button>
               </div>
             </>
@@ -582,80 +729,97 @@ export function PartitionActions({
             <form className="editor-form" onSubmit={preview}>
               {kind === "initialize" && (
                 <Hint>
-                  为这块空白磁盘建立 GPT 分区表，确认后会实际写入磁盘。
+                  {t("为这块空白磁盘建立 GPT 分区表，确认后会实际写入磁盘。")}
                 </Hint>
               )}
               {kind === "create" && (
                 <>
                   <label>
-                    分区类型
+                    {t("分区类型")}
                     <select
-                      aria-label="分区类型"
+                      aria-label={t("分区类型")}
                       value={partitionKind}
                       onChange={(e) =>
                         setPartitionKind(e.target.value as "windows" | "linux")
                       }
                     >
-                      <option value="windows">Windows 数据分区</option>
-                      <option value="linux">Linux 数据分区</option>
+                      <option value="windows">{t("Windows 数据分区")}</option>
+                      <option value="linux">{t("Linux 数据分区")}</option>
                     </select>
                   </label>
                   <label>
-                    未分配空间
+                    {t("未分配空间")}
                     <select
                       value={offset}
                       onChange={(e) => setOffset(Number(e.target.value))}
                     >
                       {target.freeRanges.map((r) => (
                         <option key={r.offset} value={r.offset}>
-                          {formatSize(r.size)} · 起始 {formatSize(r.offset)}
+                          {t("{size} · 起始 {offset}", {
+                            size: formatSize(r.size),
+                            offset: formatSize(r.offset),
+                          })}
                         </option>
                       ))}
                     </select>
                     <small>
                       {partitionKind === "windows"
-                        ? "有可用盘符时自动分配；盘符用完时保留无盘符。创建后再选择“格式化”建立文件系统。"
-                        : "创建后选择“格式化”建立所选 Ext 文件系统，不分配 Windows 盘符。"}
+                        ? t(
+                            "有可用盘符时自动分配；盘符用完时保留无盘符。创建后再选择“格式化”建立文件系统。",
+                          )
+                        : t(
+                            "创建后选择“格式化”建立所选 Ext 文件系统，不分配 Windows 盘符。",
+                          )}
                     </small>
                   </label>
                 </>
               )}
               {(kind === "create" || kind === "resize") && (
                 <label>
-                  分区容量
+                  {t("分区容量")}
                   <div className="unit-input">
                     <input
-                      aria-label="分区容量"
+                      aria-label={t("分区容量")}
                       required
                       type="number"
-                      min={kind === "create" ? String(MiB / GiB) : "0.0625"}
+                      min={(minimumMiB * MiB) / capacityUnit}
                       max={
                         kind === "create"
-                          ? (selectedRange?.size ?? 0) / GiB
-                          : disk.size / GiB
+                          ? (selectedRange?.size ?? 0) / capacityUnit
+                          : disk.size / capacityUnit
                       }
                       step="any"
                       value={size}
                       onChange={(e) => setSize(e.target.value)}
                     />
-                    <span>GiB</span>
+                    <span>{useMiB ? "MiB" : "GiB"}</span>
                   </div>
                   <small>
                     {kind === "resize"
                       ? extCandidate
-                        ? "预览会读取并检查已有 Ext2/3/4，估算缩容下限；仅调整末端，不移动分区。支持干净卸载、1/2/4 KiB 块的常规特性。"
-                        : "Windows 会检查可缩小的下限和相邻未分配空间，不移动其他分区。"
-                      : `所选空间 ${formatSize(selectedRange?.size ?? 0)}`}
+                        ? t(
+                            "预览会读取并检查已有 Ext2/3/4，估算缩容下限；仅调整末端，不移动分区。支持干净卸载、1/2/4 KiB 块的常规特性。",
+                          )
+                        : fatResizeCandidate
+                          ? t(
+                              "预览检查目录和分配表，并显示预计搬移簇数。扩容需要相邻未分配空间，必要时扩大分配表并搬移数据区。执行后整盘保持脱机。",
+                            )
+                          : t(
+                              "Windows 会检查可缩小的下限和相邻未分配空间，不移动其他分区。",
+                            )
+                      : t("所选空间 {size}", {
+                          size: formatSize(selectedRange?.size ?? 0),
+                        })}
                   </small>
                 </label>
               )}
               {kind === "format" && (
                 <>
                   <label>
-                    文件系统
+                    {t("文件系统")}
                     {extCandidate ? (
                       <select
-                        aria-label="格式化文件系统"
+                        aria-label={t("格式化文件系统")}
                         value={extFileSystem}
                         onChange={(e) =>
                           setExtFileSystem(e.target.value as ExtFileSystem)
@@ -667,7 +831,7 @@ export function PartitionActions({
                       </select>
                     ) : (
                       <select
-                        aria-label="格式化文件系统"
+                        aria-label={t("格式化文件系统")}
                         value={fileSystem}
                         onChange={(e) => {
                           const fs = e.target.value as WindowsFileSystem;
@@ -695,9 +859,9 @@ export function PartitionActions({
                   </label>
                   {extCandidate && (
                     <label>
-                      块大小
+                      {t("块大小")}
                       <select
-                        aria-label="块大小"
+                        aria-label={t("块大小")}
                         value={blockSize}
                         onChange={(e) => setBlockSize(Number(e.target.value))}
                       >
@@ -706,7 +870,7 @@ export function PartitionActions({
                           .map((n) => (
                             <option key={n} value={n}>
                               {formatSize(n)}
-                              {n === 4096 ? "（推荐）" : ""}
+                              {n === 4096 ? t("（推荐）") : ""}
                             </option>
                           ))}
                       </select>
@@ -714,18 +878,18 @@ export function PartitionActions({
                   )}
                   {!extCandidate && (
                     <label>
-                      簇大小
+                      {t("簇大小")}
                       <select
-                        aria-label="簇大小"
+                        aria-label={t("簇大小")}
                         value={clusterSize}
                         onChange={(e) => setClusterSize(Number(e.target.value))}
                       >
                         <option value={0}>
                           {fileSystem.startsWith("FAT")
-                            ? "默认（按容量选择）"
+                            ? t("默认（按容量选择）")
                             : formatOptions.ntfsCompression
-                              ? "默认（压缩使用 4 KiB）"
-                              : "默认（由 Windows 选择）"}
+                              ? t("默认（压缩使用 4 KiB）")
+                              : t("默认（由 Windows 选择）")}
                         </option>
                         {formatClusters[fileSystem]
                           .filter((n) => n >= (disk.sectorSize || 512))
@@ -739,24 +903,26 @@ export function PartitionActions({
                             >
                               {formatSize(n)}
                               {formatOptions.ntfsCompression && n > 4096
-                                ? "（不支持压缩）"
+                                ? t("（不支持压缩）")
                                 : ""}
                             </option>
                           ))}
                       </select>
                       <small>
                         {fileSystem.startsWith("FAT")
-                          ? "预览时会检查容量、簇数量及所选 FAT 类型是否匹配。"
-                          : "预览时会检查所选卷支持的格式和簇大小。"}
+                          ? t(
+                              "预览时会检查容量、簇数量及所选 FAT 类型是否匹配。",
+                            )
+                          : t("预览时会检查所选卷支持的格式和簇大小。")}
                       </small>
                     </label>
                   )}
                   {!extCandidate && (
                     <>
                       <label>
-                        格式化方式
+                        {t("格式化方式")}
                         <select
-                          aria-label="格式化方式"
+                          aria-label={t("格式化方式")}
                           value={formatOptions.mode}
                           onChange={(e) =>
                             setFormatOptions((old) => ({
@@ -765,18 +931,22 @@ export function PartitionActions({
                             }))
                           }
                         >
-                          <option value="quick">快速格式化</option>
-                          <option value="full">完整格式化</option>
+                          <option value="quick">{t("快速格式化")}</option>
+                          <option value="full">{t("完整格式化")}</option>
                         </select>
                         <small>
                           {formatOptions.mode === "full"
-                            ? "处理整个卷，耗时更长，执行期间不能取消。FAT 会完整回读校验；格式化不等同于 SSD 硬件安全擦除。"
-                            : "建立新的文件系统，不逐扇区覆盖旧内容。两种方式都会清除原有文件。"}
+                            ? t(
+                                "处理整个卷，耗时更长，执行期间不能取消。FAT 会完整回读校验；格式化不等同于 SSD 硬件安全擦除。",
+                              )
+                            : t(
+                                "建立新的文件系统，不逐扇区覆盖旧内容。两种方式都会清除原有文件。",
+                              )}
                         </small>
                       </label>
                       {fileSystem === "NTFS" && (
                         <fieldset className="partition-format-options">
-                          <legend>NTFS 选项</legend>
+                          <legend>{t("NTFS 选项")}</legend>
                           <label>
                             <input
                               type="checkbox"
@@ -789,11 +959,12 @@ export function PartitionActions({
                                 }))
                               }
                             />
-                            新文件默认启用压缩
+                            {t("新文件默认启用压缩")}
                           </label>
                           <small>
-                            需要不大于 4 KiB 的簇；选择默认簇大小时采用 4
-                            KiB。压缩效果取决于文件内容。
+                            {t(
+                              "需要不大于 4 KiB 的簇；选择默认簇大小时采用 4 KiB。压缩效果取决于文件内容。",
+                            )}
                           </small>
                           <label>
                             <input
@@ -806,20 +977,21 @@ export function PartitionActions({
                                 }))
                               }
                             />
-                            启用卷的 8.3 短文件名
+                            {t("启用卷的 8.3 短文件名")}
                           </label>
                           <small>
-                            供依赖短文件名的旧软件使用；实际创建还受 Windows
-                            全局策略影响。
+                            {t(
+                              "供依赖短文件名的旧软件使用；实际创建还受 Windows 全局策略影响。",
+                            )}
                           </small>
                         </fieldset>
                       )}
                     </>
                   )}
                   <label>
-                    卷标
+                    {t("卷标")}
                     <input
-                      aria-label="卷标"
+                      aria-label={t("卷标")}
                       required
                       maxLength={
                         extCandidate ? 16 : fileSystem === "NTFS" ? 32 : 11
@@ -829,14 +1001,16 @@ export function PartitionActions({
                     />
                     {!extCandidate && fileSystem.startsWith("FAT") && (
                       <small>
-                        最多 11
-                        个英文字母、数字、空格、下划线或连字符，字母自动转为大写。
+                        {t(
+                          "最多 11 个英文字母、数字、空格、下划线或连字符，字母自动转为大写。",
+                        )}
                       </small>
                     )}
                     {extCandidate && (
                       <small>
-                        最多 16 个 UTF-8 字节，中文通常每字占 3
-                        字节。执行后整块磁盘保持脱机。
+                        {t(
+                          "最多 16 个 UTF-8 字节，中文通常每字占 3 字节。执行后整块磁盘保持脱机。",
+                        )}
                       </small>
                     )}
                   </label>
@@ -844,33 +1018,42 @@ export function PartitionActions({
               )}
               {kind === "delete" && (
                 <Hint>
-                  将删除 {partition?.name}（{formatSize(partition?.size ?? 0)}
-                  ）及其卷。下一步会显示待确认的目标信息。
+                  {t(
+                    "将删除 {name}（{size}）及其卷。下一步会显示待确认的目标信息。",
+                    {
+                      name: partition
+                        ? partitionTitle(partition, catalogText)
+                        : "—",
+                      size: formatSize(partition?.size ?? 0),
+                    },
+                  )}
                 </Hint>
               )}
               {kind === "setLabel" && (
                 <label>
-                  新卷标
+                  {t("新卷标")}
                   <input
-                    aria-label="新卷标"
+                    aria-label={t("新卷标")}
                     maxLength={32}
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                   />
                   <small>
-                    留空可清除卷标。文件内容保持不变，预览会检查文件系统支持的名称长度。
+                    {t(
+                      "留空可清除卷标。文件内容保持不变，预览会检查文件系统支持的名称长度。",
+                    )}
                   </small>
                 </label>
               )}
               {kind === "setDriveLetter" && (
                 <label>
-                  盘符
+                  {t("盘符")}
                   <select
-                    aria-label="盘符"
+                    aria-label={t("盘符")}
                     value={driveLetter}
                     onChange={(e) => setDriveLetter(e.target.value)}
                   >
-                    <option value="">不分配盘符</option>
+                    <option value="">{t("不分配盘符")}</option>
                     {Array.from(
                       new Set([
                         ...(target.availableDriveLetters ?? []),
@@ -882,22 +1065,25 @@ export function PartitionActions({
                       .sort()
                       .map((l) => (
                         <option key={l} value={l}>
-                          {l}:{l === partition?.driveLetter ? "（当前）" : ""}
+                          {l}:
+                          {l === partition?.driveLetter ? t("（当前）") : ""}
                         </option>
                       ))}
                   </select>
                   <small>
-                    仅显示当前空闲盘符和原盘符；提交前会再次检查占用。移除盘符不会删除分区或文件。
+                    {t(
+                      "仅显示当前空闲盘符和原盘符；提交前会再次检查占用。移除盘符不会删除分区或文件。",
+                    )}
                   </small>
                 </label>
               )}
-              <FormError message={error} />
+              <FormError message={catalogText(error)} />
               <div className="dialog-actions">
                 <button className="button" type="button" onClick={close}>
-                  取消
+                  {t("取消")}
                 </button>
                 <button className="button primary" type="submit">
-                  预览操作
+                  {t("预览操作")}
                 </button>
               </div>
             </form>

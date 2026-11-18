@@ -166,9 +166,9 @@ mod platform {
     // Called only with the application's operation lock held and data state idle.
     pub fn choose() -> Result<Option<Info>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("打开镜像以浏览文件")
+            .set_title(crate::native_locale::text("打开镜像以浏览文件"))
             .add_filter(
-                "虚拟磁盘镜像",
+                crate::native_locale::text("虚拟磁盘镜像"),
                 &[
                     "img", "raw", "vhd", "avhd", "vhdx", "vdi", "vmdk", "hdd", "hds",
                 ],
@@ -210,7 +210,9 @@ mod platform {
             .cloned()
             .ok_or("镜像选择会话已失效")?;
         let Some(paths) = rfd::FileDialog::new()
-            .set_title("选择缺少的父盘或分卷（不会自动查找文件）")
+            .set_title(crate::native_locale::text(
+                "选择缺少的父盘或分卷（不会自动查找文件）",
+            ))
             .pick_files()
         else {
             return Ok(group.info());

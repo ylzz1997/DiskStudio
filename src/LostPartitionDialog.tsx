@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { TableRestoreDialog } from "./TableRestoreDialog";
 import { formatSize, type Disk } from "./types";
 import { surfaceRange } from "./surfaceModel";
@@ -22,6 +24,7 @@ export function LostPartitionDialog({
   onBrowse: () => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [start, setStart] = useState("0"),
     [count, setCount] = useState(String(disk.size / disk.sectorSize));
   const [preset, setPreset] = useState("whole");
@@ -68,7 +71,7 @@ export function LostPartitionDialog({
           control.current.onBusy(next.state === "running");
         }
       } catch (e) {
-        if (alive) setError(String(e));
+        if (alive) setError(e instanceof Error ? e.message : String(e));
       }
       if (alive) timer = setTimeout(() => void poll(), 500);
     }
@@ -89,7 +92,7 @@ export function LostPartitionDialog({
     try {
       await fn();
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       control.current.pending = false;
       setPending(false);
@@ -111,7 +114,7 @@ export function LostPartitionDialog({
   try {
     surfaceRange(start, count, disk.size, disk.sectorSize);
   } catch (e) {
-    rangeError = String(e);
+    rangeError = (e instanceof Error ? e.message : String(e)).trim();
   }
   async function begin() {
     await action(async () => {
@@ -154,8 +157,8 @@ export function LostPartitionDialog({
     );
   return (
     <Dialog
-      title="搜索丢失分区"
-      subtitle={`${disk.name} · ${formatSize(disk.size)}`}
+      title={t("搜索丢失分区")}
+      subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)}`}
       wide
       onClose={() => {
         if (!busy) onClose();
@@ -163,29 +166,33 @@ export function LostPartitionDialog({
     >
       <div className="lost-range">
         <label>
-          搜索范围
+          {t("搜索范围")}
           <select
             value={preset}
             disabled={busy}
             onChange={(e) => choose(e.target.value)}
           >
-            <option value="whole">整个磁盘</option>
-            <option value="custom">指定扇区范围</option>
+            <option value="whole">{t("整个磁盘")}</option>
+            <option value="custom">{t("指定扇区范围")}</option>
             {gaps.map((g, i) => (
               <option key={`g:${i}`} value={`g:${i}`}>
-                未分配范围 {i + 1} · {formatSize(g.size)}
+                {t("未分配范围 {number}", { number: i + 1 })} ·{" "}
+                {formatSize(g.size)}
               </option>
             ))}
             {disk.partitions.map((p, i) => (
               <option key={`p:${i}`} value={`p:${i}`}>
-                {p.name} 所在范围 · {formatSize(p.size)}
+                {t("{partition} 所在范围", {
+                  partition: partitionTitle(p, catalogText),
+                })}{" "}
+                · {formatSize(p.size)}
               </option>
             ))}
           </select>
         </label>
         <div className="lost-range-numbers">
           <label>
-            起始 LBA
+            {t("起始 LBA")}
             <input
               value={start}
               disabled={busy}
@@ -197,7 +204,7 @@ export function LostPartitionDialog({
             />
           </label>
           <label>
-            扇区数量
+            {t("扇区数量")}
             <input
               value={count}
               disabled={busy}
@@ -211,8 +218,9 @@ export function LostPartitionDialog({
         </div>
       </div>
       <p className="lost-note">
-        搜索 NTFS、FAT、exFAT 和 Ext
-        文件系统边界，候选须完整位于所选范围。识别结果可能来自旧格式或嵌入的镜像，请通过文件内容核对；搜索和浏览均不会修改分区表。
+        {t(
+          "搜索 NTFS、FAT、exFAT 和 Ext 文件系统边界，候选须完整位于所选范围。识别结果可能来自旧格式或嵌入的镜像，请通过文件内容核对；搜索和浏览均不会修改分区表。",
+        )}
       </p>
       <div className="dialog-actions">
         {running ? (
@@ -225,7 +233,7 @@ export function LostPartitionDialog({
               })
             }
           >
-            停止搜索
+            {t("停止搜索")}
           </button>
         ) : (
           <button
@@ -233,22 +241,22 @@ export function LostPartitionDialog({
             disabled={pending || !!rangeError}
             onClick={() => void begin()}
           >
-            {snapshot ? "重新搜索" : "开始搜索"}
+            {snapshot ? t("重新搜索") : t("开始搜索")}
           </button>
         )}
       </div>
-      <FormError message={error || (!busy ? rangeError : "")} />
+      <FormError message={catalogText(error || (!busy ? rangeError : ""))} />
       {snapshot && (
         <section className="lost-results" aria-live="polite">
           <div className="lost-progress">
             <span>
               {running
-                ? "正在搜索"
+                ? t("正在搜索")
                 : snapshot.state === "completed"
-                  ? "搜索结束"
+                  ? t("搜索结束")
                   : snapshot.state === "canceled"
-                    ? "已停止"
-                    : "搜索未完成"}
+                    ? t("已停止")
+                    : t("搜索未完成")}
             </span>
             <span>
               {formatSize(snapshot.done)} / {formatSize(snapshot.total)}
@@ -256,7 +264,11 @@ export function LostPartitionDialog({
           </div>
           <progress value={snapshot.done} max={snapshot.total} />
           <p className="lost-note">
-            {snapshot.message || `找到 ${snapshot.candidates.length} 个候选`}
+            {snapshot.message
+              ? catalogText(snapshot.message)
+              : t("找到 {count} 个候选", {
+                  count: snapshot.candidates.length.toLocaleString(language),
+                })}
           </p>
           {snapshot.candidates.map((c) => (
             <article className="lost-candidate" key={c.id}>
@@ -264,7 +276,12 @@ export function LostPartitionDialog({
                 <label>
                   <input
                     type="checkbox"
-                    aria-label={`选择 ${c.filesystem} 起始 LBA ${c.offset / disk.sectorSize}`}
+                    aria-label={t("选择 {filesystem} 起始 LBA {lba}", {
+                      filesystem: c.filesystem,
+                      lba: (c.offset / disk.sectorSize).toLocaleString(
+                        language,
+                      ),
+                    })}
                     checked={selected.includes(c.id)}
                     disabled={
                       busy ||
@@ -283,8 +300,9 @@ export function LostPartitionDialog({
                   </strong>
                 </label>
                 <small>
-                  起始 LBA {c.offset / disk.sectorSize} ·{" "}
-                  {candidateRelation(c, disk.partitions)}
+                  {t("起始 LBA")}{" "}
+                  {(c.offset / disk.sectorSize).toLocaleString(language)} ·{" "}
+                  {catalogText(candidateRelation(c, disk.partitions))}
                 </small>
               </div>
               <button
@@ -300,19 +318,23 @@ export function LostPartitionDialog({
                   })
                 }
               >
-                浏览文件
+                {t("浏览文件")}
               </button>
               <details>
-                <summary>识别依据与限制</summary>
+                <summary>{t("识别依据与限制")}</summary>
                 <p>
-                  {c.evidence}。{c.warning}
+                  {catalogText(c.evidence)}
+                  <br />
+                  {catalogText(c.warning)}
                 </p>
               </details>
             </article>
           ))}
           {!running && !snapshot.candidates.length && (
             <p>
-              此范围未找到符合当前检查条件的候选。没有结果不代表文件不可恢复。
+              {t(
+                "此范围未找到符合当前检查条件的候选。没有结果不代表文件不可恢复。",
+              )}
             </p>
           )}
           {snapshot.candidates.length > 0 && (
@@ -324,13 +346,17 @@ export function LostPartitionDialog({
                   setRecovery({ id: snapshot.id, candidates: selected })
                 }
               >
-                恢复所选分区…{selected.length ? `（${selected.length}）` : ""}
+                {t("恢复所选分区…")}
+                {selected.length
+                  ? ` (${selected.length.toLocaleString(language)})`
+                  : ""}
               </button>
             </div>
           )}
           <p className="lost-note">
-            可浏览文件，再选择未登记的候选预览恢复。当前只向完整 GPT
-            添加普通数据分区；重叠候选、MBR 和损坏分区表重建尚不支持。
+            {t(
+              "可浏览文件，再选择未登记的候选预览恢复。当前只向完整 GPT 添加普通数据分区；重叠候选、MBR 和损坏分区表重建尚不支持。",
+            )}
           </p>
         </section>
       )}

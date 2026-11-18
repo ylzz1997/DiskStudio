@@ -31,7 +31,7 @@ pub struct Extent {
     pub offset: u64,
     pub bytes: Vec<u8>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Archive {
     pub version: u32,
@@ -75,7 +75,7 @@ fn geometry(size: u64, sector: u64) -> Result<(), String> {
     }
     Ok(())
 }
-fn read_at(
+pub(crate) fn read_at(
     reader: &mut (impl Read + Seek),
     at: u64,
     len: usize,

@@ -63,13 +63,33 @@ fn err(e: impl std::fmt::Display) -> String {
 /// The base reference is in the first 40 bytes, before sector fixups. Do not
 /// interpret extension records as independent files during the MFT sweep.
 pub fn base_reference<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<u64, String> {
+    base_reference_with_flags(reader, file, file.flags().bits())
+}
+
+pub(crate) fn merge_base_reference<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+) -> Result<u64, String> {
+    // The system and index bits also occur in active NTFS metadata records.
+    let flags = file.raw_flags();
+    if flags & !0x000f != 0 {
+        return Err("NTFS 文件记录含未知标志".into());
+    }
+    base_reference_with_flags(reader, file, flags)
+}
+
+fn base_reference_with_flags<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    flags: u16,
+) -> Result<u64, String> {
     let position = file.position().value().ok_or("文件记录位置不可用")?.get();
     reader.seek(SeekFrom::Start(position)).map_err(err)?;
     let mut header = [0; 40];
     reader.read_exact(&mut header).map_err(err)?;
     if &header[..4] != b"FILE"
         || u16::from_le_bytes([header[16], header[17]]) != file.sequence_number()
-        || u16::from_le_bytes([header[22], header[23]]) != file.flags().bits()
+        || u16::from_le_bytes([header[22], header[23]]) != flags
     {
         return Err("文件记录头已变化".into());
     }
@@ -146,6 +166,21 @@ fn name_references(bytes: &[u8]) -> Result<Vec<(u64, u16, u16)>, String> {
     Ok(references)
 }
 pub fn read<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Vec<Name>, String> {
+    read_with(reader, file, base_reference)
+}
+
+pub(crate) fn read_for_merge<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+) -> Result<Vec<Name>, String> {
+    read_with(reader, file, merge_base_reference)
+}
+
+fn read_with<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    base_reference: impl Fn(&mut R, &NtfsFile<'_>) -> Result<u64, String>,
+) -> Result<Vec<Name>, String> {
     if base_reference(reader, file)? != 0 {
         return Err("扩展记录不能作为独立文件".into());
     }

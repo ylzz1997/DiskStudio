@@ -232,8 +232,11 @@ mod windows {
     }
     fn choose(source: &Selection, disk: u32, cancel: &AtomicBool) -> Result<Option<Input>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("选择另一块磁盘上的分区表备份")
-            .add_filter("DiskStudio 分区表备份", &["dspt"])
+            .set_title(crate::native_locale::text("选择另一块磁盘上的分区表备份"))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 分区表备份"),
+                &["dspt"],
+            )
             .pick_file()
         else {
             return Ok(None);

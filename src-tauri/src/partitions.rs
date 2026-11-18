@@ -69,6 +69,10 @@ pub enum Action {
         partition: u32,
         size: u64,
     },
+    FatResize {
+        partition: u32,
+        size: u64,
+    },
     ExtFormat {
         partition: u32,
         label: String,
@@ -117,6 +121,7 @@ impl Action {
         match self {
             Self::Format { partition, .. }
             | Self::Resize { partition, .. }
+            | Self::FatResize { partition, .. }
             | Self::ExtFormat { partition, .. }
             | Self::ExtResize { partition, .. }
             | Self::SetLabel { partition, .. }
@@ -132,6 +137,7 @@ impl Action {
             Self::Format { file_system, .. } => file_system.title(),
             Self::ExtFormat { file_system, .. } => file_system.title(),
             Self::ExtResize { .. } => "调整 Ext 文件系统大小",
+            Self::FatResize { .. } => "调整 FAT / exFAT 分区大小",
             Self::Resize { .. } => "调整分区大小",
             Self::Delete { .. } => "删除分区",
             Self::SetLabel { .. } => "修改卷标",
@@ -165,6 +171,7 @@ pub struct TargetInfo {
     pub format_partitions: Vec<u32>,
     pub delete_partitions: Vec<u32>,
     pub resize_partitions: Vec<u32>,
+    pub fat_resize_partitions: Vec<u32>,
     pub ext_partitions: Vec<u32>,
     pub metadata_partitions: Vec<u32>,
     pub available_drive_letters: Vec<String>,
@@ -206,6 +213,11 @@ pub(crate) mod platform;
 pub(crate) mod policy;
 #[path = "quick_partition.rs"]
 pub mod quick;
+#[path = "partition_reallocation.rs"]
+pub(crate) mod reallocation;
+#[cfg(any(test, windows))]
+#[path = "partition_merge.rs"]
+pub(crate) mod merge;
 
 pub fn status() -> Status {
     #[cfg(windows)]

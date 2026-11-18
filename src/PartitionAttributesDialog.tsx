@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle } from "./LocalDiskView";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, LoaderCircle } from "lucide-react";
 import { Dialog, FormError } from "./components";
@@ -47,6 +49,7 @@ export function PartitionAttributesDialog({
   onBusy: (busy: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { t, catalogText } = useLocale();
   const [action, setAction] = useState<Action | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState(false);
@@ -107,8 +110,8 @@ export function PartitionAttributesDialog({
   }
   return (
     <Dialog
-      title="分区属性"
-      subtitle={`${disk.name} · 分区 ${partition.number} · ${formatSize(partition.size)}`}
+      title={t("分区属性")}
+      subtitle={`${diskTitle(disk, t)} · ${t("分区 {partition}", { partition: partition.number ?? "—" })} · ${formatSize(partition.size)}`}
       onClose={() => {
         if (!inFlight.current) onClose();
       }}
@@ -116,7 +119,7 @@ export function PartitionAttributesDialog({
       <div
         className="partition-attribute-options"
         role="group"
-        aria-label="选择分区属性操作"
+        aria-label={t("选择分区属性操作")}
       >
         {choices.map(([value, title]) => (
           <button
@@ -133,30 +136,35 @@ export function PartitionAttributesDialog({
               setResult("");
             }}
           >
-            {title}
+            {t(title)}
           </button>
         ))}
       </div>
       {!preview && !result && (
         <p className="table-backup-intro">
-          适用于普通 GPT Windows
-          数据分区。选择一项操作，预览时读取并核对当前属性。
+          {t(
+            "适用于普通 GPT Windows 数据分区。选择一项操作，预览时读取并核对当前属性。",
+          )}
         </p>
       )}
       {preview && (
-        <div className="table-backup-result" aria-label="分区属性预览">
+        <div className="table-backup-result" aria-label={t("分区属性预览")}>
           <strong>
-            {preview.target} · 分区 {preview.partition}
+            {preview.target} ·{" "}
+            {t("分区 {partition}", { partition: preview.partition })}
           </strong>
           <p>
-            {formatSize(preview.size)} · 起始位置 {formatSize(preview.offset)}
+            {t("{size} · 起始 {offset}", {
+              size: formatSize(preview.size),
+              offset: formatSize(preview.offset),
+            })}
           </p>
           <table className="partition-attribute-table">
             <thead>
               <tr>
-                <th>属性</th>
-                <th>当前</th>
-                <th>变更后</th>
+                <th>{t("属性")}</th>
+                <th>{t("当前")}</th>
+                <th>{t("变更后")}</th>
               </tr>
             </thead>
             <tbody>
@@ -169,39 +177,39 @@ export function PartitionAttributesDialog({
                       : ""
                   }
                 >
-                  <th>{title}</th>
-                  <td>{preview.before[key] ? "是" : "否"}</td>
-                  <td>{preview.after[key] ? "是" : "否"}</td>
+                  <th>{t(title)}</th>
+                  <td>{preview.before[key] ? t("是") : t("否")}</td>
+                  <td>{preview.after[key] ? t("是") : t("否")}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="table-backup-intro">{preview.warning}</p>
+          <p className="table-backup-intro">{catalogText(preview.warning)}</p>
         </div>
       )}
       {busy && (
         <p className="table-backup-progress" role="status">
           <LoaderCircle size={17} className="spin" />
-          正在核对设备和分区属性…
+          {t("正在核对设备和分区属性…")}
         </p>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {result && (
         <div className="table-backup-result" role="status">
           <CheckCircle2 size={19} />
-          <p>{result}</p>
+          <p>{catalogText(result)}</p>
         </div>
       )}
       <div className="dialog-actions">
         <button className="button" disabled={busy} onClick={onClose}>
-          关闭
+          {t("关闭对话框")}
         </button>
         <button
           className="button primary"
           disabled={busy || !action}
           onClick={() => void run(!!preview)}
         >
-          {preview ? `确认${preview.title}` : "预览变更"}
+          {preview ? t("确认变更") : t("预览变更")}
         </button>
       </div>
     </Dialog>

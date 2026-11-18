@@ -730,9 +730,11 @@ pub fn export(id: &str) -> Result<Option<String>, String> {
             .filter(|r| r.id == id && r.state != "running")
             .ok_or("报告尚未完成或已被替换")?;
         let Some(path) = rfd::FileDialog::new()
-            .set_title("保存维护报告到另一块磁盘（新文件名）")
+            .set_title(crate::native_locale::text(
+                "保存维护报告到另一块磁盘（新文件名）",
+            ))
             .set_file_name("DiskStudio-maintenance.json")
-            .add_filter("JSON 报告", &["json"])
+            .add_filter(crate::native_locale::text("JSON 报告"), &["json"])
             .save_file()
         else {
             return Ok(None);

@@ -487,7 +487,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.contains("扫描完成"), "{result}");
+        assert!(result.starts_with("Ext scan complete."), "{result}");
         let mut catalog = Catalog::default();
         for d in directories {
             catalog.insert(d).unwrap();

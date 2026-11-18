@@ -14,14 +14,14 @@ struct Page {
     valid: usize,
     bytes: Vec<u8>,
 }
-struct ScanRead<'a, R> {
+pub(crate) struct ScanRead<'a, R> {
     inner: &'a mut R,
     position: u64,
     size: u64,
     pages: [Page; 2],
 }
 impl<'a, R: Read + Seek> ScanRead<'a, R> {
-    fn new(inner: &'a mut R) -> std::io::Result<Self> {
+    pub(crate) fn new(inner: &'a mut R) -> std::io::Result<Self> {
         let position = inner.stream_position()?;
         let size = inner.seek(SeekFrom::End(0))?;
         Ok(Self {
@@ -412,13 +412,21 @@ pub fn continue_scan<R: Read + Seek>(
             sealed: record + 1 == records || count >= MAX_RESULTS,
         };
         if count >= MAX_RESULTS {
-            return Ok(format!(
-                "达到 {MAX_RESULTS} 条结果上限，NTFS 扫描提前结束；未能解析 {skipped} 条记录。"
+            return Ok(crate::native_locale::current().format(
+                "达到 {limit} 条结果上限，NTFS 扫描提前结束；未能解析 {skipped} 条记录。",
+                &[
+                    ("limit", &MAX_RESULTS.to_string()),
+                    ("skipped", &skipped.to_string()),
+                ],
             ));
         }
     }
     tick(records, records)?;
-    Ok(format!("扫描完成，找到 {count} 项文件名称/命名数据流（含 {aliases} 个额外名称）；未能解析 {skipped} 条文件记录或数据流、{directory_errors} 个目录链路。命名数据流单独导出，暂不枚举目录附带的数据流；名称可能指向同一文件，目录未必完整，内容需恢复后核对。"))
+    Ok(crate::native_locale::current().format(
+        "扫描完成，找到 {count} 项文件名称/命名数据流（含 {aliases} 个额外名称）；未能解析 {skipped} 条文件记录或数据流、{directoryErrors} 个目录链路。命名数据流单独导出，暂不枚举目录附带的数据流；名称可能指向同一文件，目录未必完整，内容需恢复后核对。",
+        &[("count", &count.to_string()), ("aliases", &aliases.to_string()),
+          ("skipped", &skipped.to_string()), ("directoryErrors", &directory_errors.to_string())],
+    ))
 }
 fn resolve_ntfs_directory<R: Read + Seek>(
     ntfs: &Ntfs,

@@ -1,4 +1,6 @@
 import type { SignatureKind, SignatureSettings } from "./signatureModel";
+import type { Language } from "./i18n/languages";
+import { translate } from "./i18n/translate";
 import { formatSize } from "./types";
 export type RecoveryProgress = {
   id: string;
@@ -44,21 +46,30 @@ export function settingsFromProgress(p: RecoveryProgress): SignatureSettings {
         : ((p.options.start + p.options.length) / 1024 ** 2).toFixed(9),
   };
 }
-export function progressAmount(p: RecoveryProgress) {
+export function progressAmount(
+  p: RecoveryProgress,
+  language: Language = "zh-CN",
+) {
+  if (p.engine === "signatures")
+    return `${formatSize(p.done)} / ${formatSize(p.total)}`;
+  const done = p.done.toLocaleString(language);
+  const total = p.total.toLocaleString(language);
   if (p.engine === "fat" || p.engine === "exfat" || p.engine === "ext") {
     return p.total === 0
-      ? `已检查 ${p.done.toLocaleString()} 条目录记录`
-      : `${p.done.toLocaleString()} / ${p.total.toLocaleString()} 条目录记录`;
+      ? translate(language, "已检查 {count} 条目录记录", { count: done })
+      : translate(language, "{done} / {total} 条目录记录", { done, total });
   }
-  return p.engine === "ntfs"
-    ? `${p.done.toLocaleString()} / ${p.total.toLocaleString()} 条文件记录`
-    : `${formatSize(p.done)} / ${formatSize(p.total)}`;
+  return translate(language, "{done} / {total} 条文件记录", { done, total });
 }
-export function progressMode(p: RecoveryProgress) {
-  return {
+export function progressMode(
+  p: RecoveryProgress,
+  language: Language = "zh-CN",
+) {
+  const modes = {
     deleted: "已删除文件",
     allFiles: "全部文件",
     existing: "现存文件",
     signatures: "文件签名",
-  }[p.mode];
+  } as const;
+  return translate(language, modes[p.mode]);
 }

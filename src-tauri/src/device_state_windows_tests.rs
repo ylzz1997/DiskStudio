@@ -103,7 +103,7 @@ fn native_mbr_geometry_types_and_bounds_are_cross_checked() {
 #[test]
 fn confirmation_is_consumed_on_mismatch_expiry_and_success() {
     fn ticket(now: Instant) -> Pending {
-        Pending { request:serde_json::from_value(serde_json::json!({"source":{"target":"a".repeat(64),"layoutKey":"fixture","partition":null},"action":"online"})).unwrap(),preview:model::Preview{token:"once".into(),title:"x".into(),target:"fixture".into(),size:1,partitions:0,before:State{offline:true,read_only:false},after:State{offline:false,read_only:false},warning:"".into()},fingerprint:"".into(),identity:"".into(),native:"".into(),deadline:now+Duration::from_secs(300) }
+        Pending { request:serde_json::from_value(serde_json::json!({"source":{"target":"a".repeat(64),"layoutKey":"fixture","partition":null},"action":"online"})).unwrap(),preview:model::Preview{token:"once".into(),title:"x".into(),target:"fixture".into(),size:1,partitions:0,before:State{offline:true,read_only:false},after:State{offline:false,read_only:false},warning:"".into()},expected:ExpectedState{fingerprint:"".into(),identity:"".into(),native:"".into(),state:State{offline:true,read_only:false}},deadline:now+Duration::from_secs(300) }
     }
     let now = Instant::now();
     for (token, time, ok) in [

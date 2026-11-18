@@ -105,8 +105,11 @@ mod windows {
         }
         let initial = partitions::table_read_context(&request.source, None)?;
         let Some(path) = rfd::FileDialog::new()
-            .set_title("备份分区表到另一块磁盘")
-            .add_filter("DiskStudio 分区表备份", &["dspt"])
+            .set_title(crate::native_locale::text("备份分区表到另一块磁盘"))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 分区表备份"),
+                &["dspt"],
+            )
             .set_file_name("DiskStudio-partition-table.dspt")
             .save_file()
         else {
@@ -214,8 +217,11 @@ mod windows {
     }
     pub fn verify(cancel: &AtomicBool) -> Result<Option<Report>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("验证分区表备份")
-            .add_filter("DiskStudio 分区表备份", &["dspt"])
+            .set_title(crate::native_locale::text("验证分区表备份"))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 分区表备份"),
+                &["dspt"],
+            )
             .pick_file()
         else {
             return Ok(None);

@@ -1491,6 +1491,7 @@ i {
 }
 .main-nav {
   display: flex;
+  min-width: 0;
   gap: 28px;
   align-items: stretch;
   padding-left: 22px;
@@ -2446,9 +2447,6 @@ i {
   background: var(--surface);
   color: var(--text);
 }
-.disk-menu {
-  width: 235px;
-}
 .popover {
   position: absolute;
   right: 0;
@@ -2462,6 +2460,9 @@ i {
   z-index: 20;
   animation: pop-in 0.12s ease-out;
 }
+.popover.disk-menu {
+  width: clamp(235px, 30vw, 330px);
+}
 .popover button {
   display: flex;
   align-items: center;
@@ -2471,6 +2472,9 @@ i {
   text-align: left;
   font-size: 12px;
   border-radius: 6px;
+}
+.popover button > svg {
+  flex-shrink: 0;
 }
 .popover button:hover:not(:disabled) {
   background: var(--surface);
@@ -3132,6 +3136,15 @@ i {
   font-size: 12px;
   font-weight: 550;
 }
+.language-select {
+  max-width: 60%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
 .setting-row small {
   font-size: 11px;
   display: block;
@@ -3243,6 +3256,10 @@ i {
   }
   .main-nav button {
     font-size: 14px;
+    min-width: 0;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .app-tools {
     padding: 0 10px;

@@ -7,6 +7,7 @@ import {
   StopCircle,
 } from "lucide-react";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
 import { conversionReader, type ImageFiles } from "./imageReader";
 import {
   conversionFormats,
@@ -26,6 +27,7 @@ export function ImageConversionDialog({
   onClose: () => void;
   onBusy: (busy: boolean) => void;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [files, setFiles] = useState<ImageFiles | undefined>(initial),
     [format, setFormat] = useState<ImageOutputFormat>("vhdDynamic");
   const [report, setReport] = useState<ImageConversionReport | null>(null),
@@ -41,18 +43,18 @@ export function ImageConversionDialog({
     alive = useRef(true);
   const phaseText =
     report?.state === "checkingSource"
-      ? "复核源镜像"
+      ? t("复核源镜像")
       : report?.state === "verifying"
-        ? "回读目标镜像"
+        ? t("回读目标镜像")
         : report?.state === "completed"
-          ? "转换完成"
+          ? t("转换完成")
           : report?.state === "receiving"
-            ? "转换写入"
+            ? t("转换写入")
             : report?.state === "canceled"
-              ? "转换已停止"
+              ? t("转换已停止")
               : report?.state === "failed"
-                ? "转换未完成"
-                : "准备转换";
+                ? t("转换未完成")
+                : t("准备转换");
   const needsStandalone = /\.(hdd|hds)$/i.test(files?.file.name ?? "");
   useEffect(() => {
     alive.current = true;
@@ -157,8 +159,8 @@ export function ImageConversionDialog({
       (report?.verified ?? 0);
   return (
     <Dialog
-      title="镜像格式转换"
-      subtitle="将镜像保存为另一种格式的独立新文件"
+      title={t("镜像格式转换")}
+      subtitle={t("将镜像保存为另一种格式的独立新文件")}
       onClose={() => {
         if (!busy) onClose();
       }}
@@ -167,7 +169,7 @@ export function ImageConversionDialog({
           {busy ? (
             <button className="button" disabled={stopping} onClick={stop}>
               <StopCircle size={16} />
-              {stopping ? "正在停止…" : "停止转换"}
+              {stopping ? t("正在停止…") : t("停止转换")}
             </button>
           ) : (
             <button
@@ -176,26 +178,26 @@ export function ImageConversionDialog({
               onClick={() => void start()}
             >
               <ArrowRightLeft size={16} />
-              选择保存位置并转换
+              {t("选择保存位置并转换")}
             </button>
           )}
           <button className="button" disabled={busy} onClick={onClose}>
-            关闭
+            {t("关闭对话框")}
           </button>
         </>
       }
     >
       <fieldset className="maintenance-fields" disabled={busy}>
         <div className="image-conversion-source">
-          <strong>{files?.file.name ?? "选择源镜像"}</strong>
+          <strong>{files?.file.name ?? t("选择源镜像")}</strong>
           <span>
             {files
               ? formatSize(files.file.size)
-              : "RAW / IMG、VHD / AVHD、VHDX、VDI、VMDK、HDD / HDS"}
+              : "RAW / IMG, VHD / AVHD, VHDX, VDI, VMDK, HDD / HDS"}
           </span>
           <button className="button" onClick={() => primary.current?.click()}>
             <FolderOpen size={16} />
-            {files ? "更换文件" : "选择文件"}
+            {files ? t("更换文件") : t("选择文件")}
           </button>
         </div>
         <input
@@ -222,8 +224,9 @@ export function ImageConversionDialog({
               onChange={(e) => setStandaloneConfirmed(e.target.checked)}
             />
             <span>
-              确认这是独立 HDD/HDS
-              数据文件，不依赖其他快照。单个文件无法判断目录包中的快照关系。
+              {t(
+                "确认这是独立 HDD/HDS 数据文件，不依赖其他快照。单个文件无法判断目录包中的快照关系。",
+              )}
             </span>
           </label>
         )}
@@ -234,12 +237,14 @@ export function ImageConversionDialog({
                 className="button text-button"
                 onClick={() => companions.current?.click()}
               >
-                选择分卷或父盘文件…
+                {t("选择分卷或父盘文件…")}
               </button>
               <small>
                 {files.companions.length
-                  ? `已选择 ${files.companions.length} 个文件`
-                  : "仅用于分卷 VMDK 或差分 VHD"}
+                  ? t("已选择 {count} 个文件", {
+                      count: files.companions.length.toLocaleString(language),
+                    })
+                  : t("仅用于分卷 VMDK 或差分 VHD")}
               </small>
             </div>
             {!!files.companions.length && (
@@ -264,7 +269,7 @@ export function ImageConversionDialog({
             />
             {/\.(raw|img)$/i.test(files.file.name) && (
               <label>
-                源逻辑扇区
+                {t("源逻辑扇区")}
                 <select
                   value={files.sector}
                   onChange={(e) => {
@@ -284,7 +289,7 @@ export function ImageConversionDialog({
           </>
         )}
         <label>
-          目标格式
+          {t("目标格式")}
           <select
             value={format}
             onChange={(e) => {
@@ -295,19 +300,23 @@ export function ImageConversionDialog({
           >
             {conversionFormats.map((f) => (
               <option key={f.value} value={f.value}>
-                {f.label}
+                {catalogText(f.label)}
               </option>
             ))}
           </select>
         </label>
         <p className="image-conversion-note">
-          {conversionFormats.find((f) => f.value === format)?.detail}
+          {catalogText(
+            conversionFormats.find((f) => f.value === format)?.detail ?? "",
+          )}
         </p>
       </fieldset>
       <p className="image-conversion-note">
-        请使用已关闭虚拟机的完整镜像副本。转换保留逻辑内容和容量，不调整文件系统，不覆盖源文件；差分链输出为独立镜像。需读取源两遍并完整回读目标。
+        {t(
+          "请使用已关闭虚拟机的完整镜像副本。转换保留逻辑内容和容量，不调整文件系统，不覆盖源文件；差分链输出为独立镜像。需读取源两遍并完整回读目标。",
+        )}
       </p>
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {(busy || report) && (
         <section
           ref={progress}
@@ -318,35 +327,41 @@ export function ImageConversionDialog({
             {busy && <LoaderCircle size={16} className="spin" />}
             {phaseText}
           </h3>
-          {total > 0 && (
+          {report && total > 0 && (
             <>
               <progress value={Math.min(done, total * 3)} max={total * 3} />
               <p>
-                写入 {formatSize(report!.received)} · 源复核{" "}
-                {formatSize(report!.sourceVerified)} · 目标回读{" "}
-                {formatSize(report!.verified)}
+                {t("写入 {written} · 源复核 {checked} · 目标回读 {readBack}", {
+                  written: formatSize(report.received),
+                  checked: formatSize(report.sourceVerified),
+                  readBack: formatSize(report.verified),
+                })}
               </p>
             </>
           )}
-          <p>{report?.message ?? "正在检查源镜像…"}</p>
+          <p>{report ? catalogText(report.message) : t("正在检查源镜像…")}</p>
           {report?.result && (
             <dl className="detail-list">
-              <dt>输出文件</dt>
+              <dt>{t("输出文件")}</dt>
               <dd>{report.outputName}</dd>
-              <dt>逻辑容量</dt>
+              <dt>{t("逻辑容量")}</dt>
               <dd>{formatSize(report.result.logicalBytes)}</dd>
-              <dt>文件长度</dt>
+              <dt>{t("文件长度")}</dt>
               <dd>{formatSize(report.result.fileBytes)}</dd>
-              <dt>逻辑扇区</dt>
+              <dt>{t("逻辑扇区")}</dt>
               <dd>{report.options.sector} B</dd>
-              <dt>逻辑 SHA-256</dt>
+              <dt>{t("逻辑 SHA-256")}</dt>
               <dd className="image-conversion-hash">{report.result.sha256}</dd>
             </dl>
           )}
           {report && !report.result && (
             <small>
-              未完成文件：{report.partialName}
-              。停止或失败时保留该文件，不会发布为成功镜像。
+              {t(
+                "未完成文件 {file}。停止或失败时保留该文件，不会发布为成功镜像。",
+                {
+                  file: report.partialName,
+                },
+              )}
             </small>
           )}
         </section>

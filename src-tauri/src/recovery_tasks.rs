@@ -513,8 +513,13 @@ mod files {
     }
     pub fn load(source: &Selection) -> Result<Option<Vec<u8>>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("加载所选磁盘或分区的恢复扫描进度")
-            .add_filter("DiskStudio 恢复进度", &["dsrecover"])
+            .set_title(crate::native_locale::text(
+                "加载所选磁盘或分区的恢复扫描进度",
+            ))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 恢复进度"),
+                &["dsrecover"],
+            )
             .pick_file()
         else {
             return Ok(None);
@@ -546,8 +551,13 @@ mod files {
         default_name: &str,
     ) -> Result<Option<String>, String> {
         let Some(path) = rfd::FileDialog::new()
-            .set_title("将恢复进度保存到另一块磁盘（使用新文件名）")
-            .add_filter("DiskStudio 恢复进度", &["dsrecover"])
+            .set_title(crate::native_locale::text(
+                "将恢复进度保存到另一块磁盘（使用新文件名）",
+            ))
+            .add_filter(
+                crate::native_locale::text("DiskStudio 恢复进度"),
+                &["dsrecover"],
+            )
             .set_file_name(default_name)
             .save_file()
         else {

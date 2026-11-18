@@ -408,8 +408,13 @@ impl<'n> NtfsFile<'n> {
 
     /// Returns flags set for this file as specified by [`NtfsFileFlags`].
     pub fn flags(&self) -> NtfsFileFlags {
+        NtfsFileFlags::from_bits_truncate(self.raw_flags())
+    }
+
+    /// Returns the original file record header flags, including known metadata bits.
+    pub fn raw_flags(&self) -> u16 {
         let start = offset_of!(FileRecordHeader, flags);
-        NtfsFileFlags::from_bits_truncate(LittleEndian::read_u16(&self.record.data()[start..]))
+        LittleEndian::read_u16(&self.record.data()[start..])
     }
 
     /// Returns the number of hard links to this NTFS File Record.

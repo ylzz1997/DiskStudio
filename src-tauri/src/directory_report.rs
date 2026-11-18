@@ -1,12 +1,51 @@
 //! Offline directory listing from an in-memory scan snapshot. No device/path I/O.
 use crate::{
+    native_locale::Locale,
     recovery::{Candidate, Locator, ScanMode, MAX_RESULTS},
     recovery_tree::{Catalog, Directory, ROOT, UNKNOWN},
 };
 use serde::Serialize;
-use std::{collections::HashSet, io::Write};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::Write,
+};
 
 const MAX_JSON: usize = 64 * 1024 * 1024;
+// Messages inserted by the offline JavaScript, beyond the static HTML labels.
+const REPORT_MESSAGES: &[&str] = &[
+    "全部文件",
+    "根目录",
+    "目录未知",
+    "现存文件",
+    "已删除",
+    "删除状态未知",
+    "文件数 {count}",
+    "已知目录数 {count}",
+    "文件数 {count}（含子目录）",
+    "编号 {number}",
+    "{filesystem} 目录",
+    "筛选无效",
+    "搜索内容不得超过 200 字节或包含控制字符。",
+    "未知的筛选选项。",
+    "日期必须是有效的 YYYY-MM-DD。",
+    "开始日期不能晚于结束日期。",
+    "当前引擎不支持导出内容",
+    "{zone} · 精度 {precision}",
+    "未记录或无法解析",
+    "全部属性",
+    "创建时间",
+    "修改时间",
+    "访问时间",
+    "元数据变更",
+    "属性",
+    "无已识别标志",
+    "未知",
+    "原始标志 {flags}",
+    "POSIX 权限",
+    "链接计数",
+    "信息来源",
+    "未提供",
+];
 #[derive(Clone, Copy, Default)]
 pub enum Completion {
     #[default]
@@ -47,8 +86,88 @@ struct Listing<'a> {
     version: u8,
     mode: &'static str,
     completion: &'static str,
+    messages: BTreeMap<&'a str, &'a str>,
     directories: Vec<Directory>,
     files: Vec<Entry<'a>>,
+}
+
+fn messages<'a>(
+    locale: &'a Locale,
+    files: &[Entry<'a>],
+    mode: &'static str,
+    completion: &'static str,
+) -> BTreeMap<&'a str, &'a str> {
+    let mut messages = BTreeMap::new();
+    if locale.tag() == "zh-CN" {
+        return messages;
+    }
+    let mut retain = |key: &'a str| {
+        let text = locale.text(key);
+        if text != key {
+            messages.insert(key, text);
+        }
+    };
+    for key in REPORT_MESSAGES.iter().copied().chain([mode, completion]) {
+        retain(key);
+    }
+    for file in files {
+        retain(file.method);
+        retain(file.note);
+        retain(file.directory_note);
+        if let Some(at) = file.note.rfind("；保存时的历史观察") {
+            retain(&file.note[..at]);
+            retain(&file.note[at + '；'.len_utf8()..]);
+        }
+        let aliases = "同一文件有多个名称；选中后分别保存副本";
+        if file.directory_note.contains(aliases) {
+            retain(aliases);
+        }
+        for part in file.directory_note.split('；') {
+            retain(part);
+        }
+        if let Some(source) = file.metadata.source.as_deref() {
+            retain(source);
+        }
+        for attribute in &file.metadata.attributes {
+            retain(attribute);
+        }
+        for stamp in [
+            &file.metadata.created,
+            &file.metadata.modified,
+            &file.metadata.accessed,
+            &file.metadata.changed,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            retain(&stamp.zone);
+            retain(&stamp.precision);
+        }
+    }
+    messages
+}
+
+fn markup(mut template: &str, locale: &Locale) -> String {
+    let mut html = String::with_capacity(template.len());
+    while let Some((before, label)) = template.split_once("{{") {
+        html.push_str(before);
+        let (label, after) = label
+            .split_once("}}")
+            .expect("unclosed label in directory report template");
+        for character in locale.text(label).chars() {
+            match character {
+                '&' => html.push_str("&amp;"),
+                '<' => html.push_str("&lt;"),
+                '>' => html.push_str("&gt;"),
+                '"' => html.push_str("&quot;"),
+                '\'' => html.push_str("&#39;"),
+                _ => html.push(character),
+            }
+        }
+        template = after;
+    }
+    html.push_str(template);
+    html
 }
 struct Bounded(Vec<u8>);
 impl Write for Bounded {
@@ -82,6 +201,7 @@ pub fn render(
     candidates: &[Candidate],
     mode: ScanMode,
     completion: Completion,
+    locale: &Locale,
 ) -> Result<String, String> {
     if candidates.len() > MAX_RESULTS {
         return Err("目录清单超过 100000 个文件上限。".into());
@@ -129,15 +249,18 @@ pub fn render(
             })
         })
         .collect::<Result<_, String>>()?;
+    let mode = match mode {
+        ScanMode::Deleted => "找回删除文件",
+        ScanMode::AllFiles => "扫描全部文件",
+        ScanMode::Existing => "浏览现存文件",
+        ScanMode::Signatures => "按文件签名扫描",
+    };
+    let completion = completion.label();
     let listing = Listing {
         version: 1,
-        mode: match mode {
-            ScanMode::Deleted => "找回删除文件",
-            ScanMode::AllFiles => "扫描全部文件",
-            ScanMode::Existing => "浏览现存文件",
-            ScanMode::Signatures => "按文件签名扫描",
-        },
-        completion: completion.label(),
+        mode,
+        completion,
+        messages: messages(locale, &files, mode, completion),
         directories,
         files,
     };
@@ -148,7 +271,8 @@ pub fn render(
     let json = String::from_utf8(json.0).map_err(|e| e.to_string())?;
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     // Data substitution MUST be last: metadata is never treated as a template.
-    Ok(include_str!("directory_report.html")
+    Ok(markup(include_str!("directory_report.html"), locale)
+        .replace("__REPORT_LANG__", locale.tag())
         .replace("__REPORT_STYLE__", include_str!("directory_report.css"))
         .replace("__REPORT_SCRIPT__", include_str!("directory_report.js"))
         .replace("__QUERY_SCRIPT__", include_str!("directory_query.js"))
@@ -159,6 +283,23 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_locale::Language;
+
+    fn render(
+        catalog: &Catalog,
+        files: &[Candidate],
+        mode: ScanMode,
+        completion: Completion,
+    ) -> Result<String, String> {
+        super::render(
+            catalog,
+            files,
+            mode,
+            completion,
+            &Locale::new(Language::ZhCn),
+        )
+    }
+
     fn candidate(id: u32, directory: Option<&str>) -> Candidate {
         Candidate {
             metadata: crate::file_metadata::Metadata::default(),
@@ -190,6 +331,66 @@ mod tests {
             .unwrap();
         serde_json::from_str(json).unwrap()
     }
+
+    #[test]
+    fn report_localizes_controls_and_runtime_messages_with_stable_filter_values() {
+        let mut file = candidate(7, Some(ROOT));
+        file.name = "工作资料 {{目录清单}} </script>.txt".into();
+        file.deleted = true;
+        file.note = "可能已被覆盖；请先预览并核对恢复内容".into();
+        for (tag, title) in [
+            ("zh-CN", "目录清单"),
+            ("zh-TW", "目錄清單"),
+            ("en", "Directory Listing"),
+            ("ja", "ディレクトリ一覧"),
+            ("ko", "디렉터리 목록"),
+            ("pt", "Lista de diretórios"),
+            ("es", "Lista de directorios"),
+            ("de", "Verzeichnisliste"),
+            ("fr", "Liste des dossiers"),
+            ("it", "Elenco directory"),
+            ("ru", "Список каталогов"),
+        ] {
+            let language = serde_json::from_value::<Language>(tag.into()).unwrap();
+            let locale = Locale::new(language);
+            let html = super::render(
+                &Catalog::default(),
+                std::slice::from_ref(&file),
+                ScanMode::AllFiles,
+                Completion::Paused,
+                &locale,
+            )
+            .unwrap();
+            assert!(html.contains(&format!("<html lang=\"{tag}\">")));
+            assert!(html.contains(&format!("<h1>{title}</h1>")));
+            assert!(html.contains(&format!(
+                "<option value=\"已删除\">{}</option>",
+                locale.text("已删除")
+            )));
+            assert!(!html.contains("{{目录清单}}</h1>"));
+            let payload = data(&html);
+            assert_eq!(payload["files"][0]["name"], file.name);
+            assert_eq!(payload["files"][0]["state"], "已删除");
+            assert_eq!(payload["mode"], "扫描全部文件");
+            if language == Language::ZhCn {
+                assert_eq!(payload["messages"], serde_json::json!({}));
+            } else {
+                for key in [
+                    Completion::Paused.label(),
+                    file.note.as_str(),
+                    "文件数 {count}",
+                ] {
+                    assert_eq!(payload["messages"][key], locale.text(key), "{tag} {key}");
+                }
+                assert!(payload["messages"].get("磁盘管理").is_none());
+            }
+        }
+        assert_eq!(
+            markup("<span>{{备份与克隆}}</span>", &Locale::new(Language::En)),
+            "<span>Backup &amp; Clone</span>"
+        );
+    }
+
     #[test]
     fn report_retains_identity_empty_folders_unknown_and_exact_sizes() {
         let mut catalog = Catalog::default();
@@ -353,6 +554,20 @@ mod tests {
             .contains("未正常结束"));
         // Optional developer artifact. Ordinary tests remain entirely in memory.
         if let Some(path) = std::env::var_os("DISKSTUDIO_REPORT_FIXTURE") {
+            let html = match std::env::var("DISKSTUDIO_REPORT_FIXTURE_LANGUAGE") {
+                Ok(tag) => {
+                    let language = serde_json::from_value::<Language>(tag.into()).unwrap();
+                    super::render(
+                        &catalog,
+                        &files,
+                        ScanMode::AllFiles,
+                        Completion::Failed,
+                        &Locale::new(language),
+                    )
+                    .unwrap()
+                }
+                Err(_) => html,
+            };
             std::fs::write(path, html).unwrap();
         }
     }

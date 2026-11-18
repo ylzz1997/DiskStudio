@@ -41,6 +41,7 @@ mod lost_partition_tasks;
 mod lost_partitions;
 mod maintenance_io;
 mod maintenance_tasks;
+mod native_locale;
 mod ntfs_allocation;
 mod ntfs_checkpoint;
 mod ntfs_compression;
@@ -48,6 +49,9 @@ mod ntfs_names;
 mod ntfs_scan;
 mod ntfs_streams;
 mod partition_attributes;
+#[cfg(any(test, windows))]
+mod partition_move;
+mod partition_move_task;
 mod partitions;
 mod recovery;
 mod recovery_checkpoint;
@@ -182,6 +186,36 @@ async fn partition_attributes_execute(
 #[tauri::command]
 fn partition_attributes_discard(token: String) {
     partition_attributes::discard(token);
+}
+
+#[tauri::command]
+async fn partition_move_prepare(
+    request: partition_move_task::Request,
+) -> Result<Option<partition_move_task::Preview>, String> {
+    tauri::async_runtime::spawn_blocking(move || partition_move_task::prepare(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn partition_move_resume(
+    source: data_tasks::Selection,
+) -> Result<Option<partition_move_task::Preview>, String> {
+    tauri::async_runtime::spawn_blocking(move || partition_move_task::resume(source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn partition_move_execute(token: String) -> Result<partition_move_task::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || partition_move_task::execute(token))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn partition_move_discard(token: String) {
+    partition_move_task::discard(token);
 }
 
 #[tauri::command]
@@ -461,6 +495,35 @@ fn quick_partition_discard(token: String) {
     partitions::quick::discard(token);
 }
 #[tauri::command]
+async fn partition_reallocation_prepare(
+    request: partitions::reallocation::Request,
+) -> Result<Option<partitions::reallocation::Preview>, String> {
+    tauri::async_runtime::spawn_blocking(move || partitions::reallocation::prepare(request))
+        .await
+        .map_err(|_| "空间重新分配预览任务未能完成。".to_string())?
+}
+#[tauri::command]
+async fn partition_reallocation_execute(
+    token: String,
+    progress: tauri::ipc::Channel<partitions::quick::Progress>,
+) -> Result<partitions::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        partitions::reallocation::execute(token, |event| {
+            let _ = progress.send(event);
+        })
+    })
+    .await
+    .map_err(|_| "批量执行任务未能返回结果，请核对实际状态。".to_string())?
+}
+#[tauri::command]
+fn partition_reallocation_discard(token: String) {
+    partitions::reallocation::discard(token);
+}
+#[tauri::command]
+fn partition_reallocation_stop(token: String) -> bool {
+    partitions::reallocation::stop(token)
+}
+#[tauri::command]
 fn parse_image(head: Vec<u8>, size: u64, filename: String) -> Result<Disk, String> {
     disk_core::parse_image(&head, size, &filename)
 }
@@ -659,6 +722,10 @@ async fn sector_execute_write(token: String) -> Result<sector_write::Outcome, St
 fn sector_discard_write(token: String) {
     sector_write::discard(token)
 }
+#[tauri::command]
+fn set_display_language(language: native_locale::Language) {
+    native_locale::set(language);
+}
 fn main() {
     tauri::Builder::default()
         .on_window_event(|_, event| {
@@ -669,6 +736,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            set_display_language,
             backup_password_status,
             backup_password_submit,
             maintenance_prepare,
@@ -680,6 +748,10 @@ fn main() {
             partition_attributes_prepare,
             partition_attributes_execute,
             partition_attributes_discard,
+            partition_move_prepare,
+            partition_move_resume,
+            partition_move_execute,
+            partition_move_discard,
             device_state_execute,
             device_state_discard,
             health_read,
@@ -726,6 +798,10 @@ fn main() {
             quick_partition_prepare,
             quick_partition_execute,
             quick_partition_discard,
+            partition_reallocation_prepare,
+            partition_reallocation_execute,
+            partition_reallocation_discard,
+            partition_reallocation_stop,
             data_status,
             data_scan_status,
             data_recovery_progress_status,

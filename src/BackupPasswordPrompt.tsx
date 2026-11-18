@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle, LockKeyhole } from "lucide-react";
 import { Dialog, FormError } from "./components";
 import { native } from "./backend";
+import { useLocale } from "./i18n/LanguageProvider";
 
 interface Prompt {
   id: string;
@@ -47,6 +48,7 @@ function PasswordForm({
   prompt: Prompt;
   onDone: () => void;
 }) {
+  const { t } = useLocale();
   const [value, setValue] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -61,8 +63,8 @@ function PasswordForm({
     ) {
       setError(
         creating
-          ? "请输入至少 8 个字符，并确保两次密码相同。"
-          : "请输入备份密码。",
+          ? t("请输入至少 8 个字符，并确保两次密码相同。")
+          : t("请输入备份密码。"),
       );
       return;
     }
@@ -83,7 +85,7 @@ function PasswordForm({
       });
       onDone();
     } catch {
-      setError("密码请求已变化或输入不符合要求，请重新输入或取消。");
+      setError(t("密码请求已变化或输入不符合要求，请重新输入或取消。"));
     } finally {
       setValue("");
       setConfirmation("");
@@ -92,7 +94,7 @@ function PasswordForm({
   };
   return (
     <Dialog
-      title={creating ? "设置备份密码" : "打开加密备份"}
+      title={creating ? t("设置备份密码") : t("打开加密备份")}
       subtitle={prompt.filename}
       onClose={() => void submit(true)}
       footer={
@@ -102,7 +104,7 @@ function PasswordForm({
             disabled={busy}
             onClick={() => void submit(true)}
           >
-            取消
+            {t("取消")}
           </button>
           <button
             className="button primary"
@@ -115,7 +117,7 @@ function PasswordForm({
             ) : (
               <LockKeyhole size={16} />
             )}
-            {creating ? "使用此密码" : "解锁备份"}
+            {creating ? t("使用此密码") : t("解锁备份")}
           </button>
         </>
       }
@@ -129,7 +131,7 @@ function PasswordForm({
         }}
       >
         <label>
-          备份密码
+          {t("备份密码")}
           <input
             type="password"
             value={value}
@@ -142,7 +144,7 @@ function PasswordForm({
         </label>
         {creating && (
           <label>
-            再次输入密码
+            {t("再次输入密码")}
             <input
               type="password"
               value={confirmation}
@@ -156,8 +158,8 @@ function PasswordForm({
         )}
         <p className="muted">
           {creating
-            ? "请妥善保管密码，打开和还原这份备份时需要使用。"
-            : "密码仅用于当前备份；其他依赖文件可能需要各自的密码。"}
+            ? t("请妥善保管密码，打开和还原这份备份时需要使用。")
+            : t("密码仅用于当前备份；其他依赖文件可能需要各自的密码。")}
         </p>
         <FormError message={error} />
       </form>

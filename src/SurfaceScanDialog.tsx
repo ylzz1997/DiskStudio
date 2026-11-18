@@ -9,6 +9,8 @@ import {
   Save,
 } from "lucide-react";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
 import type { Disk } from "./types";
 import { formatSize } from "./types";
 import {
@@ -34,6 +36,8 @@ export function SurfaceScanDialog({
   onClose: () => void;
   onBusy: (busy: boolean) => void;
 }) {
+  const { t, language, catalogText } = useLocale();
+  const latencyLabels = labels.map(catalogText);
   const [partition, setPartition] = useState("");
   const [start, setStart] = useState("0");
   const [count, setCount] = useState(String(disk.size / disk.sectorSize));
@@ -41,7 +45,10 @@ export function SurfaceScanDialog({
   const [pending, setPending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState("");
+  const [saved, setSaved] = useState<{
+    path: string;
+    progress: boolean;
+  } | null>(null);
   const control = useRef({ pending: false, id: "", busy: false, onBusy });
   control.current.onBusy = onBusy;
   const report = snapshot?.report;
@@ -75,7 +82,7 @@ export function SurfaceScanDialog({
           setBusy(next.report.state === "running");
         }
       } catch (e) {
-        if (alive) setError(String(e));
+        if (alive) setError(e instanceof Error ? e.message : String(e));
       }
       if (alive) timer = setTimeout(() => void poll(), 400);
     }
@@ -104,13 +111,13 @@ export function SurfaceScanDialog({
   async function begin(resume = false) {
     if (control.current.busy) return;
     setError("");
-    setSaved("");
+    setSaved(null);
     try {
       const options = resume
         ? snapshot!.options
         : surfaceRange(start, count, size, disk.sectorSize);
       if (!disk.hardware?.identity || !disk.hardware.layoutKey)
-        throw Error("请刷新磁盘信息后重试。");
+        throw Error(t("请刷新磁盘信息后重试。"));
       control.current.pending = true;
       setPending(true);
       setBusy(true);
@@ -131,7 +138,7 @@ export function SurfaceScanDialog({
       setSnapshot(next);
       if (resume && next) restoreOptions(next);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message.trim() : String(e));
       setBusy(false);
     } finally {
       control.current.pending = false;
@@ -144,7 +151,7 @@ export function SurfaceScanDialog({
       await invoke("surface_pause", { id: snapshot.id });
       setStopping(true);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
   async function save(progressFile = false) {
@@ -160,9 +167,9 @@ export function SurfaceScanDialog({
           id: snapshot.id,
         },
       );
-      if (path) setSaved(`${progressFile ? "进度" : "报告"}已保存：${path}`);
+      if (path) setSaved({ path, progress: progressFile });
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       control.current.pending = false;
       setPending(false);
@@ -175,7 +182,7 @@ export function SurfaceScanDialog({
     setPending(true);
     setBusy(true);
     setError("");
-    setSaved("");
+    setSaved(null);
     try {
       const next = await invoke<SurfaceSnapshot | null>(
         "surface_load_progress",
@@ -188,7 +195,7 @@ export function SurfaceScanDialog({
         setStopping(false);
       }
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       control.current.pending = false;
       setPending(false);
@@ -201,33 +208,33 @@ export function SurfaceScanDialog({
   return (
     <Dialog
       wide
-      title="坏道检测"
-      subtitle={`${disk.name} · ${formatSize(disk.size)} · ${disk.hardware?.model ?? ""}`}
+      title={t("坏道检测")}
+      subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)} · ${disk.hardware?.model ?? ""}`}
       onClose={() => {
         if (!control.current.busy) onClose();
       }}
     >
       <div className="surface-options">
         <label>
-          检测范围
+          {t("检测范围")}
           <select
             value={partition}
             disabled={busy}
             onChange={(e) => choose(e.target.value)}
           >
-            <option value="">整个磁盘</option>
+            <option value="">{t("整个磁盘")}</option>
             {disk.partitions
               .filter((p) => p.number !== undefined)
               .map((p) => (
                 <option key={p.id} value={p.number}>
-                  分区 {p.number} · {p.driveLetter ? `${p.driveLetter}: ` : ""}
-                  {p.name} · {formatSize(p.size)}
+                  {t("分区 {number}", { number: p.number! })} ·{" "}
+                  {partitionTitle(p, catalogText)} · {formatSize(p.size)}
                 </option>
               ))}
           </select>
         </label>
         <label>
-          起始扇区
+          {t("起始扇区")}
           <input
             inputMode="numeric"
             value={start}
@@ -236,7 +243,7 @@ export function SurfaceScanDialog({
           />
         </label>
         <label>
-          扇区数量
+          {t("扇区数量")}
           <input
             inputMode="numeric"
             value={count}
@@ -246,33 +253,41 @@ export function SurfaceScanDialog({
         </label>
       </div>
       <p className="surface-note">
-        范围内相对扇区 · 每扇区 {disk.sectorSize} B · 每次读取最多 1 MiB
+        {t("范围内相对扇区 · 每扇区 {bytes} B · 每次读取最多 1 MiB", {
+          bytes: disk.sectorSize,
+        })}
       </p>
       <div className="surface-progress-heading">
         <strong>
           {running
             ? stopping
-              ? "正在暂停，等待当前读取返回…"
-              : "正在检测"
+              ? t("正在暂停，等待当前读取返回…")
+              : t("正在检测")
             : report?.state === "completed"
-              ? "检测完成"
+              ? t("检测完成")
               : report?.state === "paused"
-                ? "检测已暂停"
+                ? t("检测已暂停")
                 : report?.state === "canceled"
-                  ? "检测已取消"
+                  ? t("检测已取消")
                   : report?.state === "failed"
-                    ? "检测已停止"
-                    : "准备检测"}
+                    ? t("检测已停止")
+                    : t("准备检测")}
         </strong>
-        <span>{progress.toFixed(1)}%</span>
+        <span>
+          {(progress / 100).toLocaleString(language, {
+            style: "percent",
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+          })}
+        </span>
       </div>
       <progress
         className="surface-progress"
         max={100}
         value={progress}
-        aria-label="检测进度"
+        aria-label={t("检测进度")}
       />
-      <div className="surface-grid" aria-label="读取耗时分布">
+      <div className="surface-grid" aria-label={t("读取耗时分布")}>
         {(
           report?.cells ??
           Array.from({ length: 256 }, () => ({
@@ -286,32 +301,44 @@ export function SurfaceScanDialog({
             className={`surface-cell surface-level-${cell.checkedBytes ? cell.worst : "unknown"}`}
             title={
               cell.checkedBytes
-                ? `已检测 ${formatSize(cell.checkedBytes)} · 最慢 ${labels[cell.worst]}${cell.failedBytes ? ` · 失败块 ${formatSize(cell.failedBytes)}` : ""}`
-                : "未检测"
+                ? [
+                    t("已检测 {size} · 最慢 {latency}", {
+                      size: formatSize(cell.checkedBytes),
+                      latency: latencyLabels[cell.worst],
+                    }),
+                    cell.failedBytes
+                      ? t("失败块 {size}", {
+                          size: formatSize(cell.failedBytes),
+                        })
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                : t("未检测")
             }
           />
         ))}
       </div>
       <div className="surface-legend">
-        {labels.map((label, i) => (
+        {latencyLabels.map((label, i) => (
           <span key={label}>
             <i className={`surface-level-${i}`} />
             {label}
-            <b>{report?.latencyBlocks[i] ?? 0}</b>
+            <b>{(report?.latencyBlocks[i] ?? 0).toLocaleString(language)}</b>
           </span>
         ))}
       </div>
       <div className="surface-totals">
         <div>
-          <span>已检测</span>
+          <span>{t("已检测")}</span>
           <strong>{formatSize(report?.checkedBytes ?? 0)}</strong>
         </div>
         <div>
-          <span>失败块范围</span>
+          <span>{t("失败块范围")}</span>
           <strong>{formatSize(report?.failedBytes ?? 0)}</strong>
         </div>
         <div>
-          <span>平均读取速度</span>
+          <span>{t("平均读取速度")}</span>
           <strong>
             {report?.elapsedMs
               ? `${formatSize(report.checkedBytes / (report.elapsedMs / 1000))}/s`
@@ -319,37 +346,41 @@ export function SurfaceScanDialog({
           </strong>
         </div>
       </div>
-      {snapshot && (
+      {snapshot && report && (
         <p className="surface-note surface-source">
-          {snapshot.source} · 绝对起始 LBA {report!.offset / report!.sectorSize}{" "}
-          · {formatSize(report!.size)}
+          {snapshot.source} · {t("绝对起始 LBA")}{" "}
+          {(report.offset / report.sectorSize).toLocaleString(language)} ·{" "}
+          {formatSize(report.size)}
         </p>
       )}
       {report?.message && (
         <p role="status" className="surface-message">
-          {report.message}
+          {catalogText(report.message)}
         </p>
       )}
       {!!report?.failures.length && (
         <details className="surface-failures">
           <summary>
-            读取失败的位置（{report.failures.length + report.omittedFailures}{" "}
-            块）
+            {t("读取失败的位置（{count} 块）", {
+              count: (
+                report.failures.length + report.omittedFailures
+              ).toLocaleString(language),
+            })}
           </summary>
           <table>
             <thead>
               <tr>
-                <th>绝对起始 LBA</th>
-                <th>扇区数量</th>
-                <th>错误码</th>
-                <th>耗时</th>
+                <th>{t("绝对起始 LBA")}</th>
+                <th>{t("扇区数量")}</th>
+                <th>{t("错误码")}</th>
+                <th>{t("耗时")}</th>
               </tr>
             </thead>
             <tbody>
               {report.failures.slice(0, 20).map((f) => (
                 <tr key={f.startSector}>
-                  <td>{f.startSector}</td>
-                  <td>{f.sectorCount}</td>
+                  <td>{f.startSector.toLocaleString(language)}</td>
+                  <td>{f.sectorCount.toLocaleString(language)}</td>
                   <td>{f.code}</td>
                   <td>{f.elapsedMs} ms</td>
                 </tr>
@@ -357,24 +388,32 @@ export function SurfaceScanDialog({
             </tbody>
           </table>
           <p>
-            界面显示前 20 项；报告最多保留 1024
-            项，超出部分只计入总数。失败块内未逐扇区定位。
+            {t(
+              "界面显示前 20 项；报告最多保留 1024 项，超出部分只计入总数。失败块内未逐扇区定位。",
+            )}
           </p>
         </details>
       )}
       <p className="surface-note">
-        仅检测，不写入或修复。读取耗时受设备缓存、负载及虚拟化影响；较慢不等于坏道。取消会等待当前读取返回。
+        {t(
+          "仅检测，不写入或修复。读取耗时受设备缓存、负载及虚拟化影响；较慢不等于坏道。取消会等待当前读取返回。",
+        )}
       </p>
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {(snapshot?.loaded || !!snapshot?.resumeCount) && (
         <p className="surface-note" role="status">
-          结果包含{snapshot.loaded ? "加载的历史记录" : "分次检测记录"}
-          ；继续只读取未完成范围，已检测部分不会重读。
+          {t(
+            snapshot.loaded
+              ? "结果包含加载的历史记录；继续只读取未完成范围，已检测部分不会重读。"
+              : "结果包含分次检测记录；继续只读取未完成范围，已检测部分不会重读。",
+          )}
         </p>
       )}
       {saved && (
         <p className="surface-note" role="status">
-          {saved}
+          {t(saved.progress ? "已保存进度到 {path}" : "已保存报告到 {path}", {
+            path: saved.path,
+          })}
         </p>
       )}
       <div className="surface-actions">
@@ -385,7 +424,7 @@ export function SurfaceScanDialog({
             onClick={() => void load()}
           >
             <FolderOpen size={16} />
-            加载进度
+            {t("加载进度")}
           </button>
           <button
             className="button"
@@ -393,7 +432,7 @@ export function SurfaceScanDialog({
             onClick={() => void save(true)}
           >
             <Save size={16} />
-            保存进度
+            {t("保存进度")}
           </button>
           <button
             className="button"
@@ -401,7 +440,7 @@ export function SurfaceScanDialog({
             onClick={() => void save()}
           >
             <Download size={16} />
-            报告
+            {t("报告")}
           </button>
         </div>
         {running ? (
@@ -411,7 +450,7 @@ export function SurfaceScanDialog({
             onClick={() => void cancel()}
           >
             <Pause size={15} />
-            {stopping ? "正在暂停" : "暂停检测"}
+            {stopping ? t("正在暂停") : t("暂停检测")}
           </button>
         ) : (
           <div className="surface-file-actions">
@@ -421,7 +460,11 @@ export function SurfaceScanDialog({
               onClick={() => void begin()}
             >
               <ScanLine size={16} />
-              {pending ? "请稍候…" : snapshot ? "重新检测" : "开始检测"}
+              {pending
+                ? t("请稍候…")
+                : snapshot
+                  ? t("重新检测")
+                  : t("开始检测")}
             </button>
             {resumable && (
               <button
@@ -430,7 +473,7 @@ export function SurfaceScanDialog({
                 onClick={() => void begin(true)}
               >
                 <Play size={16} />
-                继续检测
+                {t("继续检测")}
               </button>
             )}
           </div>

@@ -2,6 +2,7 @@
 #[cfg(test)]
 #[path = "health_data_tests.rs"]
 mod tests;
+use crate::native_locale::Locale;
 use serde::Serialize;
 use std::collections::HashSet;
 
@@ -58,7 +59,7 @@ fn temperature(kelvin: u16) -> String {
         format!("{:.2}", f64::from(kelvin) - 273.15)
     }
 }
-fn data_units(label: &str, units: u128) -> Metric {
+fn data_units(locale: &Locale, label: &str, units: u128) -> Metric {
     // Multiplication may overflow even though the device's 128-bit counter is valid.
     let mut m = if let Some(bytes) = units.checked_mul(512_000) {
         let divisor = 1u128 << 40;
@@ -74,8 +75,9 @@ fn data_units(label: &str, units: u128) -> Metric {
     } else {
         metric(label, units, "数据单元")
     };
-    m.detail = Some(format!(
-        "原始值 {units}；每个数据单元为 512,000 字节，设备按单元向上取整。"
+    m.detail = Some(locale.format(
+        "原始值 {units}；每个数据单元为 512,000 字节，设备按单元向上取整。",
+        &[("units", &units.to_string())],
     ));
     m
 }
@@ -101,7 +103,7 @@ pub fn nvme_descriptor(bytes: &[u8]) -> Result<&[u8], String> {
     }
     Ok(&bytes[start..start + 512])
 }
-pub fn nvme(bytes: &[u8]) -> Result<Health, String> {
+pub fn nvme(bytes: &[u8], locale: &Locale) -> Result<Health, String> {
     if bytes.len() != 512 || bytes.iter().all(|&b| b == 0) || bytes[3] > 100 || bytes[4] > 100 {
         return Err("NVMe 健康日志长度或字段无效，不能据此判断健康状态。".into());
     }
@@ -119,9 +121,9 @@ pub fn nvme(bytes: &[u8]) -> Result<Health, String> {
         }
     }
     if warning & 0xe0 != 0 {
-        warnings.push(format!(
-            "设备还报告未解析的关键警告位 0x{:02X}",
-            warning & 0xe0
+        warnings.push(locale.format(
+            "设备还报告未解析的关键警告位 0x{bits}",
+            &[("bits", &format!("{:02X}", warning & 0xe0))],
         ));
     }
     let mut metrics = vec![
@@ -137,8 +139,8 @@ pub fn nvme(bytes: &[u8]) -> Result<Health, String> {
         ),
         metric("可用备用空间", bytes[3], "%"),
         metric("备用空间阈值", bytes[4], "%"),
-        data_units("累计读取量", counter(bytes, 32)),
-        data_units("累计写入量", counter(bytes, 48)),
+        data_units(locale, "累计读取量", counter(bytes, 32)),
+        data_units(locale, "累计写入量", counter(bytes, 48)),
     ];
     for (offset, label, unit) in [
         (64, "读取命令", "次"),
@@ -158,7 +160,7 @@ pub fn nvme(bytes: &[u8]) -> Result<Health, String> {
         let value = word(bytes, 200 + i * 2);
         if !matches!(value, 0 | 65535) {
             metrics.push(metric(
-                &format!("温度传感器 {}", i + 1),
+                &locale.format("温度传感器 {number}", &[("number", &(i + 1).to_string())]),
                 temperature(value),
                 "°C",
             ));
@@ -196,7 +198,11 @@ fn ata_page(bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-pub fn ata(attributes: &[u8], thresholds: Option<&[u8]>) -> Result<Health, String> {
+pub fn ata(
+    attributes: &[u8],
+    thresholds: Option<&[u8]>,
+    locale: &Locale,
+) -> Result<Health, String> {
     ata_page(attributes)?;
     let mut limits = [None; 256];
     if let Some(page) = thresholds {
@@ -243,12 +249,20 @@ pub fn ata(attributes: &[u8], thresholds: Option<&[u8]>) -> Result<Health, Strin
     let warnings: Vec<String> = values
         .iter()
         .filter(|a| a.threshold_reached)
-        .map(|a| format!("属性 {:02X} 的当前归一化值已达到设备报告的阈值", a.id))
+        .map(|a| {
+            locale.format(
+                "属性 {id} 的当前归一化值已达到设备报告的阈值",
+                &[("id", &format!("{:02X}", a.id))],
+            )
+        })
         .collect();
     let summary = if warnings.is_empty() {
         "SMART 属性已读取".into()
     } else {
-        format!("{} 项属性达到阈值", warnings.len())
+        locale.format(
+            "{count} 项属性达到阈值",
+            &[("count", &warnings.len().to_string())],
+        )
     };
     Ok(Health { protocol:"ata".into(), summary, warnings, metrics:vec![metric("属性页版本",word(attributes,0),"")],attributes:values,
         notes:vec!["ATA 属性编号、原始值及单位由厂商定义；这里按设备原始字节顺序展示，不推断温度、小时或寿命。".into(),

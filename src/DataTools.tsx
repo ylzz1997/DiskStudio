@@ -43,6 +43,9 @@ import {
 } from "./recoveryProgressModel";
 import type { Candidate, RecoveryLayout } from "./recoveryModel";
 import { defaultExportOptions, type ExportOptions } from "./recoveryModel";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
+import { errorText } from "./partitionOutcome";
 
 type Selection = {
   target: string;
@@ -125,6 +128,7 @@ export function DataTools({
   fixedPartition?: number;
   onBack?: () => void;
 }) {
+  const { language, t, catalogText } = useLocale();
   const [partition, setPartition] = useState(String(fixedPartition ?? ""));
   const [mode, setMode] = useState("deleted");
   const [signatureSettings, setSignatureSettings] = useState(
@@ -275,7 +279,7 @@ export function DataTools({
         previousJob.current = next?.id ?? "";
         lastState.current = next?.state ?? "";
       } catch (e) {
-        if (alive) setError(String(e));
+        if (alive) setError(errorText(e));
       } finally {
         polling = false;
       }
@@ -312,7 +316,7 @@ export function DataTools({
     try {
       await work();
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     } finally {
       setPending(false);
     }
@@ -423,14 +427,14 @@ export function DataTools({
     <div className="data-source-card">
       <HardDrive size={25} />
       <div>
-        <span>{target ? "还原目标" : "所选磁盘"}</span>
+        <span>{target ? t("还原目标") : t("所选磁盘")}</span>
         <strong>
-          {disk?.name ?? "请选择磁盘"}
+          {disk ? diskTitle(disk, t) : t("请选择磁盘")}
           {disk?.hardware?.model ? ` · ${disk.hardware.model}` : ""}
         </strong>
       </div>
       <select
-        aria-label="选择数据范围"
+        aria-label={t("选择数据范围")}
         value={partition}
         disabled={busy || !physical}
         onChange={(e) => {
@@ -438,10 +442,13 @@ export function DataTools({
           setDestinationPartition("");
         }}
       >
-        <option value="">整个磁盘 · {formatSize(disk?.size ?? 0)}</option>
+        <option value="">
+          {t("整个磁盘")} · {formatSize(disk?.size ?? 0)}
+        </option>
         {parts.map((p) => (
           <option key={p.id} value={p.number}>
-            {p.name} · {formatSize(p.size)} · {p.fs}
+            {partitionTitle(p, catalogText)} · {formatSize(p.size)} ·{" "}
+            {catalogText(p.fs)}
           </option>
         ))}
       </select>
@@ -462,22 +469,24 @@ export function DataTools({
         <div>
           <h1>
             {page === "files"
-              ? "浏览文件"
+              ? t("浏览文件")
               : page === "recovery"
-                ? "文件恢复"
-                : "备份与克隆"}
+                ? t("文件恢复")
+                : t("备份与克隆")}
           </h1>
           <p>
             {page === "files"
-              ? `${disk?.name ?? ""} · 按目录查看分区中的现存文件。`
+              ? [disk && diskTitle(disk, t), t("按目录查看分区中的现存文件。")]
+                  .filter(Boolean)
+                  .join(" · ")
               : page === "recovery"
-                ? "扫描丢失的文件，预览后恢复到另一块磁盘。"
-                : "为重要数据创建副本，并在需要时还原。"}
+                ? t("扫描丢失的文件，预览后恢复到另一块磁盘。")
+                : t("为重要数据创建副本，并在需要时还原。")}
           </p>
         </div>
         <span className="data-source-tag">
           <ShieldCheck size={14} />
-          {page !== "backup" ? "源盘只读" : "SHA-256 校验"}
+          {page !== "backup" ? t("源盘只读") : t("SHA-256 校验")}
         </span>
       </header>
       {page === "backup" && (
@@ -491,7 +500,7 @@ export function DataTools({
               setBrowsingImage(false);
             }}
           >
-            备份与还原
+            {t("备份与还原")}
           </button>
           <button
             className={`button ${browsingBackup ? "active" : ""}`}
@@ -503,7 +512,7 @@ export function DataTools({
             }}
           >
             <FolderOpen size={16} />
-            浏览备份
+            {t("浏览备份")}
           </button>
           <button
             className={`button ${browsingImage ? "active" : ""}`}
@@ -515,20 +524,20 @@ export function DataTools({
             }}
           >
             <FolderOpen size={16} />
-            浏览镜像
+            {t("浏览镜像")}
           </button>
         </div>
       )}
       {resultsScanId &&
         (page !== "backup" || browsingBackup || browsingImage) && (
           <div className="source-summary-toggle">
-            <span>来源与读取选项</span>
+            <span>{t("来源与读取选项")}</span>
             <button
               className="button text-button"
               aria-expanded={sourceExpanded}
               onClick={() => setSourceExpanded((v) => !v)}
             >
-              {sourceExpanded ? "收起" : "展开"}
+              {sourceExpanded ? t("收起") : t("展开")}
             </button>
           </div>
         )}
@@ -547,24 +556,24 @@ export function DataTools({
         ) : page === "recovery" ? (
           <>
             {lostSource && (
-              <section className="data-panel" aria-label="找到的分区来源">
+              <section className="data-panel" aria-label={t("找到的分区来源")}>
                 <div className="section-heading">
                   <h2>
-                    找到的分区 · {lostSource.filesystem} ·{" "}
+                    {t("找到的分区")} · {lostSource.filesystem} ·{" "}
                     {formatSize(lostSource.size)}
                   </h2>
                 </div>
                 <p>{scanStatus?.sourceName}</p>
                 <div className="data-action-row">
                   <span>
-                    当前结果来自此候选中的文件与目录；尚未修改分区表。
+                    {t("当前结果来自此候选中的文件与目录；尚未修改分区表。")}
                   </span>
                   <button
                     className="button"
                     disabled={busy}
                     onClick={() => setChooseNewSource((v) => !v)}
                   >
-                    {chooseNewSource ? "收起扫描选项" : "扫描其他位置"}
+                    {chooseNewSource ? t("收起扫描选项") : t("扫描其他位置")}
                   </button>
                 </div>
               </section>
@@ -574,25 +583,31 @@ export function DataTools({
                 {sourceSelector()}
                 <section className="data-panel">
                   <div className="section-heading">
-                    <h2>选择扫描方式</h2>
-                    <span className="section-caption">扫描不会修改源盘</span>
+                    <h2>{t("选择扫描方式")}</h2>
+                    <span className="section-caption">
+                      {t("扫描不会修改源盘")}
+                    </span>
                   </div>
                   <div className="scan-modes">
                     {[
                       {
                         id: "deleted",
-                        title: "找回删除文件",
-                        body: "读取 NTFS、FAT、exFAT，查找保留记录的已删除文件",
+                        title: t("找回删除文件"),
+                        body: t(
+                          "读取 NTFS、FAT、exFAT，查找保留记录的已删除文件",
+                        ),
                       },
                       {
                         id: "allFiles",
-                        title: "扫描全部文件",
-                        body: "列出文件与目录；Ext2/3/4 当前仅列出现存文件",
+                        title: t("扫描全部文件"),
+                        body: t("列出文件与目录；Ext2/3/4 当前仅列出现存文件"),
                       },
                       {
                         id: "signatures",
-                        title: "按文件签名扫描",
-                        body: "按文件结构查找图片、文档、音频与 ZIP，可选择类型和范围",
+                        title: t("按文件签名扫描"),
+                        body: t(
+                          "按文件结构查找图片、文档、音频与 ZIP，可选择类型和范围",
+                        ),
                       },
                     ].map((m) => (
                       <button
@@ -615,16 +630,24 @@ export function DataTools({
                         onChange={setSignatureSettings}
                         disabled={!!busy}
                       />
-                      {signatureError && <FormError message={signatureError} />}
+                      {signatureError && (
+                        <FormError message={catalogText(signatureError)} />
+                      )}
                     </>
                   )}
                   <div className="data-action-row">
                     <span>
                       {mode === "signatures"
-                        ? "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。"
+                        ? t(
+                            "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
+                          )
                         : mode === "allFiles"
-                          ? "NTFS、FAT、exFAT 支持现存/删除候选；Ext2/3/4 支持干净卸载卷的现存文件，不重放日志。"
-                          : "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。"}
+                          ? t(
+                              "NTFS、FAT、exFAT 支持现存/删除候选；Ext2/3/4 支持干净卸载卷的现存文件，不重放日志。",
+                            )
+                          : t(
+                              "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。",
+                            )}
                     </span>
                     {
                       <button
@@ -638,7 +661,7 @@ export function DataTools({
                         onClick={() => void loadProgress()}
                       >
                         <FolderOpen size={16} />
-                        加载进度
+                        {t("加载进度")}
                       </button>
                     }
                     {job?.state === "running" &&
@@ -652,7 +675,7 @@ export function DataTools({
                         }
                       >
                         <Pause size={16} />
-                        暂停扫描
+                        {t("暂停扫描")}
                       </button>
                     ) : (
                       <button
@@ -663,7 +686,7 @@ export function DataTools({
                         onClick={() => void startScan()}
                       >
                         <Search size={16} />
-                        开始扫描
+                        {t("开始扫描")}
                       </button>
                     )}
                   </div>
@@ -755,8 +778,8 @@ export function DataTools({
                   disabled={busy}
                 >
                   <o.icon size={23} />
-                  <strong>{o.name}</strong>
-                  <span>{o.description}</span>
+                  <strong>{t(o.name)}</strong>
+                  <span>{t(o.description)}</span>
                   {task === o.id && (
                     <CheckCircle2 size={16} className="task-selected" />
                   )}
@@ -768,10 +791,10 @@ export function DataTools({
               <div className="section-heading">
                 <h2>
                   {task === "backup"
-                    ? "备份选项"
+                    ? t("备份选项")
                     : task === "restore"
-                      ? "选择备份并核对目标"
-                      : "选择克隆目标"}
+                      ? t("选择备份并核对目标")
+                      : t("选择克隆目标")}
                 </h2>
                 <span className="section-caption">
                   {formatSize(sourceSize)}
@@ -779,18 +802,18 @@ export function DataTools({
               </div>
               {task !== "restore" && (
                 <fieldset className="copy-mode-options" disabled={!!busy}>
-                  <legend>复制内容</legend>
+                  <legend>{t("复制内容")}</legend>
                   {(
                     [
                       [
                         "allSectors",
-                        "逐扇区",
-                        "包含空闲空间，保留完整扇区内容",
+                        t("逐扇区"),
+                        t("包含空闲空间，保留完整扇区内容"),
                       ],
                       [
                         "usedSpace",
-                        "按已用空间",
-                        "检查分配信息，跳过确认空闲的区域",
+                        t("按已用空间"),
+                        t("检查分配信息，跳过确认空闲的区域"),
                       ],
                     ] as const
                   ).map(([value, title, detail]) => (
@@ -812,57 +835,62 @@ export function DataTools({
               )}
               {task !== "restore" && copyMode === "usedSpace" && (
                 <p className="copy-mode-note">
-                  NTFS、FAT、exFAT、Ext2/3/4
-                  会检查分配信息；其他文件系统完整保留。
+                  {t(
+                    "NTFS、FAT、exFAT、Ext2/3/4 会检查分配信息；其他文件系统完整保留。",
+                  )}
                   {task === "backup"
-                    ? "备份中的空闲区按零保存，不保留这些区域的已删除内容。"
-                    : "保持源分区布局，目标空闲区不会被清除。"}
+                    ? t("备份中的空闲区按零保存，不保留这些区域的已删除内容。")
+                    : t("保持源分区布局，目标空闲区不会被清除。")}
                 </p>
               )}
               {task === "backup" && (
                 <div className="backup-settings">
                   <label>
                     <span>
-                      <strong>备份方式</strong>
-                      <small>增量只保存变化的数据块，还原需要完整依赖链</small>
+                      <strong>{t("备份方式")}</strong>
+                      <small>
+                        {t("增量只保存变化的数据块，还原需要完整依赖链")}
+                      </small>
                     </span>
                     <select
-                      aria-label="备份方式"
+                      aria-label={t("备份方式")}
                       value={incremental ? "incremental" : "full"}
                       disabled={busy}
                       onChange={(e) =>
                         setIncremental(e.target.value === "incremental")
                       }
                     >
-                      <option value="full">完整备份</option>
-                      <option value="incremental">增量备份</option>
+                      <option value="full">{t("完整备份")}</option>
+                      <option value="incremental">{t("增量备份")}</option>
                     </select>
                   </label>
                   <label>
                     <span>
-                      <strong>压缩程度</strong>
+                      <strong>{t("压缩程度")}</strong>
                       <small>
-                        压缩使用多个 CPU 线程；高压缩通常需要更长时间
+                        {t("压缩使用多个 CPU 线程；高压缩通常需要更长时间")}
                       </small>
                     </span>
                     <select
-                      aria-label="压缩程度"
+                      aria-label={t("压缩程度")}
                       value={compression}
                       disabled={busy}
                       onChange={(e) =>
                         setCompression(e.target.value as typeof compression)
                       }
                     >
-                      <option value="none">不压缩</option>
-                      <option value="fast">快速</option>
-                      <option value="balanced">均衡</option>
-                      <option value="high">高压缩</option>
+                      <option value="none">{t("不压缩")}</option>
+                      <option value="fast">{t("快速")}</option>
+                      <option value="balanced">{t("均衡")}</option>
+                      <option value="high">{t("高压缩")}</option>
                     </select>
                   </label>
                   <label>
                     <span>
-                      <strong>密码保护</strong>
-                      <small>开始时设置密码，打开和还原备份时需要使用</small>
+                      <strong>{t("密码保护")}</strong>
+                      <small>
+                        {t("开始时设置密码，打开和还原备份时需要使用")}
+                      </small>
                     </span>
                     <input
                       type="checkbox"
@@ -873,13 +901,19 @@ export function DataTools({
                   </label>
                   <label>
                     <span>
-                      <strong>VSS 热备份</strong>
+                      <strong>{t("VSS 热备份")}</strong>
                       <small>
                         {copyMode === "usedSpace"
-                          ? "按已用空间备份需要锁定源卷；切换逐扇区方式可用热备份"
+                          ? t(
+                              "按已用空间备份需要锁定源卷；切换逐扇区方式可用热备份",
+                            )
                           : canHot
-                            ? "源卷可继续使用；保证文件系统一致性，不保证应用事务一致性"
-                            : "选择在线 NTFS 数据分区后可用；整盘备份仍需锁定源卷"}
+                            ? t(
+                                "源卷可继续使用；保证文件系统一致性，不保证应用事务一致性",
+                              )
+                            : t(
+                                "选择在线 NTFS 数据分区后可用；整盘备份仍需锁定源卷",
+                              )}
                       </small>
                     </span>
                     <input
@@ -895,18 +929,18 @@ export function DataTools({
                 <>
                   <div className="clone-flow">
                     <div>
-                      <span>源</span>
+                      <span>{t("源")}</span>
                       <strong>
-                        {disk?.name ?? "未选择"}
+                        {disk ? diskTitle(disk, t) : t("未选择")}
                         {selectedPart
-                          ? ` / ${selectedPart.name}`
-                          : " / 整个磁盘"}
+                          ? ` / ${partitionTitle(selectedPart, catalogText)}`
+                          : ` / ${t("整个磁盘")}`}
                       </strong>
                       <small>{formatSize(sourceSize)}</small>
                     </div>
                     <ArrowRight size={22} />
                     <div>
-                      <label htmlFor="clone-disk">目标磁盘</label>
+                      <label htmlFor="clone-disk">{t("目标磁盘")}</label>
                       <select
                         id="clone-disk"
                         disabled={busy}
@@ -916,24 +950,24 @@ export function DataTools({
                           setDestinationPartition("");
                         }}
                       >
-                        <option value="">选择另一块数据磁盘</option>
+                        <option value="">{t("选择另一块数据磁盘")}</option>
                         {destinations.map((d) => (
                           <option key={d.id} value={d.id}>
-                            {d.name} · {d.hardware?.model} ·{" "}
+                            {diskTitle(d, t)} · {d.hardware?.model} ·{" "}
                             {formatSize(d.size)}
                           </option>
                         ))}
                       </select>
                       {partition && (
                         <select
-                          aria-label="克隆目标分区"
+                          aria-label={t("克隆目标分区")}
                           disabled={busy}
                           value={destinationPartition}
                           onChange={(e) =>
                             setDestinationPartition(e.target.value)
                           }
                         >
-                          <option value="">选择同容量的目标分区</option>
+                          <option value="">{t("选择同容量的目标分区")}</option>
                           {destinationDisk?.partitions
                             .filter(
                               (p) =>
@@ -941,7 +975,8 @@ export function DataTools({
                             )
                             .map((p) => (
                               <option key={p.id} value={p.number}>
-                                {p.name} · {formatSize(p.size)}
+                                {partitionTitle(p, catalogText)} ·{" "}
+                                {formatSize(p.size)}
                               </option>
                             ))}
                         </select>
@@ -949,7 +984,9 @@ export function DataTools({
                     </div>
                   </div>
                   <Hint>
-                    源与目标容量、逻辑扇区大小必须一致。整个目标磁盘会保持脱机，避免副本中的重复标识自动挂载。
+                    {t(
+                      "源与目标容量、逻辑扇区大小必须一致。整个目标磁盘会保持脱机，避免副本中的重复标识自动挂载。",
+                    )}
                   </Hint>
                 </>
               ) : (
@@ -958,8 +995,8 @@ export function DataTools({
                     <span>1</span>
                     <p>
                       {task === "backup"
-                        ? "选择另一块磁盘上的保存位置"
-                        : "打开 DiskStudio 的 .dsbackup 备份文件"}
+                        ? t("选择另一块磁盘上的保存位置")
+                        : t("打开 DiskStudio 的 .dsbackup 备份文件")}
                     </p>
                   </div>
                   <div className="backup-step">
@@ -967,17 +1004,17 @@ export function DataTools({
                     <p>
                       {task === "backup"
                         ? hot
-                          ? "创建 VSS 快照，读取时间点副本"
-                          : "锁定源卷，读取一致的数据副本"
-                        : "校验备份完整性，确认覆盖范围"}
+                          ? t("创建 VSS 快照，读取时间点副本")
+                          : t("锁定源卷，读取一致的数据副本")
+                        : t("校验备份完整性，确认覆盖范围")}
                     </p>
                   </div>
                   <div className="backup-step">
                     <span>3</span>
                     <p>
                       {task === "backup"
-                        ? "读取备份并核对 SHA-256"
-                        : "覆盖目标后再次读取并校验，目标保持脱机"}
+                        ? t("读取备份并核对 SHA-256")
+                        : t("覆盖目标后再次读取并校验，目标保持脱机")}
                     </p>
                   </div>
                 </div>
@@ -986,13 +1023,13 @@ export function DataTools({
                 <span>
                   {task === "backup"
                     ? incremental
-                      ? "先选择上次备份及其依赖，再选择新的保存位置。"
+                      ? t("先选择上次备份及其依赖，再选择新的保存位置。")
                       : copyMode === "usedSpace"
-                        ? "空闲区按零保存，完成后校验全部逻辑内容。"
-                        : "完整备份包含空闲空间；开启压缩可减少占用。"
+                        ? t("空闲区按零保存，完成后校验全部逻辑内容。")
+                        : t("完整备份包含空闲空间；开启压缩可减少占用。")
                     : task === "restore"
-                      ? "还原要求备份类型、容量及逻辑扇区与目标一致。"
-                      : "目标原有文件系统及数据将被替换，无法撤销。"}
+                      ? t("还原要求备份类型、容量及逻辑扇区与目标一致。")
+                      : t("目标原有文件系统及数据将被替换，无法撤销。")}
                 </span>
                 <button
                   className="button primary"
@@ -1007,17 +1044,17 @@ export function DataTools({
                 >
                   <FolderOpen size={16} />
                   {task === "backup"
-                    ? "选择保存位置…"
+                    ? t("选择保存位置…")
                     : task === "restore"
-                      ? "选择备份文件…"
-                      : "预览克隆"}
+                      ? t("选择备份文件…")
+                      : t("预览克隆")}
                 </button>
               </div>
             </section>
             <p className="data-footnote">
-              复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持
-              NTFS 数据分区；系统迁移、按文件缩小克隆及 DiskGenius
-              专有备份格式尚不支持。
+              {t(
+                "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区；系统迁移、按文件缩小克隆及 DiskGenius 专有备份格式尚不支持。",
+              )}
             </p>
           </>
         )}
@@ -1025,19 +1062,25 @@ export function DataTools({
       {page !== "backup" && recoveryProgress && matchingProgress && (
         <section
           className="data-panel signature-progress"
-          aria-label="恢复扫描进度"
+          aria-label={t("恢复扫描进度")}
         >
           <div>
             <strong>
-              {recoveryProgress.loaded ? "已加载的扫描进度" : "恢复扫描进度"} ·{" "}
-              {progressMode(recoveryProgress)}
+              {recoveryProgress.loaded
+                ? t("已加载的扫描进度")
+                : t("恢复扫描进度")}{" "}
+              · {progressMode(recoveryProgress, language)}
             </strong>
             <p>
-              {progressAmount(recoveryProgress)} ·{" "}
-              {recoveryProgress.found.toLocaleString()} 个候选
+              {progressAmount(recoveryProgress, language)} ·{" "}
+              {t("{count} 个候选", {
+                count: recoveryProgress.found.toLocaleString(language),
+              })}
             </p>
             <small>
-              续扫沿用保存时的模式与范围。保存进度后可关闭程序，下次加载继续。
+              {t(
+                "续扫沿用保存时的模式与范围。保存进度后可关闭程序，下次加载继续。",
+              )}
             </small>
           </div>
           <div className="signature-progress-actions">
@@ -1050,12 +1093,12 @@ export function DataTools({
                     "data_recovery_progress_save",
                     { id: recoveryProgress.id },
                   );
-                  if (name) setProgressNotice(`已保存：${name}`);
+                  if (name) setProgressNotice(t("已保存：{name}", { name }));
                 })
               }
             >
               <Save size={16} />
-              保存进度
+              {t("保存进度")}
             </button>
             <button
               className="button primary"
@@ -1086,17 +1129,17 @@ export function DataTools({
               }
             >
               <Play size={16} />
-              继续扫描
+              {t("继续扫描")}
             </button>
           </div>
           {progressNotice && <p role="status">{progressNotice}</p>}
         </section>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {pending && !plan && (
         <div className="data-wait">
           <LoaderCircle className="spin" size={17} />
-          正在准备，请完成文件选择或等待检查…
+          {t("正在准备，请完成文件选择或等待检查…")}
         </div>
       )}
       {job &&
@@ -1106,7 +1149,7 @@ export function DataTools({
           job.id === ownJobId) && (
           <section
             className={`data-job ${job.state}`}
-            aria-label="数据任务进度"
+            aria-label={t("数据任务进度")}
           >
             <div className="data-job-heading">
               <span>
@@ -1117,8 +1160,8 @@ export function DataTools({
                 ) : (
                   <Square size={16} />
                 )}
-                <strong>{job.title}</strong>
-                <small>{job.phase}</small>
+                <strong>{catalogText(job.title)}</strong>
+                <small>{catalogText(job.phase)}</small>
               </span>
               {job.state === "running" &&
                 (recoveryProgress?.id === job.id ? (
@@ -1131,7 +1174,7 @@ export function DataTools({
                     }
                   >
                     <Pause size={14} />
-                    暂停扫描
+                    {t("暂停扫描")}
                   </button>
                 ) : (
                   <button
@@ -1143,7 +1186,7 @@ export function DataTools({
                     }
                   >
                     <Square size={13} />
-                    取消任务
+                    {t("取消任务")}
                   </button>
                 ))}
             </div>
@@ -1164,12 +1207,12 @@ export function DataTools({
                 {job.total
                   ? `${Math.min(100, Math.round((job.done / job.total) * 100))}%`
                   : job.state === "completed"
-                    ? "已完成"
+                    ? t("已完成")
                     : job.state !== "running"
-                      ? job.phase
+                      ? catalogText(job.phase)
                       : job.done > 0
-                        ? "正在扫描"
-                        : "正在准备"}
+                        ? t("正在扫描")
+                        : t("正在准备")}
               </span>
               <span>
                 {job.title === "文件恢复扫描" ||
@@ -1177,12 +1220,16 @@ export function DataTools({
                 job.title === "读取备份目录" ||
                 job.title === "读取镜像目录" ||
                 job.title === "读取找到的分区目录"
-                  ? `找到 ${job.found.toLocaleString()} 个文件`
+                  ? t("找到 {count} 个文件", {
+                      count: job.found.toLocaleString(language),
+                    })
                   : `${formatSize(job.done)} / ${formatSize(job.total)}`}
               </span>
             </div>
             {job.message && (
-              <p className="job-message">{readablePaths(job.message)}</p>
+              <p className="job-message">
+                {readablePaths(catalogText(job.message))}
+              </p>
             )}
             {job.sha256 && (
               <div className="job-checksum">
@@ -1214,7 +1261,9 @@ export function DataTools({
       {!physical &&
         !(page === "backup" && (browsingBackup || browsingImage)) && (
           <Hint>
-            从左侧选择真实磁盘。此处不会自动扫描；导入镜像的分区表查看仍在“磁盘管理”中。
+            {t(
+              "从左侧选择真实磁盘。此处不会自动扫描；导入镜像的分区表查看仍在“磁盘管理”中。",
+            )}
           </Hint>
         )}
       {imageDraft && (
@@ -1232,23 +1281,23 @@ export function DataTools({
       )}
       {plan && (
         <Dialog
-          title={plan.title}
-          subtitle="核对来源、目标和操作范围"
+          title={catalogText(plan.title)}
+          subtitle={t("核对来源、目标和操作范围")}
           onClose={closePlan}
           wide
         >
           <dl className="data-plan">
-            <dt>来源</dt>
+            <dt>{t("来源")}</dt>
             <dd>{readablePaths(plan.source)}</dd>
-            <dt>目标</dt>
+            <dt>{t("目标")}</dt>
             <dd>{readablePaths(plan.destination)}</dd>
-            <dt>处理容量</dt>
+            <dt>{t("处理容量")}</dt>
             <dd>{formatSize(plan.bytes)}</dd>
           </dl>
           <div
             className={`data-plan-warning ${plan.destructive ? "destructive" : ""}`}
           >
-            {plan.warning}
+            {catalogText(plan.warning)}
           </div>
           <label className="data-confirm">
             <input
@@ -1257,32 +1306,34 @@ export function DataTools({
               onChange={(e) => setConfirmed(e.target.checked)}
             />
             {plan.destructive
-              ? "我已核对目标，理解数据将被覆盖且无法撤销。"
-              : "我已核对来源、输出位置与处理范围。"}
+              ? t("我已核对目标，理解数据将被覆盖且无法撤销。")
+              : t("我已核对来源、输出位置与处理范围。")}
           </label>
           <div className="dialog-actions">
             <button className="button" onClick={closePlan}>
-              取消
+              {t("取消")}
             </button>
             <button
               className={`button ${plan.destructive ? "danger" : "primary"}`}
               disabled={!confirmed || busy}
               onClick={() => void execute()}
             >
-              确认并开始
+              {t("确认并开始")}
             </button>
           </div>
         </Dialog>
       )}
       {preview && (
         <Dialog
-          title="文件预览"
+          title={t("文件预览")}
           subtitle={preview.name}
           wide
           onClose={() => setPreview(null)}
         >
           <Hint>
-            预览只读取候选内容，不执行文件。显示正常也不能保证整个文件完整。
+            {t(
+              "预览只读取候选内容，不执行文件。显示正常也不能保证整个文件完整。",
+            )}
           </Hint>
           {previewUrl ? (
             <img
@@ -1304,8 +1355,10 @@ export function DataTools({
           )}
           <p className="data-footnote">
             {preview.truncated
-              ? "仅显示文件开头，内容已截断。"
-              : "非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。"}
+              ? t("仅显示文件开头，内容已截断。")
+              : t(
+                  "非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。",
+                )}
           </p>
         </Dialog>
       )}

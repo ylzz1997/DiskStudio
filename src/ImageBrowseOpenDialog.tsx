@@ -9,6 +9,7 @@ import {
   ImageSourceConsumedError,
 } from "./nativeImageBrowser";
 import { MissingImageFilesError } from "./imageDependencies";
+import { useLocale } from "./i18n/LanguageProvider";
 import { formatSize } from "./types";
 export function ImageBrowseOpenDialog({
   initial,
@@ -23,25 +24,29 @@ export function ImageBrowseOpenDialog({
   onClose: () => void;
   onWorking: (busy: boolean) => void;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [group, setGroup] = useState(initial);
   const [settings, setSettings] = useState(options);
   const [independent, setIndependent] = useState(false);
   const [working, setWorking] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{
+    message: string;
+    missing?: string[];
+  } | null>(null);
   const [consumed, setConsumed] = useState(false);
   const format = formatForName(group.files[0].name);
   async function action(f: () => Promise<void>) {
     setWorking(true);
     onWorking(true);
-    setError("");
+    setError(null);
     try {
       await f();
     } catch (e) {
       if (e instanceof ImageSourceConsumedError) setConsumed(true);
       setError(
         e instanceof MissingImageFilesError
-          ? `${e.message} 还缺少：${e.missing.join("、")}`
-          : String(e),
+          ? { message: e.message, missing: e.missing }
+          : { message: e instanceof Error ? e.message : String(e) },
       );
     } finally {
       setWorking(false);
@@ -59,8 +64,8 @@ export function ImageBrowseOpenDialog({
   };
   return (
     <Dialog
-      title="打开镜像"
-      subtitle="检查容器与分区布局后，再按需读取文件目录"
+      title={t("打开镜像")}
+      subtitle={t("检查容器与分区布局后，再按需读取文件目录")}
       onClose={close}
     >
       <div className="image-source-files">
@@ -68,7 +73,7 @@ export function ImageBrowseOpenDialog({
           <div key={f.id}>
             <strong>{f.name}</strong>
             <span>
-              {i === 0 ? "主文件" : "父盘 / 分卷"} · {formatSize(f.size)}
+              {i === 0 ? t("主文件") : t("父盘 / 分卷")} · {formatSize(f.size)}
             </span>
           </div>
         ))}
@@ -91,7 +96,7 @@ export function ImageBrowseOpenDialog({
           }
         >
           <FolderOpen size={16} />
-          更换主文件…
+          {t("更换主文件…")}
         </button>
         <button
           className="button"
@@ -107,15 +112,15 @@ export function ImageBrowseOpenDialog({
           }
         >
           <Plus size={16} />
-          添加父盘或分卷…
+          {t("添加父盘或分卷…")}
         </button>
       </div>
       {format === "raw" ? (
         <div className="image-browser-open-row">
           <label>
-            镜像范围
+            {t("镜像范围")}
             <select
-              aria-label="打开 RAW 的范围"
+              aria-label={t("打开 RAW 的范围")}
               disabled={working}
               value={settings.kind}
               onChange={(e) =>
@@ -125,14 +130,14 @@ export function ImageBrowseOpenDialog({
                 })
               }
             >
-              <option value="disk">整盘镜像（GPT / MBR）</option>
-              <option value="partition">分区镜像（文件系统）</option>
+              <option value="disk">{t("整盘镜像（GPT / MBR）")}</option>
+              <option value="partition">{t("分区镜像（文件系统）")}</option>
             </select>
           </label>
           <label>
-            扇区大小
+            {t("扇区大小")}
             <select
-              aria-label="打开 RAW 的扇区大小"
+              aria-label={t("打开 RAW 的扇区大小")}
               disabled={working}
               value={settings.sector}
               onChange={(e) =>
@@ -150,7 +155,7 @@ export function ImageBrowseOpenDialog({
       ) : (
         <p className="data-footnote">
           {format.toUpperCase()}{" "}
-          容器按整盘打开，容量和逻辑扇区由容器元数据确定。
+          {t("容器按整盘打开，容量和逻辑扇区由容器元数据确定。")}
         </p>
       )}
       {format === "parallels" && (
@@ -161,16 +166,29 @@ export function ImageBrowseOpenDialog({
             disabled={working}
             onChange={(e) => setIndependent(e.target.checked)}
           />
-          我确认这是独立 Parallels 文件，不依赖目录包中的其他快照。
+          {t("我确认这是独立 Parallels 文件，不依赖目录包中的其他快照。")}
         </label>
       )}
       <p className="data-footnote">
-        所选文件以禁止共享写入的句柄保持打开，不挂载、不修改来源；父盘和分卷需要明确选择，不按镜像内路径自动查找。使用中的虚拟磁盘可能无法打开，请先关闭使用它的虚拟机。
+        {t(
+          "所选文件以禁止共享写入的句柄保持打开，不挂载、不修改来源；父盘和分卷需要明确选择，不按镜像内路径自动查找。使用中的虚拟磁盘可能无法打开，请先关闭使用它的虚拟机。",
+        )}
       </p>
-      {error && <FormError message={error} />}
+      {error && (
+        <FormError
+          message={
+            error.missing
+              ? t("{error} 还缺少：{files}", {
+                  error: catalogText(error.message),
+                  files: new Intl.ListFormat(language).format(error.missing),
+                })
+              : catalogText(error.message)
+          }
+        />
+      )}
       <div className="dialog-actions">
         <button className="button" disabled={working} onClick={close}>
-          取消
+          {t("取消")}
         </button>
         <button
           className="button primary"
@@ -190,7 +208,7 @@ export function ImageBrowseOpenDialog({
           ) : (
             <FolderOpen size={16} />
           )}
-          {working ? "正在检查…" : "检查并打开"}
+          {working ? t("正在检查…") : t("检查并打开")}
         </button>
       </div>
     </Dialog>

@@ -415,17 +415,41 @@ impl Plan {
         chain.reverse();
         Ok(chain)
     }
-    pub fn description(&self) -> String {
-        let description = match self.layout {
-            Layout::Tree => format!("按已确认的原目录结构导出，创建 {} 个子目录；{} 个目录未知的文件单独归组，{} 个文件或目录名称因冲突或兼容性调整。", self.folders.len()-1, self.unknown_files,self.renamed),
-            Layout::Flat => "所选文件保存在同一目录，以编号避免同名覆盖。".into(),
+    pub fn description(&self, locale: &crate::native_locale::Locale) -> String {
+        let layout = match self.layout {
+            Layout::Tree => locale.format(
+                "按已确认的原目录结构导出，创建 {folders} 个子目录；{unknown} 个目录未知的文件单独归组，{renamed} 个文件或目录名称因冲突或兼容性调整。",
+                &[
+                    ("folders", &(self.folders.len() - 1).to_string()),
+                    ("unknown", &self.unknown_files.to_string()),
+                    ("renamed", &self.renamed.to_string()),
+                ],
+            ),
+            Layout::Flat => locale.text("所选文件保存在同一目录，以编号避免同名覆盖。").to_owned(),
         };
-        let description = if self.directory_selection {
-            format!("{description} 包含该目录下已读取的 {} 个可提取文件及所有已读取子目录（包括空目录），不受当前筛选影响；跳过 {} 个不支持的文件并记录在清单中。尚未读取到的内容不会导出，未承诺完整目录。", self.entries.len(), self.skipped.len())
+        let scope = if self.directory_selection {
+            locale.format(
+                "包含该目录下已读取的 {files} 个可提取文件及所有已读取子目录（包括空目录），不受当前筛选影响；跳过 {skipped} 个不支持的文件并记录在清单中。尚未读取到的内容不会导出，未承诺完整目录。",
+                &[
+                    ("files", &self.entries.len().to_string()),
+                    ("skipped", &self.skipped.len().to_string()),
+                ],
+            )
         } else {
-            format!("{description} 仅包含所选文件及其父目录，不包含其他文件或独立空目录。")
+            locale
+                .text("仅包含所选文件及其父目录，不含未选文件或独立空目录。")
+                .to_owned()
         };
-        format!("{description} 并发 {}；文件与目录时间{}，受支持属性{}。未知或无法保留的字段在结果清单中列明。", self.options.workers, if self.options.timestamps {"保留"} else {"不保留"}, if self.options.attributes {"保留"} else {"不保留"})
+        let preserve = |enabled| locale.text(if enabled { "保留" } else { "不保留" });
+        let options = locale.format(
+            "并发任务 {workers} · 文件与目录时间 {timestamps} · 受支持属性 {attributes}。未知或无法保留的字段在结果清单中列明。",
+            &[
+                ("workers", &self.options.workers.to_string()),
+                ("timestamps", preserve(self.options.timestamps)),
+                ("attributes", preserve(self.options.attributes)),
+            ],
+        );
+        [layout, scope, options].join(" ")
     }
     pub fn manifest(&self, outcomes: &[Outcome], completed: bool) -> Result<Vec<u8>, String> {
         self.manifest_with_folders(outcomes, &[], completed)
@@ -688,6 +712,12 @@ mod tests {
         assert_eq!(p.skipped[0].id, 2);
         assert_eq!(p.skipped[0].directories, ["资料", "照片", "空目录"]);
         assert_eq!(path(&p, &p.entries[0]), "资料/照片/hello.txt");
+        let english = crate::native_locale::Locale::new(crate::native_locale::Language::En);
+        let description = p.description(&english);
+        assert!(description.contains("with 4 subfolders"));
+        assert!(description.contains("Exportable files 1"));
+        assert!(description.contains("Skipped unsupported files 1"));
+        assert!(description.contains("File and folder times Preserve"));
         assert!(select(&candidates, &catalog, &[1], Some("selected"), Layout::Tree).is_err());
         assert!(select(&candidates, &catalog, &[], Some("selected"), Layout::Flat).is_err());
         for bad in ["unknown", "missing", "../selected", "C:\\"] {

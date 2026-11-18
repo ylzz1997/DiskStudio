@@ -15,6 +15,10 @@ export const disks = Object.freeze([
   { id: 'test_a', name: 'test-a.qcow2', size: 16, serial: 'DS-TEST-A-0001', label: 'DiskStudio Test A', bus: 'nvme' },
   { id: 'test_b', name: 'test-b.qcow2', size: 16, serial: 'DS-TEST-B-0001', label: 'DiskStudio Test B', bus: 'nvme' },
 ]);
+const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
+  ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
+} : disk));
+const profileDisks = fourKn => fourKn ? fourKnDisks : disks;
 const uuid = 'e20adb9f-f665-432e-9a62-dd5d897b06a0';
 const vmName = 'DiskStudio-Test';
 const qemu = path.join(root, 'tools/qemu/qemu-system-x86_64.exe');
@@ -128,8 +132,9 @@ function checkIso(filename) {
   if (magic.toString() !== 'CD001') throw new Error(`Invalid ISO 9660 media: ${filename}`);
 }
 
-export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false } = {}) {
+export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false } = {}) {
   if (!['whpx', 'tcg'].includes(accelerator)) throw new Error('Unsupported accelerator');
+  if (fourKn && (setup || network)) throw new Error('4Kn acceptance uses the installed offline guest');
   const args = [
     '-name', vmName, '-uuid', uuid,
     '-smbios', 'type=1,manufacturer=DiskStudio,product=DiskStudio-Test,serial=DS-VM-0001',
@@ -144,12 +149,12 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
     '-qmp', `tcp:127.0.0.1:${port},server=on,wait=off`,
     '-bios', bios,
   ];
-  for (const disk of disks) {
+  for (const disk of profileDisks(fourKn)) {
     // During Windows Setup, expose only the OS disk. Test disks are attached later.
     if (setup && disk.id !== 'os') continue;
     args.push('-blockdev', JSON.stringify({ driver: 'qcow2', 'node-name': disk.id, file: { driver: 'file', filename: diskPath(disk) } }));
     args.push('-device', disk.bus === 'nvme'
-      ? `nvme,drive=${disk.id},serial=${disk.serial}`
+      ? `nvme,drive=${disk.id},serial=${disk.serial}${fourKn ? `,id=${disk.controller},logical_block_size=4096,physical_block_size=4096` : ''}`
       : `ide-hd,bus=ide.0,drive=${disk.id},serial=${disk.serial},model=${disk.model},bootindex=2`);
   }
   if (setup) {
@@ -256,7 +261,15 @@ function init() {
 async function start(options) {
   assertStopped();
   safePath(qemu); safePath(bios);
-  for (const disk of disks) checkDisk(disk);
+  // Validate the fixed profile before creating its two independent images.
+  const args = buildArgs(options);
+  for (const disk of profileDisks(options.fourKn)) {
+    if (disk.controller) {
+      const filename = safePath(diskPath(disk), root, false);
+      if (!fs.existsSync(filename)) tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
+    }
+    checkDisk(disk);
+  }
   if (options.setup) checkIso(installIso);
   if (fs.existsSync(currentToolsIso())) checkIso(currentToolsIso());
   // Refuse to start if another service or VM owns our loopback QMP port.
@@ -272,7 +285,7 @@ async function start(options) {
   fs.writeSync(out, marker); fs.writeSync(err, marker);
   const executable = safePath(options.headless ? qemu : qemuWindow);
   const temp = mkdir('tmp');
-  const child = spawn(executable, buildArgs(options), {
+  const child = spawn(executable, args, {
     cwd: root, detached: true, windowsHide: Boolean(options.headless), stdio: ['ignore', out, err],
     env: { ...process.env, TEMP: temp, TMP: temp, XDG_CACHE_HOME: mkdir('cache') },
   });
@@ -340,18 +353,15 @@ async function doctor() {
 }
 
 async function refreshTools() {
-  if (!isAlive(readState()?.pid)) throw new Error('Start the test VM before hot-swapping its tools CD');
+  const state = readState();
+  if (!isAlive(state?.pid)) throw new Error('Start the test VM before hot-swapping its tools CD');
   const next = readToolsManifest('pending-tools.json');
   checkIso(next.filename);
   if (await hashFile(next.filename) !== next.sha256) throw new Error('Tools ISO hash mismatch');
   const qmp = await connectQmp();
   try {
     const blocks = await qmp.execute('query-block');
-    if (blocks.length !== 4) throw new Error('Unexpected VM block inventory');
-    for (const disk of disks) {
-      const found = blocks.filter(b => b.inserted?.['node-name'] === disk.id);
-      if (found.length !== 1 || found[0].removable || found[0].inserted.drv !== 'qcow2' || !same(found[0].inserted.file, checkDisk(disk))) throw new Error('Unexpected VM disk identity');
-    }
+    await validateProfile(qmp, blocks, state.fourKn === true);
     const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw');
     if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso()) || !optical[0].qdev?.startsWith('/machine/')) throw new Error('Unable to identify the tools CD');
     await qmp.execute('blockdev-change-medium', { id: optical[0].qdev, filename: next.filename, format: 'raw', 'read-only-mode': 'read-only', force: false });
@@ -364,9 +374,9 @@ async function refreshTools() {
 
 // Test-only isolation check. The production application has no VM identity,
 // disk serial allowlist or special build. This harness owns the lab boundary.
-export function validateTestBlocks(blocks) {
+export function validateTestBlocks(blocks, fourKn = false) {
   if (blocks.length !== 4) throw new Error('Unexpected test VM block inventory');
-  for (const disk of disks) {
+  for (const disk of profileDisks(fourKn)) {
     const found = blocks.filter(b => b.inserted?.['node-name'] === disk.id);
     if (found.length !== 1 || found[0].removable || found[0].inserted.ro !== false ||
         found[0].inserted.drv !== 'qcow2' || !same(found[0].inserted.file, checkDisk(disk)) ||
@@ -378,21 +388,40 @@ export function validateTestBlocks(blocks) {
   if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso())) throw new Error('Unexpected optical media');
 }
 
+async function validateProfile(qmp, blocks, fourKn) {
+  validateTestBlocks(blocks, fourKn);
+  if (!fourKn) return;
+  for (const disk of fourKnDisks.filter(d => d.controller)) {
+    const controller = `/machine/peripheral/${disk.controller}`;
+    const block = blocks.find(b => b.inserted?.['node-name'] === disk.id);
+    if (block.qdev !== disk.controller && block.qdev !== controller && !block.qdev?.startsWith(`${controller}/`)) {
+      throw new Error('4Kn block backend is attached to an unexpected controller');
+    }
+    for (const [property, expected] of [['logical_block_size', 4096], ['physical_block_size', 4096], ['serial', disk.serial]]) {
+      const value = await qmp.execute('qom-get', { path: controller, property });
+      if (value !== expected) throw new Error(`4Kn controller ${disk.controller} has an unexpected ${property}`);
+    }
+  }
+}
+
 async function preflight() {
-  if (!isAlive(readState()?.pid)) throw new Error('Start the test VM first');
+  const state = readState();
+  if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp(); // Checks the fixed VM name and UUID.
   try {
-    validateTestBlocks(await qmp.execute('query-block'));
+    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
     console.log('PASS: DiskStudio-Test identity, three isolated QCOW2 disks, capacities and read-only tools CD verified.');
+    if (state.fourKn) console.log('Both disposable NVMe controllers expose 4096-byte logical and physical sectors.');
     console.log('Partition tests may target ONLY DS-TEST-A-0001 and DS-TEST-B-0001 (16 GiB each), never the 80 GiB OS disk.');
   } finally { qmp.close(); }
 }
 
 async function ioStats() {
-  if (!isAlive(readState()?.pid)) throw new Error('Start the test VM first');
+  const state = readState();
+  if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp();
   try {
-    validateTestBlocks(await qmp.execute('query-block'));
+    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
     const stats = await qmp.execute('query-blockstats');
     console.log(stats.filter(s => disks.some(d => d.id === s['node-name'])).map(s => ({
       disk: s['node-name'], readBytes: s.stats.rd_bytes, writtenBytes: s.stats.wr_bytes,
@@ -401,25 +430,58 @@ async function ioStats() {
   } finally { qmp.close(); }
 }
 
+async function moveStopWindow(enabled) {
+  const state = readState();
+  if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
+  const qmp = await connectQmp();
+  try {
+    const blocks = await qmp.execute('query-block');
+    await validateProfile(qmp, blocks, state.fourKn === true);
+    const block = blocks.find(b => b.inserted?.['node-name'] === 'test_a');
+    const namedController = state.fourKn === true && block.qdev === fourKnDisks.find(d => d.id === 'test_a').controller;
+    if (!namedController && !block.qdev?.startsWith('/machine/')) throw new Error('Unable to bind the throttle to Test A');
+    const mibPerSecond = state.fourKn === true ? 4 : 8;
+    const rate = enabled ? mibPerSecond * 1024 ** 2 : 0;
+    await qmp.execute('block_set_io_throttle', {
+      id: block.qdev, group: 'diskstudio-test-a-move',
+      bps: 0, bps_rd: 0, bps_wr: rate, iops: 0, iops_rd: 0, iops_wr: 0,
+    });
+    const after = await qmp.execute('query-block');
+    await validateProfile(qmp, after, state.fourKn === true);
+    const writeRate = item => Number(item?.inserted?.bps_wr ?? 0);
+    for (const previous of blocks) {
+      const expected = previous.qdev === block.qdev ? rate : writeRate(previous);
+      if (writeRate(after.find(b => b.qdev === previous.qdev)) !== expected) {
+        throw new Error('Test A write throttle could not be verified');
+      }
+    }
+    console.log(enabled ? `Test A write limit: ${mibPerSecond} MiB/s.` : 'Test A write limit cleared.');
+  } finally { qmp.close(); }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm'].includes(command)) {
-    console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|checkpoint NAME|restore NAME');
+  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear'].includes(command)) {
+    console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
+    console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];
+  if (command === 'start') allowed.push('--4kn');
   if (!['checkpoint', 'restore'].includes(command) && args.some(a => !allowed.includes(a))) throw new Error('Unsupported option; arbitrary paths/QEMU arguments are not accepted');
   if (['checkpoint', 'restore'].includes(command) && args.length !== 1) throw new Error('Provide exactly one checkpoint name');
   if (args.includes('--tcg') && args.includes('--whpx')) throw new Error('Choose only one accelerator');
   if (command === 'doctor') return doctor();
   if (command === 'preflight') return preflight();
   if (command === 'io-stats') return ioStats();
+  if (['move-stop-window', 'move-stop-clear'].includes(command)) return moveStopWindow(command === 'move-stop-window');
   if (['pause-vm', 'resume-vm'].includes(command)) {
-    if (!isAlive(readState()?.pid)) throw new Error('Start the test VM first');
+    const state = readState();
+    if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
     const qmp = await connectQmp();
     try {
-      validateTestBlocks(await qmp.execute('query-block'));
+      await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
       await qmp.execute(command === 'pause-vm' ? 'stop' : 'cont');
       console.log(await qmp.execute('query-status'));
     } finally { qmp.close(); }
@@ -446,7 +508,7 @@ async function main() {
     if (command === 'init') return init();
     if (command === 'checkpoint') return checkpoint(args[0]);
     if (command === 'restore') return restore(args[0]);
-    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network') };
+    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn') };
     if (options.accelerator === 'whpx') console.warn('Experimental WHPX: Windows startup/reset was unreliable on this host. Guest reboot exits QEMU; use start again.');
     if (command === 'smoke') {
       assertStopped();

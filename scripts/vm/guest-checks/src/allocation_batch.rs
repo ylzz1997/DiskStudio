@@ -258,6 +258,14 @@ pub(super) fn set_online(serial: &str) -> Result<(), String> {
     Ok(())
 }
 fn selected(case: &Case) -> Result<(Selection, u64), String> {
+    fixture_selection(case.fs, case.label, case.size)
+}
+
+pub(super) fn fixture_selection(
+    filesystem: &str,
+    label: Option<&str>,
+    size: u64,
+) -> Result<(Selection, u64), String> {
     inventory()?;
     let s = selection(A, None)?;
     let snap = storage::read_snapshot()?;
@@ -270,23 +278,23 @@ fn selected(case: &Case) -> Result<(Selection, u64), String> {
         .partitions
         .iter()
         .filter(|p| {
-            p.base.size == case.size
+            p.base.size == size
                 && !p.base.system
-                && case.label.is_none_or(|name| {
+                && label.is_none_or(|name| {
                     p.volume_label
                         .as_deref()
                         .is_some_and(|v| v.eq_ignore_ascii_case(name))
                 })
-                && (p.base.fs.eq_ignore_ascii_case(case.fs)
-                    || matches!(case.fs, "FAT12" | "FAT16")
+                && (p.base.fs.eq_ignore_ascii_case(filesystem)
+                    || matches!(filesystem, "FAT12" | "FAT16")
                         && p.base.fs.eq_ignore_ascii_case("FAT"))
         })
         .collect::<Vec<_>>();
     if candidates.len() != 1 {
         return Err(format!(
             "Expected one {} fixture with label {:?}, found {}",
-            case.fs,
-            case.label,
+            filesystem,
+            label,
             candidates.len()
         ));
     }
@@ -307,7 +315,7 @@ pub(super) fn resolved(
     if r.disk.serial_number.as_deref().map(disk_identity::clean) != Some(A)
         || r.offset != offset
         || r.size != size
-        || r.disk.logical_sector_size != Some(512)
+        || r.disk.logical_sector_size != Some(test_sector())
         || r.disk.is_boot != Some(false)
         || r.disk.is_system != Some(false)
     {

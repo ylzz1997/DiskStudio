@@ -83,7 +83,7 @@ it("retains mutation failure and refresh diagnostics without resubmitting", asyn
   expect(result).toMatchObject({
     status: "failed",
     message: "AddAccessPath: 5",
-    refreshError: "列表刷新失败：metadata offline",
+    refreshError: "metadata offline",
   });
   expect(execute).toHaveBeenCalledOnce();
 });

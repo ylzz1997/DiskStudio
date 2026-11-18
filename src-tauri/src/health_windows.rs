@@ -3,6 +3,7 @@ use crate::{
     data_tasks::Selection,
     data_windows as platform,
     health_data::{self, Health},
+    native_locale::{self, Locale},
 };
 use std::fs::File;
 use windows_sys::Win32::System::Ioctl::*;
@@ -21,13 +22,19 @@ fn nvme_request() -> [u8; 560] {
     put(&mut bytes, 28, 512);
     bytes
 }
-fn nvme(file: &File) -> Result<Health, String> {
+fn nvme(file: &File, locale: &Locale) -> Result<Health, String> {
     let input = nvme_request();
     let mut output = [0; 560];
-    let n = platform::control(file, IOCTL_STORAGE_QUERY_PROPERTY, &input, &mut output)
-        .map_err(|e| format!("当前设备或驱动未能提供 NVMe 健康日志：{e}"))?;
+    let n = platform::control(file, IOCTL_STORAGE_QUERY_PROPERTY, &input, &mut output).map_err(
+        |e| {
+            locale.format(
+                "当前设备或驱动未能提供 NVMe 健康日志：{error}",
+                &[("error", locale.text(&e))],
+            )
+        },
+    )?;
     let returned = output.get(..n).ok_or("NVMe 返回长度超过缓冲区")?;
-    health_data::nvme(health_data::nvme_descriptor(returned)?)
+    health_data::nvme(health_data::nvme_descriptor(returned)?, locale)
 }
 #[derive(Clone, Copy)]
 enum AtaPage {
@@ -55,29 +62,37 @@ fn ata_read(file: &File, page: AtaPage) -> Result<Vec<u8>, String> {
     let n = platform::control(file, SMART_RCV_DRIVE_DATA, &ata_request(page), &mut output)?;
     Ok(health_data::ata_payload(output.get(..n).ok_or("ATA 返回长度超过缓冲区")?)?.to_vec())
 }
-fn ata(file: &File) -> Result<Health, String> {
+fn ata(file: &File, locale: &Locale) -> Result<Health, String> {
     let mut version = [0; 24];
     let n = platform::control(file, SMART_GET_VERSION, &[], &mut version)?;
     if n < 24 || u32::from_le_bytes(version[4..8].try_into().unwrap()) & CAP_SMART_CMD == 0 {
         return Err("当前驱动未报告 ATA SMART 读取支持；未改变设备设置。".into());
     }
-    let attributes = ata_read(file, AtaPage::Attributes)
-        .map_err(|e| format!("无法读取 ATA SMART 属性；设备可能未启用 SMART 或驱动不支持：{e}"))?;
+    let attributes = ata_read(file, AtaPage::Attributes).map_err(|e| {
+        locale.format(
+            "无法读取 ATA SMART 属性；设备可能未启用 SMART 或驱动不支持：{error}",
+            &[("error", locale.text(&e))],
+        )
+    })?;
     let thresholds = ata_read(file, AtaPage::Thresholds);
     // Missing optional thresholds never suppress a readable attribute page or
     // silently turn absent data into a passing health assessment.
     let mut health = match &thresholds {
-        Ok(page) => match health_data::ata(&attributes, Some(page)) {
+        Ok(page) => match health_data::ata(&attributes, Some(page), locale) {
             Ok(health) => health,
             Err(e) => {
-                let mut health = health_data::ata(&attributes, None)?;
-                health.notes.push(format!("阈值页未采用：{e}"));
+                let mut health = health_data::ata(&attributes, None, locale)?;
+                health
+                    .notes
+                    .push(locale.format("阈值页未采用：{error}", &[("error", locale.text(&e))]));
                 health
             }
         },
         Err(e) => {
-            let mut health = health_data::ata(&attributes, None)?;
-            health.notes.push(format!("阈值不可用：{e}"));
+            let mut health = health_data::ata(&attributes, None, locale)?;
+            health
+                .notes
+                .push(locale.format("阈值不可用：{error}", &[("error", locale.text(&e))]));
             health
         }
     };
@@ -111,7 +126,12 @@ pub fn read(selection: &Selection) -> Result<Health, String> {
     {
         return Err("设备句柄的连接方式与元数据不一致，已拒绝 SMART 请求。".into());
     }
-    let health = if bus == 17 { nvme(&file)? } else { ata(&file)? };
+    let locale = native_locale::current();
+    let health = if bus == 17 {
+        nvme(&file, &locale)?
+    } else {
+        ata(&file, &locale)?
+    };
     let fresh = platform::resolve(selection, false, false)?;
     if fresh.disk.number != resolved.disk.number
         || fresh.disk.bus_type != Some(bus)

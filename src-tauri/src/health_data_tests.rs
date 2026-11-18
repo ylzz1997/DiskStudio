@@ -1,4 +1,13 @@
 use super::*;
+use crate::native_locale::Language;
+
+fn nvme(bytes: &[u8]) -> Result<Health, String> {
+    super::nvme(bytes, &Locale::new(Language::ZhCn))
+}
+
+fn ata(attributes: &[u8], thresholds: Option<&[u8]>) -> Result<Health, String> {
+    super::ata(attributes, thresholds, &Locale::new(Language::ZhCn))
+}
 
 fn nvme_log() -> Vec<u8> {
     let mut bytes = vec![0; 512];
@@ -94,6 +103,9 @@ fn nvme_data_unit_scaling_retains_exact_raw_value_and_rounding_note() {
     assert_eq!(m.unit, "TiB（约）");
     assert!(m.detail.as_ref().unwrap().contains("2147484"));
     assert!(m.detail.as_ref().unwrap().contains("向上取整"));
+    let report = super::nvme(&bytes, &Locale::new(Language::En)).unwrap();
+    assert!(report.metrics.iter().filter_map(|metric| metric.detail.as_ref())
+        .any(|detail| detail == "Raw value 2147484. Each unit is 512,000 bytes. The device rounds up to a whole unit."));
 }
 #[test]
 fn nvme_descriptor_rejects_truncation_and_wrong_relative_offsets() {

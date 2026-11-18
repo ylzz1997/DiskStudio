@@ -79,7 +79,25 @@ pub fn attribute_name(b: &[u8]) -> Result<&[u8], String> {
 }
 type Record = ((u64, u16, u16), Vec<u8>);
 type Reference = (u64, u16, u16, u64, Vec<u8>);
-fn references(b: &[u8]) -> Result<Vec<Reference>, String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Recovery,
+    Merge,
+}
+
+impl Scope {
+    fn base_reference<R: Read + Seek>(
+        self,
+        reader: &mut R,
+        file: &NtfsFile<'_>,
+    ) -> Result<u64, String> {
+        match self {
+            Self::Recovery => crate::ntfs_names::base_reference(reader, file),
+            Self::Merge => crate::ntfs_names::merge_base_reference(reader, file),
+        }
+    }
+}
+fn references(b: &[u8], scope: Scope) -> Result<Vec<Reference>, String> {
     let mut at = 0;
     let mut count = 0;
     let mut refs = vec![];
@@ -100,9 +118,13 @@ fn references(b: &[u8]) -> Result<Vec<Reference>, String> {
         {
             return Err("数据流属性列表边界无效".into());
         }
-        if e[..4] == 0x80u32.to_le_bytes() && n > 0 {
-            let name = e[start..start + n].to_vec();
-            validate_name(&name, false)?;
+        if e[..4] == 0x80u32.to_le_bytes() && (n > 0 || scope == Scope::Merge) {
+            let name = if n == 0 {
+                Vec::new()
+            } else {
+                e[start..start + n].to_vec()
+            };
+            validate_name(&name, scope == Scope::Merge)?;
             let id = u64le(e, 16);
             let r = (
                 id & 0x0000_ffff_ffff_ffff,
@@ -120,9 +142,14 @@ fn references(b: &[u8]) -> Result<Vec<Reference>, String> {
     }
     Ok(refs)
 }
-fn records<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Vec<Record>, String> {
-    if file.is_directory() || crate::ntfs_names::base_reference(reader, file)? != 0 {
-        return Err("命名数据流读取限普通文件的基础记录".into());
+fn records<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    scope: Scope,
+) -> Result<Vec<Record>, String> {
+    if (file.is_directory() && scope == Scope::Recovery) || scope.base_reference(reader, file)? != 0
+    {
+        return Err("数据流读取要求可核对的文件或目录基础记录".into());
     }
     let mut base = vec![];
     let mut base_ids = HashSet::new();
@@ -134,7 +161,7 @@ fn records<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Vec<Re
         }
         let a = a.map_err(err)?;
         match a.ty().map_err(err)? {
-            NtfsAttributeType::Data if a.name_length() != 0 => {
+            NtfsAttributeType::Data if a.name_length() != 0 || scope == Scope::Merge => {
                 attribute_name(a.record_bytes())?;
                 let id = (
                     file.file_record_number(),
@@ -159,7 +186,7 @@ fn records<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Vec<Re
                     .map_err(err)?
                     .read_exact(reader, &mut b)
                     .map_err(err)?;
-                list = Some(references(&b)?);
+                list = Some(references(&b, scope)?);
             }
             _ => {}
         }
@@ -178,10 +205,10 @@ fn records<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Vec<Re
             file.file_record_number() | (u64::from(file.sequence_number()) << 48)
         };
         if linked.sequence_number() != sequence
-            || linked.is_directory()
+            || linked.is_directory() != file.is_directory()
             || linked.flags().contains(NtfsFileFlags::IN_USE)
                 != file.flags().contains(NtfsFileFlags::IN_USE)
-            || crate::ntfs_names::base_reference(reader, &linked)? != owner
+            || scope.base_reference(reader, &linked)? != owner
         {
             return Err("数据流扩展记录身份已变化".into());
         }
@@ -229,13 +256,29 @@ pub struct Stream {
     pub identity: Identity,
     pub size: u64,
     pub reason: Option<String>,
+    pub(crate) storage_flags: u16,
 }
 pub fn enumerate<R: Read + Seek>(
     reader: &mut R,
     file: &NtfsFile<'_>,
 ) -> Result<Vec<Stream>, String> {
+    enumerate_scoped(reader, file, Scope::Recovery)
+}
+
+pub(crate) fn enumerate_for_merge<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+) -> Result<Vec<Stream>, String> {
+    enumerate_scoped(reader, file, Scope::Merge)
+}
+
+fn enumerate_scoped<R: Read + Seek>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    scope: Scope,
+) -> Result<Vec<Stream>, String> {
     let mut groups: BTreeMap<Vec<u8>, Vec<Record>> = BTreeMap::new();
-    for record in records(reader, file)? {
+    for record in records(reader, file, scope)? {
         groups
             .entry(attribute_name(&record.1)?.to_vec())
             .or_default()
@@ -263,12 +306,13 @@ pub fn enumerate<R: Read + Seek>(
         let reason = if reparse {
             Some("重解析/WOF/云端文件的数据流暂不支持".into())
         } else {
-            plan(reader, file, &name, &records).err()
+            plan(reader, file, &name, &records, scope).err()
         };
         result.push(Stream {
             identity: Identity { name, signature },
             size,
             reason,
+            storage_flags: u16le(&first.1, 12),
         });
     }
     Ok(result)
@@ -309,6 +353,7 @@ fn plan<R: Read + Seek>(
     file: &NtfsFile<'_>,
     name: &[u8],
     records: &[Record],
+    scope: Scope,
 ) -> Result<Plan, String> {
     let cluster = u64::from(file.ntfs().cluster_size());
     let volume = file.ntfs().size();
@@ -317,6 +362,13 @@ fn plan<R: Read + Seek>(
         || volume > reader.seek(SeekFrom::End(0)).map_err(err)?
     {
         return Err("数据流卷范围或簇大小无效".into());
+    }
+    if records.is_empty()
+        || records
+            .iter()
+            .any(|(_, b)| b.len() < 24 || b[8] > 1 || b[8] == 1 && b.len() < 64)
+    {
+        return Err("数据流属性头不完整".into());
     }
     let mut sorted = records.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|(_, b)| if b[8] == 0 { 0 } else { u64le(b, 16) });
@@ -328,7 +380,11 @@ fn plan<R: Read + Seek>(
     if b[8] == 0 {
         let start = usize::from(u16le(b, 20));
         let size = u32::from_le_bytes(b[16..20].try_into().unwrap()) as usize;
-        let name_end = usize::from(u16le(b, 10)) + name.len();
+        let name_end = if name.is_empty() {
+            24
+        } else {
+            usize::from(u16le(b, 10)) + name.len()
+        };
         if sorted.len() != 1
             || flags != 0
             || start < name_end
@@ -366,6 +422,9 @@ fn plan<R: Read + Seek>(
         return Err("数据流的压缩/稀疏单元字段不支持或无效".into());
     }
     let stored = if flags & 0x8001 != 0 {
+        if b.len() < 72 {
+            return Err("压缩或稀疏数据流属性头不完整".into());
+        }
         Some(u64le(b, 64))
     } else {
         None
@@ -384,7 +443,15 @@ fn plan<R: Read + Seek>(
         }
         let high = u64le(b, 24);
         let mut at = usize::from(u16le(b, 32));
-        let name_end = usize::from(u16le(b, 10)) + name.len();
+        let name_end = if name.is_empty() {
+            if vcn == 0 && flags & 0x8001 != 0 {
+                72
+            } else {
+                64
+            }
+        } else {
+            usize::from(u16le(b, 10)) + name.len()
+        };
         if at < name_end || at >= b.len() || at % 8 != 0 || high == u64::MAX {
             return Err("数据流运行列表边界无效".into());
         }
@@ -450,8 +517,10 @@ fn plan<R: Read + Seek>(
     } else {
         logical_clusters
     };
+    let ordinary_preallocation = scope == Scope::Merge && flags == 0;
+    let unpadded_sparse = scope == Scope::Merge && flags == 0x8000 && vcn == logical_clusters;
     if vcn < logical_clusters
-        || flags & 1 == 0 && vcn != plain_coverage
+        || flags & 1 == 0 && vcn != plain_coverage && !ordinary_preallocation && !unpadded_sparse
         || allocated != vcn * cluster
     {
         return Err("数据流映射长度与容量不一致".into());
@@ -532,20 +601,39 @@ pub fn extract<R: Read + Seek, W: Write>(
     identity: &Identity,
     out: &mut W,
     limit: u64,
-    mut tick: impl FnMut(u64) -> Result<(), String>,
+    tick: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<u64, String> {
-    identity.validate()?;
+    extract_scoped(reader, file, identity, out, limit, tick, Scope::Recovery)
+}
+
+pub(crate) fn extract_for_merge<R: Read + Seek, W: Write>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    identity: &Identity,
+    out: &mut W,
+    tick: impl FnMut(u64) -> Result<(), String>,
+) -> Result<u64, String> {
+    extract_scoped(reader, file, identity, out, u64::MAX, tick, Scope::Merge)
+}
+
+fn extract_scoped<R: Read + Seek, W: Write>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    identity: &Identity,
+    out: &mut W,
+    limit: u64,
+    mut tick: impl FnMut(u64) -> Result<(), String>,
+    scope: Scope,
+) -> Result<u64, String> {
+    validate_name(&identity.name, scope == Scope::Merge)?;
     if crate::ntfs_compression::is_reparse(reader, file)? {
         return Err("重解析文件数据流暂不支持".into());
     }
-    let records = records(reader, file)?
-        .into_iter()
-        .filter(|(_, b)| attribute_name(b).is_ok_and(|n| n == identity.name))
-        .collect::<Vec<_>>();
+    let records = records_for_identity(reader, file, identity, scope)?;
     if records.is_empty() || signature(file, &identity.name, &records) != identity.signature {
         return Err("数据流内容属性、布局或卷身份已变化，请重新扫描".into());
     }
-    let p = plan(reader, file, &identity.name, &records)?;
+    let p = plan(reader, file, &identity.name, &records, scope)?;
     allocation(reader, file, &p.runs, || tick(0))?;
     let take = p.size.min(limit);
     let mut done = 0;
@@ -592,7 +680,7 @@ pub fn extract<R: Read + Seek, W: Write>(
     let fresh = fresh_ntfs
         .file(reader, file.file_record_number())
         .map_err(err)?;
-    let after = records_for_identity(reader, &fresh, identity)?;
+    let after = records_for_identity(reader, &fresh, identity, scope)?;
     if fresh.sequence_number() != file.sequence_number()
         || fresh.flags() != file.flags()
         || signature(&fresh, &identity.name, &after) != identity.signature
@@ -606,8 +694,9 @@ fn records_for_identity<R: Read + Seek>(
     reader: &mut R,
     file: &NtfsFile<'_>,
     identity: &Identity,
+    scope: Scope,
 ) -> Result<Vec<Record>, String> {
-    Ok(records(reader, file)?
+    Ok(records(reader, file, scope)?
         .into_iter()
         .filter(|(_, b)| attribute_name(b).is_ok_and(|n| n == identity.name))
         .collect())

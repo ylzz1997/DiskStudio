@@ -10,6 +10,8 @@ import {
   StopCircle,
 } from "lucide-react";
 import { Dialog, FormError } from "./components";
+import { useLocale } from "./i18n/LanguageProvider";
+import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { formatSize, type Disk } from "./types";
 import {
   maintenanceRange,
@@ -47,6 +49,7 @@ export function MaintenanceDialog({
   onBusy: (b: boolean) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const { t, language, catalogText } = useLocale();
   const [mode, setMode] = useState<MaintenanceMode>("benchmark");
   const [partition, setPartition] = useState(
     initialPartition == null ? "" : String(initialPartition),
@@ -189,14 +192,14 @@ export function MaintenanceDialog({
       let operation: MaintenanceOperation;
       if (mode === "wipe" || mode === "wipeFree") {
         if (mode === "wipeFree" && target.source.partition == null)
-          throw Error("请选择一个完整数据分区。");
+          throw Error(t("请选择一个完整数据分区。"));
         operation = {
           kind: mode,
           options: { passes, pattern: wipePattern(random, hex) },
         };
       } else if (mode === "trim") {
         if (!target.source.partition)
-          throw Error("请选择一个普通 NTFS 数据分区。");
+          throw Error(t("请选择一个普通 NTFS 数据分区。"));
         operation = { kind: "trim" };
       } else {
         const n = Number(operations);
@@ -206,13 +209,13 @@ export function MaintenanceDialog({
           n < 1 ||
           n > 65536
         )
-          throw Error("请求次数须为 1–65536。");
+          throw Error(t("请求次数须为 1–65536。"));
         if (
           (target.offset + range.startSector * disk.sectorSize) % 4096 !== 0 ||
           (range.sectorCount * disk.sectorSize) % 4096 !== 0 ||
           range.sectorCount * disk.sectorSize < block
         )
-          throw Error("测速范围须按 4 KiB 对齐且至少容纳一个测量块。");
+          throw Error(t("测速范围须按 4 KiB 对齐且至少容纳一个测量块。"));
         operation = {
           kind: "benchmark",
           options: { access, blockSize: block, operations: n, write },
@@ -246,7 +249,7 @@ export function MaintenanceDialog({
         }
       }
     } catch (e) {
-      if (active.current) setError(String(e));
+      if (active.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (refresh) await onRefresh().catch(() => {});
       phase.current = "idle";
@@ -263,7 +266,7 @@ export function MaintenanceDialog({
       await invoke("data_cancel", { id: job.id });
       setStopping(true);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
   async function save() {
@@ -276,9 +279,9 @@ export function MaintenanceDialog({
       const path = await invoke<string | null>("maintenance_export", {
         id: report.id,
       });
-      if (path) setSaved(`报告已保存：${path}`);
+      if (path) setSaved(path);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       phase.current = "idle";
       setBusy(false);
@@ -290,8 +293,8 @@ export function MaintenanceDialog({
   return (
     <Dialog
       wide
-      title="磁盘维护"
-      subtitle={`${disk.name} · ${formatSize(disk.size)}`}
+      title={t("磁盘维护")}
+      subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)}`}
       footer={
         <div className="dialog-actions">
           {report && report.state !== "running" && (
@@ -301,7 +304,7 @@ export function MaintenanceDialog({
               onClick={() => void save()}
             >
               <Save size={16} />
-              保存报告
+              {t("保存报告")}
             </button>
           )}
           {busy && job && !(mode === "trim" && phase.current === "execute") && (
@@ -311,18 +314,20 @@ export function MaintenanceDialog({
               onClick={() => void cancel()}
             >
               <StopCircle size={16} />
-              停止
+              {t("停止")}
             </button>
           )}
           <button className="button" disabled={busy} onClick={onClose}>
-            关闭
+            {t("关闭对话框")}
           </button>
           <button
             className="button primary"
             disabled={busy || !!unavailable || (!!preview && modifies && !ack)}
             onClick={() => void run(!!preview)}
           >
-            {preview ? `确认${preview.title}` : "预览操作"}
+            {preview
+              ? t("确认{operation}", { operation: catalogText(preview.title) })
+              : t("预览操作")}
           </button>
         </div>
       }
@@ -330,7 +335,7 @@ export function MaintenanceDialog({
         if (phase.current === "idle") onClose();
       }}
     >
-      <div className="maintenance-tabs" role="group" aria-label="维护功能">
+      <div className="maintenance-tabs" role="group" aria-label={t("维护功能")}>
         {modes.map(({ id, title, icon: Icon }) => (
           <button
             key={id}
@@ -340,27 +345,28 @@ export function MaintenanceDialog({
             onClick={() => chooseMode(id)}
           >
             <Icon size={18} />
-            {title}
+            {catalogText(title)}
           </button>
         ))}
       </div>
       <fieldset className="maintenance-fields" disabled={busy}>
         <label>
-          目标
+          {t("目标")}
           <select
             value={partition}
             onChange={(e) => choosePartition(e.target.value)}
           >
             <option value="" disabled={mode === "trim" || mode === "wipeFree"}>
               {mode === "trim" || mode === "wipeFree"
-                ? "请选择数据分区"
-                : "整块磁盘"}
+                ? t("请选择数据分区")
+                : t("整个磁盘")}
             </option>
             {disk.partitions
               .filter((p) => p.number != null)
               .map((p) => (
                 <option key={p.id} value={p.number}>
-                  分区 {p.number} · {p.name} · {formatSize(p.size)}
+                  {t("分区 {number}", { number: p.number! })} ·{" "}
+                  {partitionTitle(p, catalogText)} · {formatSize(p.size)}
                 </option>
               ))}
           </select>
@@ -368,7 +374,7 @@ export function MaintenanceDialog({
         {mode !== "trim" && mode !== "wipeFree" && (
           <div className="maintenance-grid">
             <label>
-              起始扇区（相对目标）
+              {t("起始扇区（相对目标）")}
               <input
                 value={start}
                 inputMode="numeric"
@@ -379,7 +385,7 @@ export function MaintenanceDialog({
               />
             </label>
             <label>
-              扇区数量
+              {t("扇区数量")}
               <input
                 value={count}
                 inputMode="numeric"
@@ -395,7 +401,7 @@ export function MaintenanceDialog({
           <>
             <div className="maintenance-grid">
               <label>
-                访问方式
+                {t("访问方式")}
                 <select
                   value={access}
                   onChange={(e) => {
@@ -403,12 +409,12 @@ export function MaintenanceDialog({
                     setAccess(e.target.value as typeof access);
                   }}
                 >
-                  <option value="sequential">顺序</option>
-                  <option value="random">随机</option>
+                  <option value="sequential">{t("顺序")}</option>
+                  <option value="random">{t("随机")}</option>
                 </select>
               </label>
               <label>
-                块大小
+                {t("块大小")}
                 <select
                   value={block}
                   onChange={(e) => {
@@ -422,7 +428,7 @@ export function MaintenanceDialog({
                 </select>
               </label>
               <label>
-                请求次数
+                {t("请求次数")}
                 <input
                   inputMode="numeric"
                   value={operations}
@@ -442,18 +448,19 @@ export function MaintenanceDialog({
                   setWrite(e.target.checked);
                 }}
               />
-              写入测速（会覆盖所选范围中的数据）
+              {t("写入测速（会覆盖所选范围中的数据）")}
             </label>
             <p className="maintenance-note">
-              单队列深度 QD1 · 绕过 Windows
-              缓存。写入耗时包含刷新，校验回读单独统计。
+              {t(
+                "单队列深度 QD1 · 绕过 Windows 缓存。写入耗时包含刷新，校验回读单独统计。",
+              )}
             </p>
           </>
         )}
         {(mode === "wipe" || mode === "wipeFree") && (
           <div className="maintenance-grid">
             <label>
-              填充方式
+              {t("填充方式")}
               <select
                 value={random ? "random" : "bytes"}
                 onChange={(e) => {
@@ -461,13 +468,13 @@ export function MaintenanceDialog({
                   setRandom(e.target.value === "random");
                 }}
               >
-                <option value="bytes">自定义十六进制</option>
-                <option value="random">随机数据</option>
+                <option value="bytes">{t("自定义十六进制")}</option>
+                <option value="random">{t("随机数据")}</option>
               </select>
             </label>
             {!random && (
               <label>
-                填充值
+                {t("填充值")}
                 <input
                   value={hex}
                   maxLength={95}
@@ -480,7 +487,7 @@ export function MaintenanceDialog({
               </label>
             )}
             <label>
-              覆写次数
+              {t("覆写次数")}
               <select
                 value={passes}
                 onChange={(e) => {
@@ -490,7 +497,7 @@ export function MaintenanceDialog({
               >
                 {[1, 2, 3, 4, 5, 6, 7].map((n) => (
                   <option key={n} value={n}>
-                    {n} 次
+                    {n.toLocaleString(language)}
                   </option>
                 ))}
               </select>
@@ -499,36 +506,38 @@ export function MaintenanceDialog({
         )}
         {mode === "wipeFree" && (
           <p className="maintenance-note">
-            支持普通 NTFS、FAT12/16/32、exFAT 数据分区。只覆写确认空闲的簇；
-            已用数据和文件系统元数据会做前后摘要比对。执行后整盘保持脱机。
+            {t(
+              "支持普通 NTFS、FAT12/16/32、exFAT 数据分区。只覆写确认空闲的簇； 已用数据和文件系统元数据会做前后摘要比对。执行后整盘保持脱机。",
+            )}
           </p>
         )}
         {mode === "trim" && (
           <p className="maintenance-note">
-            通知支持 TRIM 的设备回收 NTFS
-            卷的空闲空间。可能影响已删除文件的恢复；不等同于安全擦除。Windows
-            接手后不能中途取消。
+            {t(
+              "通知支持 TRIM 的设备回收 NTFS 卷的空闲空间。可能影响已删除文件的恢复；不等同于安全擦除。Windows 接手后不能中途取消。",
+            )}
           </p>
         )}
       </fieldset>
       {unavailable && (
         <p className="form-error">
-          当前设备受保护或元数据不完整，不能执行所选操作。
+          {t("当前设备受保护或元数据不完整，不能执行所选操作。")}
         </p>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       {preview && (
         <section
           ref={previewNode}
           className="maintenance-preview"
-          aria-label="维护操作预览"
+          aria-label={t("维护操作预览")}
         >
           <strong>{preview.target}</strong>
           <p>
-            {preview.title} · {formatSize(preview.size)} · 绝对起点 LBA{" "}
-            {preview.offset / preview.sectorSize}
+            {catalogText(preview.title)} · {formatSize(preview.size)} ·{" "}
+            {t("绝对起始 LBA")}{" "}
+            {(preview.offset / preview.sectorSize).toLocaleString(language)}
           </p>
-          <p>{preview.warning}</p>
+          <p>{catalogText(preview.warning)}</p>
           {modifies && (
             <label className="maintenance-check">
               <input
@@ -537,7 +546,7 @@ export function MaintenanceDialog({
                 onChange={(e) => setAck(e.target.checked)}
                 disabled={busy}
               />
-              我已核对目标和范围，并了解数据影响
+              {t("我已核对目标和范围，并了解数据影响")}
             </label>
           )}
         </section>
@@ -547,10 +556,12 @@ export function MaintenanceDialog({
           <LoaderCircle className="spin" size={18} />
           <span>
             {stopping
-              ? "正在停止…"
+              ? t("正在停止…")
               : report?.state === "running"
-                ? report.phase
-                : (job?.phase ?? "正在核对设备…")}
+                ? catalogText(report.phase)
+                : job
+                  ? catalogText(job.phase)
+                  : t("正在核对设备…")}
           </span>
           {job && job.total > 0 && (
             <progress value={job.done} max={job.total} />
@@ -561,17 +572,17 @@ export function MaintenanceDialog({
         <section
           ref={resultNode}
           className="maintenance-result"
-          aria-label="维护结果"
+          aria-label={t("维护结果")}
         >
           <strong>
             {report.state === "completed"
-              ? "已完成"
+              ? t("已完成")
               : report.state === "running"
-                ? "进行中"
+                ? t("进行中")
                 : report.state === "canceled"
-                  ? "已取消"
-                  : "未完成"}{" "}
-            · {report.title}
+                  ? t("已取消")
+                  : t("未完成")}{" "}
+            · {catalogText(report.title)}
           </strong>
           <p>
             {report.target} · {formatSize(report.size)}
@@ -580,39 +591,61 @@ export function MaintenanceDialog({
             <>
               <div className="maintenance-metrics">
                 <div>
-                  <strong>{stats.mibPerSecond.toFixed(2)}</strong>
+                  <strong>
+                    {stats.mibPerSecond.toLocaleString(language, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </strong>
                   <span>MiB/s</span>
                 </div>
                 <div>
-                  <strong>{stats.iops.toFixed(0)}</strong>
+                  <strong>
+                    {stats.iops.toLocaleString(language, {
+                      maximumFractionDigits: 0,
+                    })}
+                  </strong>
                   <span>IOPS</span>
                 </div>
                 <div>
-                  <strong>{stats.operations}</strong>
-                  <span>完成请求</span>
+                  <strong>{stats.operations.toLocaleString(language)}</strong>
+                  <span>{t("完成请求")}</span>
                 </div>
               </div>
               <p>
-                P50 {stats.p50Microseconds} μs · P95 {stats.p95Microseconds} μs
-                · 最短 {stats.minMicroseconds} μs · 最长 {stats.maxMicroseconds}{" "}
-                μs
+                {t(
+                  "P50 {p50} μs · P95 {p95} μs · 最短 {min} μs · 最长 {max} μs",
+                  {
+                    p50: stats.p50Microseconds.toLocaleString(language),
+                    p95: stats.p95Microseconds.toLocaleString(language),
+                    min: stats.minMicroseconds.toLocaleString(language),
+                    max: stats.maxMicroseconds.toLocaleString(language),
+                  },
+                )}
               </p>
               <p>
-                传输 {formatSize(stats.transferredBytes)} · 校验回读{" "}
-                {formatSize(stats.verifiedBytes)}
+                {t("传输 {transferred} · 校验回读 {verified}", {
+                  transferred: formatSize(stats.transferredBytes),
+                  verified: formatSize(stats.verifiedBytes),
+                })}
               </p>
             </>
           )}
           {wiped && (
             <>
               <p>
-                已写入 {formatSize(wiped.writtenBytes)} · 已回读{" "}
-                {formatSize(wiped.readbackBytes)} · {wiped.verifiedPasses}{" "}
-                轮摘要核验通过
+                {t(
+                  "已写入 {written} · 已回读 {readBack} · 已通过摘要核验的轮数 {passes}",
+                  {
+                    written: formatSize(wiped.writtenBytes),
+                    readBack: formatSize(wiped.readbackBytes),
+                    passes: wiped.verifiedPasses.toLocaleString(language),
+                  },
+                )}
               </p>
               {wiped.passSha256.length > 0 && (
                 <details>
-                  <summary>查看每轮 SHA-256</summary>
+                  <summary>{t("查看每轮 SHA-256")}</summary>
                   {wiped.passSha256.map((s, i) => (
                     <code key={i}>
                       {i + 1}. {s}
@@ -625,32 +658,42 @@ export function MaintenanceDialog({
           {report.freeSpace && (
             <>
               <p>
-                {report.freeSpace.filesystem} · 确认空闲{" "}
-                {formatSize(report.freeSpace.freeBytes)}
-                {" · "}保留区域 {formatSize(report.freeSpace.preservedBytes)}
+                {report.freeSpace.filesystem} ·{" "}
+                {t("确认空闲 {free} · 保留区域 {preserved}", {
+                  free: formatSize(report.freeSpace.freeBytes),
+                  preserved: formatSize(report.freeSpace.preservedBytes),
+                })}
               </p>
               <p>
                 {report.freeSpace.preservedSha256
-                  ? "全部保留区域写前/写后 SHA-256 一致"
-                  : "保留区域写后核验尚未完成"}
+                  ? t("全部保留区域写前/写后 SHA-256 一致")
+                  : t("保留区域写后核验尚未完成")}
               </p>
               <details>
-                <summary>查看分配信息与保留区域摘要</summary>
-                <code>分配信息：{report.freeSpace.allocationSha256}</code>
+                <summary>{t("查看分配信息与保留区域摘要")}</summary>
+                <code>
+                  {t("分配信息")} · {report.freeSpace.allocationSha256}
+                </code>
                 {report.freeSpace.preservedSha256 && (
-                  <code>保留区域：{report.freeSpace.preservedSha256}</code>
+                  <code>
+                    {t("保留区域")} · {report.freeSpace.preservedSha256}
+                  </code>
                 )}
               </details>
             </>
           )}
           {report.message && (
             <p className={report.state === "failed" ? "form-error" : ""}>
-              {report.message}
+              {catalogText(report.message)}
             </p>
           )}
         </section>
       )}
-      {saved && <p className="maintenance-note">{saved}</p>}
+      {saved && (
+        <p className="maintenance-note">
+          {t("已保存报告到 {path}", { path: saved })}
+        </p>
+      )}
     </Dialog>
   );
 }

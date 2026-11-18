@@ -7,15 +7,24 @@ const disk = {
   hardware: { identity: "id", layoutKey: "layout", isSystem: true },
 } as Disk;
 const partition = { number: 2, fs: "未知" } as Partition;
-const target = {
+const target: PartitionTarget = {
   diskId: "disk",
   target: "id",
+  name: "Test disk",
+  serial: "TEST",
+  revision: "revision",
   layoutKey: "layout",
   available: true,
+  freeRanges: [],
   formatPartitions: [3],
+  deletePartitions: [],
   resizePartitions: [3],
+  fatResizePartitions: [],
   extPartitions: [2],
-} as PartitionTarget;
+  metadataPartitions: [],
+  availableDriveLetters: [],
+  reason: null,
+};
 
 it("does not infer Ext from a Linux type or allow a stale capability snapshot", () => {
   const info = selectedFilesystemSupport(disk, partition, target);
@@ -49,4 +58,19 @@ it("uses each operation's partition capabilities instead of the disk's Windows s
     selectedFilesystemSupport(disk, ntfs, { ...target, formatPartitions: [] })
       .resize,
   ).toContain("Windows 检查");
+});
+
+it("requires a matching disk capability and an observed FAT-family filesystem", () => {
+  const eligible = { ...target, fatResizePartitions: [3] };
+  const exfat = { ...partition, number: 3, fs: "exFAT" };
+  expect(selectedFilesystemSupport(disk, exfat, eligible).resize).toContain(
+    "需显式检查 FAT 或 exFAT",
+  );
+  expect(
+    selectedFilesystemSupport(disk, { ...exfat, fs: "未知" }, eligible).resize,
+  ).toBe("当前分区不可调整大小");
+  expect(
+    selectedFilesystemSupport(disk, exfat, { ...eligible, layoutKey: "stale" })
+      .resize,
+  ).toBe("当前分区不可调整大小");
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { X, HardDrive, CircleHelp } from "lucide-react";
+import { useLocale } from "./i18n/LanguageProvider";
 export function Dialog({
   title,
   subtitle,
@@ -18,6 +19,7 @@ export function Dialog({
   drawer?: boolean;
   footer?: ReactNode;
 }) {
+  const { t } = useLocale();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const el = ref.current!;
@@ -47,7 +49,7 @@ export function Dialog({
           </div>
           <button
             className="icon-button"
-            aria-label="关闭面板"
+            aria-label={t("关闭面板")}
             onClick={onClose}
           >
             <X size={19} />

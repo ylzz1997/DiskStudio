@@ -4,6 +4,93 @@ use super::*;
 use crate::used_space::Allocation;
 use std::sync::atomic::AtomicBool;
 
+#[derive(Clone)]
+pub(super) struct ClassicTable {
+    bits: u8,
+    bytes: Vec<u8>,
+}
+
+impl ClassicTable {
+    /// Read the declared FAT entries, optionally including the slots a growth
+    /// would expose. Mirrored entries and reserved/dirty flags must agree.
+    pub(super) fn read<R: Read + Seek>(
+        r: &mut R,
+        fs: &Fs,
+        boot: &[u8],
+        count: u32,
+    ) -> Result<Self, String> {
+        let length = ((u64::from(count) + 2) * u64::from(fs.bits)).div_ceil(8);
+        if !matches!(fs.bits, 12 | 16 | 32) || length > 64 * 1024 * 1024 || length > fs.fat_len {
+            return Err("FAT 分配表超出 64 MiB 分析预算或声明范围。".into());
+        }
+        let bytes = at(r, fs.fat, length as usize)?;
+        if fs.mirror && fs.copies == 2 && at(r, fs.fat + fs.fat_len, length as usize)? != bytes {
+            return Err("FAT 主副分配表不一致。".into());
+        }
+        let table = Self {
+            bits: fs.bits,
+            bytes,
+        };
+        let (clean_mask, reserved_mask) = match fs.bits {
+            12 => (0, 0xf00),
+            16 => (0xc000, 0xff00),
+            _ => (0xc000000, 0xfffff00),
+        };
+        if table.entry(1) & clean_mask != clean_mask
+            || table.entry(0) & reserved_mask != reserved_mask
+            || table.entry(0) as u8 != boot[21]
+        {
+            return Err("FAT 卷未干净卸载、存在 I/O 错误或保留项不合法。".into());
+        }
+        Ok(table)
+    }
+
+    pub(super) fn entry(&self, cluster: u32) -> u32 {
+        let cluster = cluster as usize;
+        match self.bits {
+            12 => {
+                let value = u32::from(u16at(&self.bytes, cluster * 3 / 2));
+                if cluster & 1 == 0 {
+                    value & 0xfff
+                } else {
+                    value >> 4
+                }
+            }
+            16 => u32::from(u16at(&self.bytes, cluster * 2)),
+            _ => u32at(&self.bytes, cluster * 4) & 0x0fffffff,
+        }
+    }
+
+    pub(super) fn set_entry(&mut self, cluster: u32, value: u32) {
+        let cluster = cluster as usize;
+        match self.bits {
+            12 => {
+                let offset = cluster * 3 / 2;
+                let original = u16at(&self.bytes, offset);
+                let value = if cluster & 1 == 0 {
+                    (original & 0xf000) | value as u16
+                } else {
+                    (original & 0x000f) | ((value as u16) << 4)
+                };
+                self.bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            16 => {
+                let offset = cluster * 2;
+                self.bytes[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes());
+            }
+            _ => {
+                let offset = cluster * 4;
+                let value = (u32at(&self.bytes, offset) & 0xf0000000) | value;
+                self.bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 pub fn inspect<R: Read + Seek>(r: &mut R, cancel: &AtomicBool) -> Result<Allocation, String> {
     let size = r.seek(SeekFrom::End(0)).map_err(e)?;
     let fs = Fs::load(r)?;
@@ -26,12 +113,7 @@ pub fn inspect<R: Read + Seek>(r: &mut R, cancel: &AtomicBool) -> Result<Allocat
         }
         let main = at(r, 0, sector * 12)?;
         let backup = at(r, (sector * 12) as u64, sector * 12)?;
-        let mut checksum = 0u32;
-        for (i, &v) in backup[..sector * 11].iter().enumerate() {
-            if ![106, 107, 112].contains(&i) {
-                checksum = checksum.rotate_right(1).wrapping_add(v as u32);
-            }
-        }
+        let checksum = exfat_boot_checksum(&backup[..sector * 11]);
         if backup[sector * 11..]
             .chunks_exact(4)
             .any(|v| u32at(v, 0) != checksum)
@@ -76,44 +158,7 @@ pub fn inspect<R: Read + Seek>(r: &mut R, cancel: &AtomicBool) -> Result<Allocat
             }
         }
     } else {
-        let length = ((fs.count as u64 + 2) * fs.bits as u64).div_ceil(8);
-        if length > 64 * 1024 * 1024 || length > fs.fat_len {
-            return Err("FAT 分配表超出 64 MiB 分析预算或声明范围。".into());
-        }
-        let table = at(r, fs.fat, length as usize)?;
-        if fs.mirror && fs.copies == 2 && at(r, fs.fat + fs.fat_len, length as usize)? != table {
-            return Err("FAT 主副分配表不一致。".into());
-        }
-        let entry = |c: u32| -> u32 {
-            match fs.bits {
-                12 => {
-                    let v = u16at(&table, c as usize * 3 / 2) as u32;
-                    if c & 1 == 0 {
-                        v & 0xfff
-                    } else {
-                        v >> 4
-                    }
-                }
-                16 => u16at(&table, c as usize * 2) as u32,
-                _ => u32at(&table, c as usize * 4) & 0xfffffff,
-            }
-        };
-        let clean_mask = match fs.bits {
-            16 => 0xc000,
-            32 => 0xc000000,
-            _ => 0,
-        };
-        let reserved_mask = match fs.bits {
-            12 => 0xf00,
-            16 => 0xff00,
-            _ => 0xfffff00,
-        };
-        if entry(1) & clean_mask != clean_mask
-            || entry(0) & reserved_mask != reserved_mask
-            || entry(0) as u8 != boot[21]
-        {
-            return Err("FAT 卷未干净卸载、存在 I/O 错误或保留项不合法。".into());
-        }
+        let table = ClassicTable::read(r, &fs, &boot, fs.count)?;
         if fs.bits == 32 {
             let sector = u16at(&boot, 11) as usize;
             let backup = u16at(&boot, 50) as u64;
@@ -123,7 +168,7 @@ pub fn inspect<R: Read + Seek>(r: &mut R, cancel: &AtomicBool) -> Result<Allocat
             if at(r, backup * sector as u64, 512)? != boot {
                 return Err("FAT32 主备引导扇区不一致。".into());
             }
-            if fs.root < 2 || fs.root >= fs.count + 2 || entry(fs.root) == 0 {
+            if fs.root < 2 || fs.root >= fs.count + 2 || table.entry(fs.root) == 0 {
                 return Err("FAT32 根目录被标为空闲。".into());
             }
             map.require(fs.offset(fs.root)?, fs.cluster)?;
@@ -132,7 +177,7 @@ pub fn inspect<R: Read + Seek>(r: &mut R, cancel: &AtomicBool) -> Result<Allocat
             if c % 65536 == 0 {
                 crate::used_space::stop(cancel)?;
             }
-            let value = entry(c);
+            let value = table.entry(c);
             if value == 0 {
                 map.free(fs.offset(c)?, fs.cluster)?;
             } else if value < 2

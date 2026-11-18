@@ -355,13 +355,17 @@ pub(super) fn execute(s: &Session, r: &Request, v: &Volume) -> Result<Outcome, S
         Ok(())
     })();
     result.map_err(|e: String| {
-        format!("{e} 操作可能部分完成，请刷新核对实际盘符和卷标；不会自动重试或回滚。")
+        crate::native_locale::diagnostic(
+            "{error} 操作可能部分完成，请刷新核对实际盘符和卷标；不会自动重试或回滚。",
+            &e,
+        )
     })?;
+    let locale = crate::native_locale::current();
     Ok(Outcome {
         verified: true,
-        message: format!(
-            "{}已完成，已核对卷身份、分区布局及其他访问路径。",
-            r.action.title()
+        message: locale.format(
+            "{action}已完成，已核对卷身份、分区布局及其他访问路径。",
+            &[("action", locale.text(r.action.title()))],
         ),
     })
 }

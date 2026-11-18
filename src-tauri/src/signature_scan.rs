@@ -564,7 +564,10 @@ pub fn continue_scan<R: Read + Seek>(
             rejected += 1;
         }
         tick(size, size)?;
-        Ok(format!("签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。"))
+        Ok(crate::native_locale::current().format(
+            "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。",
+            &[("count", &count.to_string()), ("rejected", &rejected.to_string())],
+        ))
     })();
     // Interrupted probes still consume their resource budget, even when their
     // current chunk will be retried after an explicit resume.

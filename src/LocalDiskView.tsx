@@ -12,9 +12,27 @@ import { formatSize } from "./types";
 import { DiskIcon, Empty, Hint } from "./components";
 import { PartitionPlatformIcon } from "./PartitionPlatformIcon";
 import { FilesystemSupportPanel } from "./FilesystemSupportPanel";
+import { useLocale } from "./i18n/LanguageProvider";
+import type { Translate } from "./i18n/translate";
 
-export function partitionTitle(p: Partition) {
-  return p.driveLetter ? `${p.name} (${p.driveLetter}:)` : p.name;
+export function diskTitle(disk: Disk, t: Translate) {
+  return disk.hardware
+    ? t("磁盘 {number}", { number: disk.hardware.number })
+    : disk.name;
+}
+
+function partitionName(p: Partition, catalogText: (text: string) => string) {
+  return p.number === undefined || p.volumeLabel?.trim()
+    ? p.name
+    : catalogText(p.name);
+}
+
+export function partitionTitle(
+  p: Partition,
+  catalogText: (text: string) => string,
+) {
+  const name = partitionName(p, catalogText);
+  return p.driveLetter ? `${name} (${p.driveLetter}:)` : name;
 }
 
 export function LocalDiskHeader({
@@ -30,22 +48,24 @@ export function LocalDiskHeader({
   onRefresh: () => void;
   onDetails: () => void;
 }) {
+  const { t } = useLocale();
   const h = disk.hardware!;
+  const model = h.model === "未提供型号" ? t("未提供型号") : h.model;
   return (
     <header className="disk-header local-header">
       <div className="disk-heading">
         <DiskIcon size={39} />
         <div>
           <div className="local-title">
-            <h1>{disk.name}</h1>
-            {h.isSystem && <span className="system-tag">系统磁盘</span>}
+            <h1>{diskTitle(disk, t)}</h1>
+            {h.isSystem && <span className="system-tag">{t("系统磁盘")}</span>}
             <span className="view-badge">
               <ShieldCheck size={13} />
-              {managed ? "可管理" : "暂不可操作"}
+              {managed ? t("可管理") : t("暂不可操作")}
             </span>
           </div>
-          <p className="device-model" title={h.model}>
-            {h.model}
+          <p className="device-model" title={model}>
+            {model}
           </p>
         </div>
       </div>
@@ -56,11 +76,11 @@ export function LocalDiskHeader({
           ) : (
             <RefreshCcw size={16} />
           )}
-          {loading ? "正在读取" : "刷新信息"}
+          {loading ? t("正在读取") : t("刷新信息")}
         </button>
         <button className="button text-button" onClick={onDetails}>
           <Info size={17} />
-          详细信息
+          {t("详细信息")}
         </button>
       </div>
     </header>
@@ -90,6 +110,7 @@ export function LocalDiskContent({
   onBrowse?: () => void;
   busy?: boolean;
 }) {
+  const { language, t, catalogText } = useLocale();
   const h = disk.hardware!;
   const small = disk.partitions.filter((p) => p.size / disk.size < 0.012);
   const selected = disk.partitions.find((p) => p.id === selectedId);
@@ -110,74 +131,80 @@ export function LocalDiskContent({
     <>
       <div className="hardware-facts">
         <div>
-          <span>总容量</span>
+          <span>{t("总容量")}</span>
           <strong>{formatSize(disk.size)}</strong>
         </div>
         <div>
-          <span>连接 / 分区表</span>
+          <span>{t("连接 / 分区表")}</span>
           <strong>
-            {h.bus}
+            {catalogText(h.bus)}
             <i />
-            {disk.scheme}
+            {catalogText(disk.scheme)}
           </strong>
         </div>
         <div>
-          <span>盘符</span>
+          <span>{t("盘符")}</span>
           <strong className="drive-letter-list">
-            {driveLetters || "未分配盘符"}
+            {driveLetters || t("未分配盘符")}
           </strong>
         </div>
         <div>
-          <span>Windows 状态</span>
+          <span>{t("Windows 状态")}</span>
           <strong
             className={
               h.health === "正常" && h.offline === false ? "device-healthy" : ""
             }
           >
             <b className="status-dot" />
-            {h.offline === true ? "脱机" : h.health}
+            {h.offline === true ? t("脱机") : catalogText(h.health)}
           </strong>
         </div>
       </div>
       {actions}
       {error && (
         <div className="device-notice error" role="alert">
-          读取失败：{error} 当前显示上次读取的信息。
+          {t("读取失败：{error} 当前显示上次读取的信息。", {
+            error: catalogText(error),
+          })}
         </div>
       )}
       {warnings.map((w) => (
         <div key={w} className="device-notice" role="status">
-          {w}
+          {catalogText(w)}
         </div>
       ))}
       {!h.layoutAvailable ? (
         <Empty
           icon={<CircleHelp size={34} />}
-          title="分区信息暂不可用"
-          text={h.layoutNote ?? "请稍后重新读取。"}
+          title={t("分区信息暂不可用")}
+          text={
+            h.layoutNote ? catalogText(h.layoutNote) : t("请稍后重新读取。")
+          }
         />
       ) : disk.partitions.length === 0 && (!target || disk.scheme === "RAW") ? (
         <Empty
           icon={<DiskIcon size={34} />}
-          title="Windows 未报告分区"
+          title={t("Windows 未报告分区")}
           text={
             disk.scheme === "RAW"
               ? target?.available
-                ? "先初始化为 GPT，再创建分区和文件系统。"
-                : "这块磁盘尚未初始化；操作能力及限制见上方工具栏。"
-              : "当前没有可显示的分区信息。"
+                ? t("先初始化为 GPT，再创建分区和文件系统。")
+                : t("这块磁盘尚未初始化；操作能力及限制见上方工具栏。")
+              : t("当前没有可显示的分区信息。")
           }
         />
       ) : (
         <>
           <section
             className="layout-section local-layout"
-            aria-label="本机磁盘分区布局"
+            aria-label={t("本机磁盘分区布局")}
           >
             <div className="section-heading">
-              <h2>分区布局</h2>
+              <h2>{t("分区布局")}</h2>
               <span className="section-caption">
-                {disk.partitions.length} 个分区
+                {t("{count} 个分区", {
+                  count: disk.partitions.length.toLocaleString(language),
+                })}
               </span>
             </div>
             <div className="partition-map physical-map">
@@ -188,15 +215,16 @@ export function LocalDiskContent({
                       key={`free-${offset}`}
                       className="partition-block free partition-free-block"
                       style={{ flexGrow: size / disk.size }}
-                      title={`未分配 · ${formatSize(size)}`}
+                      title={t("未分配 · {size}", { size: formatSize(size) })}
                     >
                       <span className="block-label">
-                        <strong>未分配</strong>
+                        <strong>{t("未分配")}</strong>
                         <small>{formatSize(size)}</small>
                       </span>
                     </div>
                   );
                 const tiny = p.size / disk.size < 0.012;
+                const title = partitionTitle(p, catalogText);
                 return (
                   <button
                     key={p.id}
@@ -209,20 +237,33 @@ export function LocalDiskContent({
                     }
                     onClick={() => onSelect(p.id)}
                     aria-pressed={selectedId === p.id}
-                    aria-label={`选择分区 ${partitionTitle(p)}，${formatSize(p.size)}`}
-                    title={`${partitionTitle(p)} · ${formatSize(p.size)} · ${p.role}`}
+                    aria-label={t("选择分区 {name}，{size}", {
+                      name: title,
+                      size: formatSize(p.size),
+                    })}
+                    title={[
+                      title,
+                      formatSize(p.size),
+                      p.role && catalogText(p.role),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   >
                     <div className="usage-fill" />
                     {!tiny && (
                       <>
                         <span className="block-label">
-                          <strong>{partitionTitle(p)}</strong>
+                          <strong>{title}</strong>
                           <small>
                             {formatSize(p.size)} ·{" "}
-                            {p.fs === "未知" ? "文件系统未知" : p.fs}
+                            {p.fs === "未知" ? t("文件系统未知") : p.fs}
                           </small>
                           {p.available != null && (
-                            <em>{formatSize(p.available)} 可用</em>
+                            <em>
+                              {t("{size} 可用", {
+                                size: formatSize(p.available),
+                              })}
+                            </em>
                           )}
                         </span>
                         <PartitionPlatformIcon platform={p.platform} />
@@ -233,7 +274,7 @@ export function LocalDiskContent({
               })}
             </div>
             {small.length > 0 && (
-              <div className="small-partitions" aria-label="小分区">
+              <div className="small-partitions" aria-label={t("小分区")}>
                 {small.map((p) => (
                   <button
                     key={p.id}
@@ -242,7 +283,7 @@ export function LocalDiskContent({
                     aria-pressed={selectedId === p.id}
                   >
                     <b />
-                    {p.name}
+                    {partitionName(p, catalogText)}
                     <span>{formatSize(p.size)}</span>
                   </button>
                 ))}
@@ -251,26 +292,26 @@ export function LocalDiskContent({
             <div className="legend physical-legend">
               <span>
                 <b className="used-key" />
-                已用
+                {t("已用")}
               </span>
               <span>
                 <b className="available-key" />
-                可用
+                {t("可用")}
               </span>
               <span>
                 <b className="unknown-key" />
-                占用未知
+                {t("占用未知")}
               </span>
               {target && (
                 <span>
                   <b className="free-key" />
-                  未分配
+                  {t("未分配")}
                 </span>
               )}
               <em>
                 {small.length > 0
-                  ? "小分区已放大显示"
-                  : "按 Windows 提供的分区信息显示"}
+                  ? t("小分区已放大显示")
+                  : t("按 Windows 提供的分区信息显示")}
               </em>
             </div>
           </section>
@@ -278,8 +319,10 @@ export function LocalDiskContent({
             <div className="selection-label">
               <span className="selection-dot" />
               <span>
-                已选中{" "}
-                <strong>{selected ? partitionTitle(selected) : "磁盘"}</strong>
+                {t("已选中")}{" "}
+                <strong>
+                  {selected ? partitionTitle(selected, catalogText) : t("磁盘")}
+                </strong>
               </span>
             </div>
             <div className="header-actions">
@@ -295,12 +338,12 @@ export function LocalDiskContent({
                   }
                 >
                   <FolderOpen size={16} />
-                  浏览文件
+                  {t("浏览文件")}
                 </button>
               )}
               <button className="button" onClick={onDetails}>
                 <Info size={16} />
-                分区信息
+                {t("分区信息")}
               </button>
             </div>
           </div>
@@ -308,19 +351,19 @@ export function LocalDiskContent({
             <table className="partition-table local-table">
               <thead>
                 <tr>
-                  <th>分区 / 盘符</th>
-                  <th>文件系统</th>
-                  <th>容量</th>
-                  <th>已用</th>
-                  <th>可用</th>
-                  <th>用途</th>
+                  <th>{t("分区 / 盘符")}</th>
+                  <th>{t("文件系统")}</th>
+                  <th>{t("容量")}</th>
+                  <th>{t("已用")}</th>
+                  <th>{t("可用")}</th>
+                  <th>{t("用途")}</th>
                 </tr>
               </thead>
               <tbody>
                 {!disk.partitions.length && (
                   <tr>
                     <td colSpan={6} className="muted-value">
-                      暂无分区，可在未分配空间中新建。
+                      {t("暂无分区，可在未分配空间中新建。")}
                     </td>
                   </tr>
                 )}
@@ -345,17 +388,19 @@ export function LocalDiskContent({
                         ) : (
                           <DiskIcon size={20} />
                         )}
-                        <span>{p.name}</span>
+                        <span>{partitionName(p, catalogText)}</span>
                       </span>
                     </td>
                     <td className={p.fs === "未知" ? "muted-value" : ""}>
-                      {p.fs}
+                      {catalogText(p.fs)}
                     </td>
                     <td>{formatSize(p.size)}</td>
                     <td>{formatSize(p.used)}</td>
                     <td>{formatSize(p.available ?? null)}</td>
                     <td>
-                      <span className="partition-role">{p.role}</span>
+                      <span className="partition-role">
+                        {p.role && catalogText(p.role)}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -365,7 +410,9 @@ export function LocalDiskContent({
           {disk.partitions.some((p) => p.used === null) && (
             <div className="import-note">
               <CircleHelp size={15} />
-              Windows 未提供部分分区的文件系统或占用信息，以“未知”和“—”表示。
+              {t(
+                "Windows 未提供部分分区的文件系统或占用信息，以“未知”和“—”表示。",
+              )}
             </div>
           )}
         </>
@@ -383,91 +430,102 @@ export function LocalDetails({
   partition?: Partition;
   target?: PartitionTarget;
 }) {
+  const { language, t, catalogText } = useLocale();
   const h = disk.hardware!;
+  const model = h.model === "未提供型号" ? t("未提供型号") : h.model;
   return (
     <>
       <div className="details-hero">
         <DiskIcon size={40} />
-        <h3>{partition ? partitionTitle(partition) : disk.name}</h3>
-        <span>{partition?.role ?? h.model}</span>
+        <h3>
+          {partition
+            ? partitionTitle(partition, catalogText)
+            : diskTitle(disk, t)}
+        </h3>
+        <span>{partition?.role ? catalogText(partition.role) : model}</span>
       </div>
       <dl className="detail-list">
-        <dt>磁盘编号</dt>
+        <dt>{t("磁盘编号")}</dt>
         <dd>{h.number}</dd>
-        <dt>设备型号</dt>
-        <dd>{h.model}</dd>
-        <dt>总容量</dt>
+        <dt>{t("设备型号")}</dt>
+        <dd>{model}</dd>
+        <dt>{t("总容量")}</dt>
         <dd>{formatSize(disk.size)}</dd>
-        <dt>连接类型</dt>
-        <dd>{h.bus}</dd>
-        <dt>分区表</dt>
-        <dd>{disk.scheme}</dd>
-        <dt>逻辑扇区</dt>
-        <dd>{disk.sectorSize ? `${disk.sectorSize} B` : "未提供"}</dd>
-        <dt>Windows 状态</dt>
+        <dt>{t("连接类型")}</dt>
+        <dd>{catalogText(h.bus)}</dd>
+        <dt>{t("分区表")}</dt>
+        <dd>{catalogText(disk.scheme)}</dd>
+        <dt>{t("逻辑扇区")}</dt>
+        <dd>{disk.sectorSize ? `${disk.sectorSize} B` : t("未提供")}</dd>
+        <dt>{t("Windows 状态")}</dt>
         <dd>
-          {h.health}
-          {h.offline === true
-            ? " · 脱机"
-            : h.offline === false
-              ? " · 联机"
-              : ""}
+          {catalogText(h.health)}
+          {h.offline !== null && <> · {t(h.offline ? "脱机" : "联机")}</>}
         </dd>
-        <dt>设备只读属性</dt>
+        <dt>{t("设备只读属性")}</dt>
         <dd>
           {h.deviceReadOnly === null
-            ? "未提供"
+            ? t("未提供")
             : h.deviceReadOnly
-              ? "是"
-              : "否"}
-          （系统报告）
+              ? t("是")
+              : t("否")}
+          {t("（系统报告）")}
         </dd>
-        <dt>分区管理</dt>
+        <dt>{t("分区管理")}</dt>
         <dd>
           {target?.available
-            ? "支持操作 · 提交前需确认"
-            : (target?.reason ?? "暂不可操作")}
+            ? t("支持操作 · 提交前需确认")
+            : target?.reason
+              ? catalogText(target.reason)
+              : t("暂不可操作")}
         </dd>
         {target && (
           <>
-            <dt>磁盘序列号</dt>
+            <dt>{t("磁盘序列号")}</dt>
             <dd>{target.serial}</dd>
           </>
         )}
         {partition && (
           <>
-            <dt>分区编号</dt>
+            <dt>{t("分区编号")}</dt>
             <dd>{partition.number}</dd>
-            <dt>盘符</dt>
+            <dt>{t("盘符")}</dt>
             <dd>
-              {partition.driveLetter ? `${partition.driveLetter}:` : "无"}
+              {partition.driveLetter ? `${partition.driveLetter}:` : t("无")}
             </dd>
-            <dt>用途</dt>
-            <dd>{partition.role}</dd>
-            <dt>文件系统</dt>
-            <dd>{partition.fs}</dd>
-            <dt>分区容量</dt>
+            <dt>{t("用途")}</dt>
+            <dd>{partition.role && catalogText(partition.role)}</dd>
+            <dt>{t("文件系统")}</dt>
+            <dd>{catalogText(partition.fs)}</dd>
+            <dt>{t("分区容量")}</dt>
             <dd>{formatSize(partition.size)}</dd>
-            <dt>卷容量</dt>
+            <dt>{t("卷容量")}</dt>
             <dd>{formatSize(partition.volumeSize ?? null)}</dd>
-            <dt>已用 / 可用</dt>
+            <dt>{t("已用 / 可用")}</dt>
             <dd>
               {formatSize(partition.used)} /{" "}
               {formatSize(partition.available ?? null)}
             </dd>
-            <dt>起始偏移</dt>
-            <dd>{partition.start.toLocaleString()} B</dd>
-            <dt>4 KiB 对齐</dt>
-            <dd>{partition.start % 4096 === 0 ? "已对齐" : "未对齐"}</dd>
-            <dt>Windows 卷状态</dt>
-            <dd>{partition.volumeStatus}</dd>
+            <dt>{t("起始偏移")}</dt>
+            <dd>{partition.start.toLocaleString(language)} B</dd>
+            <dt>{t("4 KiB 对齐")}</dt>
+            <dd>{partition.start % 4096 === 0 ? t("已对齐") : t("未对齐")}</dd>
+            <dt>{t("Windows 卷状态")}</dt>
+            <dd>
+              {partition.volumeStatus && catalogText(partition.volumeStatus)}
+            </dd>
           </>
         )}
       </dl>
-      <FilesystemSupportPanel disk={disk} partition={partition} target={target} />
+      <FilesystemSupportPanel
+        disk={disk}
+        partition={partition}
+        target={target}
+      />
       <Hint>
-        数据来自 Windows 存储接口，Windows 状态不是 SMART 检测结果。
-        初始化、新建、调整、格式化或删除须单独预览和确认，确认后会实际写入磁盘。
+        {t(
+          "数据来自 Windows 存储接口，Windows 状态不是 SMART 检测结果。 初始化、新建、调整、格式化或删除须单独预览和确认，确认后会实际写入磁盘。",
+        )}
       </Hint>
     </>
   );

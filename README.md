@@ -1,10 +1,12 @@
 # DiskStudio
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [Simplified Chinese](README.zh-CN.md)
 
 DiskStudio is a Windows tool for disk management, file recovery, and backups. Use the partition map, file browser, and operation previews to inspect drives, manage partitions, recover files, and create backups.
 
 This is an early preview. Back up important data and verify the selected drive before changing partitions, formatting, restoring, or cloning.
+
+![DiskStudio's English Disk Management view with an example GPT disk and its partition layout](docs/images/disk-management-en.png)
 
 ## Features
 
@@ -24,9 +26,11 @@ Available operations depend on the state of the disk, partition type, and file s
 
 DiskStudio runs on Windows x64 and requires Microsoft Edge WebView2 Runtime. After extracting the portable package or building from source, open `DiskStudio.exe`.
 
-- In **Disk Management** (磁盘管理), select a disk on the left, then select a partition in the map or table to see its actions. Use the **Disk** (磁盘) menu to open or close images or refresh the disk list.
-- In **File Recovery** (文件恢复), choose the source and scan mode. After scanning, filter and preview candidates, then export selected files to another physical disk.
-- In **Backup & Clone** (备份与克隆), select a backup, restore, or clone operation. Review the source, target, capacity, and options in the preview before confirming.
+Choose your display language in **Settings**.
+
+- In **Disk Management**, select a disk on the left, then select a partition in the map or table to see its actions. Use the **Disk** menu to open or close images or refresh the disk list.
+- In **File Recovery**, choose the source and scan mode. After scanning, filter and preview candidates, then export selected files to another physical disk.
+- In **Backup & Clone**, select a backup, restore, or clone operation. Review the source, target, capacity, and options in the preview before confirming.
 
 Save backups to another physical disk to protect the source.
 
@@ -34,6 +38,7 @@ Save backups to another physical disk to protect the source.
 
 - **Partition operations** primarily support ordinary GPT data partitions. System, boot, hidden, and read-only partitions have additional restrictions. NTFS resizing changes the end boundary while keeping the start fixed.
 - **Quick partitioning** previews batch creation and formatting. It deletes only partitions you explicitly select that pass the protection checks.
+- **FAT and exFAT resizing** changes the end of supported GPT data partitions. Shrinking can move occupied tail clusters into free space before the new boundary. Growing uses adjacent unallocated space and expands the FAT and moves the data area when necessary. exFAT adjusts the size of its allocation bitmap. The disk stays offline after the operation.
 - **Ext formatting and resizing** are limited to supported Linux data partitions. Resizing requires a clean, unmounted file system and changes only the end boundary.
 - **File recovery** depends on the state of the original data. Overwriting, TRIM, fragmentation, and metadata damage can make a candidate unrecoverable. EFS, deleted Ext files, and general fragmented file reconstruction are unsupported.
 - **Cloning and restoring** require matching scope, capacity, and sector geometry as applicable. Resizing during cloning and system migration are unsupported. A destination may remain offline after writing. The app leaves duplicate disk identifiers inactive.

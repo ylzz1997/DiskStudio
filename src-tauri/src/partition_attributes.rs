@@ -1,9 +1,5 @@
 //! Typed GPT basic-data attribute edits. Pure planning never opens devices.
-use crate::{
-    data_tasks::Selection,
-    table_archive::{Archive, Kind},
-    table_restore,
-};
+use crate::{data_tasks::Selection, table_archive::Archive, table_restore};
 use serde::{Deserialize, Serialize};
 pub const READ_ONLY: u64 = 1 << 60;
 pub const HIDDEN: u64 = 1 << 62;
@@ -132,33 +128,9 @@ pub fn expected(current: &Archive, guid: &str, action: Action) -> Result<Archive
     if bits == e.attributes {
         return Err("分区已经处于所选状态。".into());
     }
-    let mut after = current.clone();
-    let mut crc = None;
-    for extent in &mut after.extents {
-        if matches!(extent.kind, Kind::PrimaryEntries | Kind::BackupEntries) {
-            let at = (e.slot as usize - 1) * 128 + 48;
-            extent.bytes[at..at + 8].copy_from_slice(&bits.to_le_bytes());
-            let hash = crc32fast::hash(&extent.bytes[..before.count as usize * 128]);
-            if crc.is_some_and(|c| c != hash) {
-                return Err("GPT 条目副本不一致。".into());
-            }
-            crc = Some(hash);
-        }
-    }
-    let crc = crc.ok_or("缺少 GPT 条目表")?;
-    for extent in &mut after.extents {
-        match extent.kind {
-            Kind::PrimaryHeader | Kind::BackupHeader => {
-                extent.bytes[88..92].copy_from_slice(&crc.to_le_bytes());
-                extent.bytes[16..20].fill(0);
-                let len = u32::from_le_bytes(extent.bytes[12..16].try_into().unwrap()) as usize;
-                let crc = crc32fast::hash(&extent.bytes[..len]);
-                extent.bytes[16..20].copy_from_slice(&crc.to_le_bytes());
-            }
-            Kind::Mbr | Kind::PrimaryEntries | Kind::BackupEntries => {}
-            _ => return Err("属性预览含非 GPT 表范围。".into()),
-        }
-    }
+    let after = table_restore::edit_gpt_entry(current, &before, e.slot, |entry| {
+        entry[48..56].copy_from_slice(&bits.to_le_bytes());
+    })?;
     let mut desired = before;
     desired
         .entries
