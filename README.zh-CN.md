@@ -6,6 +6,8 @@ DiskStudio 是一款面向 Windows 的磁盘管理、文件恢复与备份工具
 
 当前为早期预览版本。修改分区、格式化、还原和克隆前，请先备份重要数据，并核对所选设备。
 
+![DiskStudio 简体中文磁盘管理界面，展示示例 GPT 磁盘的分区布局](docs/images/disk-management-zh-CN.png)
+
 ## 功能
 
 | 功能           | 支持内容                                                                                              |
@@ -22,7 +24,7 @@ DiskStudio 是一款面向 Windows 的磁盘管理、文件恢复与备份工具
 
 ## 使用
 
-运行环境为 Windows x64，并需要 Microsoft Edge WebView2 Runtime。构建或解压程序后，运行 `diskstudio.exe`。
+运行环境为 Windows x64，并需要 Microsoft Edge WebView2 Runtime。构建或解压程序后，运行 `DiskStudio.exe`。可以在 **设置** 中切换界面语言。
 
 - **磁盘管理**：从左侧选择磁盘，在分区图或表格中选中分区，再选择对应操作。通过顶部“磁盘”菜单打开、关闭镜像或刷新设备列表。
 - **文件恢复**：选择来源和扫描方式，开始扫描后筛选、预览候选文件，再将选中文件导出到另一块物理磁盘。

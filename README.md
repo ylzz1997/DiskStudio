@@ -1,6 +1,6 @@
 # DiskStudio
 
-**English** · [Simplified Chinese](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md)
 
 DiskStudio is a Windows tool for disk management, file recovery, and backups. Use the partition map, file browser, and operation previews to inspect drives, manage partitions, recover files, and create backups.
 

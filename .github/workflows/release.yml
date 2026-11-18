@@ -46,7 +46,7 @@ jobs:
           Copy-Item -LiteralPath 'README.md', 'README.zh-CN.md' -Destination $package
           $readmeImages = Join-Path $package 'docs/images'
           New-Item -ItemType Directory -Path $readmeImages -Force | Out-Null
-          Copy-Item -LiteralPath 'docs/images/disk-management-en.png' -Destination $readmeImages
+          Copy-Item -LiteralPath 'docs/images/disk-management-en.png', 'docs/images/disk-management-zh-CN.png' -Destination $readmeImages
 
           $thirdParty = Join-Path $package 'third-party'
           New-Item -ItemType Directory -Path $thirdParty | Out-Null
