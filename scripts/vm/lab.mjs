@@ -430,6 +430,21 @@ async function ioStats() {
   } finally { qmp.close(); }
 }
 
+async function fixtureNumberKeys(value) {
+  const state = readState();
+  if (!isAlive(state?.pid) || state.fourKn !== true) throw new Error('Start the 4Kn test VM first');
+  const qmp = await connectQmp();
+  try {
+    await validateProfile(qmp, await qmp.execute('query-block'), true);
+    const send = async keys => {
+      await qmp.execute('send-key', { keys: keys.map(data => ({ type: 'qcode', data })), 'hold-time': 100 });
+      await new Promise(resolve => setTimeout(resolve, 160));
+    };
+    await send(['ctrl', 'a']);
+    for (const digit of value) await send([digit]);
+  } finally { qmp.close(); }
+}
+
 async function moveStopWindow(enabled) {
   const state = readState();
   if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
@@ -461,10 +476,20 @@ async function moveStopWindow(enabled) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === 'reallocation-capacity-keys') {
+    if (args.length !== 1 || !['32', '64'].includes(args[0])) throw new Error('Choose the 4Kn fixture capacity of 32 or 64 MiB');
+    return fixtureNumberKeys(args[0]);
+  }
+  if (command === 'sector-copy-count-keys') {
+    if (args.length !== 1 || !['2', '3'].includes(args[0])) throw new Error('Choose the 4Kn fixture sector count of 2 or 3');
+    return fixtureNumberKeys(args[0]);
+  }
   if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear'].includes(command)) {
     console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
     console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
+    console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
+    console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];

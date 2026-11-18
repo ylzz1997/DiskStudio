@@ -421,8 +421,8 @@ fn dispatch(
     });
     record(log, json!({"event":"merge-result","outcome":result}))?;
     let result = result?;
-    if !result.verified {
-        return Err(result.message);
+    if !result.batch.verified {
+        return Err(result.batch.message);
     }
     inspect_files(case, fixture, folder, log)
 }

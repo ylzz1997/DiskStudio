@@ -1,4 +1,7 @@
 {
+  "已合并的文件位于保留卷根目录下的 {folder}。": "Die zusammengeführten Dateien befinden sich in {folder} im Stammverzeichnis des beibehaltenen Volumes.",
+  "磁盘已确认脱机。": "Der Offlinezustand des Datenträgers wurde bestätigt.",
+  "未能确认磁盘脱机。{reason}": "Der Offlinezustand des Datenträgers konnte nicht bestätigt werden. {reason}",
   "磁盘管理": "Datenträgerverwaltung",
   "文件恢复": "Dateiwiederherstellung",
   "备份与克隆": "Sicherung und Klonen",
@@ -1576,5 +1579,16 @@
   "扫描完成，找到 {count} 项文件名称/命名数据流（含 {aliases} 个额外名称）；未能解析 {skipped} 条文件记录或数据流、{directoryErrors} 个目录链路。命名数据流单独导出，暂不枚举目录附带的数据流；名称可能指向同一文件，目录未必完整，内容需恢复后核对。": "Scan abgeschlossen. {count} Namen und benannte Datenströme gefunden, davon {aliases} zusätzliche Namen. {skipped} Dateieinträge oder Streams und {directoryErrors} Verzeichnisverknüpfungen konnten nicht ausgewertet werden. Benannte Streams werden getrennt exportiert. Verzeichnisstreams werden nicht aufgeführt. Namen können dieselbe Datei bezeichnen. Verzeichnisse können unvollständig sein. Prüfen Sie wiederhergestellte Inhalte.",
   "Ext 扫描完成：{count} 个现存文件，{unsupported} 个暂不支持提取，跳过 {special} 个符号链接或特殊文件、{directories} 个不支持的目录。未执行删除恢复或日志重放。": "Ext-Scan abgeschlossen. {count} vorhandene Dateien gefunden, davon {unsupported} nicht extrahierbar. {special} symbolische Links oder Spezialdateien sowie {directories} nicht unterstützte Verzeichnisse wurden übersprungen. Es wurden keine gelöschten Dateien wiederhergestellt und kein Journal abgespielt.",
   "已达到结果或目录项上限。": "Das Limit für Ergebnisse oder Verzeichniseinträge ist erreicht.",
-  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Signaturscan abgeschlossen. {count} Kandidaten gefunden und {rejected} unvollständige, zu große oder nicht unterstützte Kandidaten übersprungen. Pro Datei sind bis zu 256 MiB und pro Struktur bis zu 65536 Felder möglich. Fragmente werden nicht zusammengesetzt. Die Dekodierung kann fehlschlagen."
+  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Signaturscan abgeschlossen. {count} Kandidaten gefunden und {rejected} unvollständige, zu große oder nicht unterstützte Kandidaten übersprungen. Pro Datei sind bis zu 256 MiB und pro Struktur bis zu 65536 Felder möglich. Fragmente werden nicht zusammengesetzt. Die Dekodierung kann fehlschlagen.",
+  "复制扇区": "Sektoren kopieren",
+  "回读输出文件": "Ausgabedatei zurücklesen",
+  "导出扇区范围到另一块磁盘": "Sektorbereich auf einen anderen Datenträger exportieren",
+  "绝对 LBA {first}–{last} · {size} B": "Absolute LBA {first}–{last} · {size} B",
+  "保存到另一块物理磁盘的新 .bin 文件。复制时会锁定在线源卷，并完整回读文件校验 SHA-256。": "Als neue .bin-Datei auf einem anderen physischen Datenträger speichern. Beim Kopieren werden Online-Quellvolumes gesperrt und die gesamte Datei zur SHA-256-Prüfung zurückgelesen.",
+  "请选择普通 .bin 文件名。": "Einen regulären .bin-Dateinamen wählen.",
+  "输出文件长度与确认范围不一致。": "Die Länge der Ausgabedatei weicht vom bestätigten Bereich ab.",
+  "导出文件回读 SHA-256 不一致。": "Die SHA-256-Prüfsumme stimmt beim Zurücklesen nicht überein.",
+  "{error} 未完成文件保留为 {name}。": "{error} Die Teildatei wurde als {name} beibehalten.",
+  "源扇区内容或范围已变化，请重新读取后导出。": "Inhalt oder Bereich hat sich geändert. Den Quellsektor vor dem Export erneut lesen.",
+  "文件已存在，请使用新文件名。": "Die Datei existiert bereits. Einen anderen Namen wählen."
 }

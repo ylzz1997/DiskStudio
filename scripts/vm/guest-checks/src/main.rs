@@ -99,6 +99,7 @@ mod partition_move_task;
 #[path = "../../../../src-tauri/src/partitions.rs"]
 mod partitions;
 mod quick_partition_checks;
+mod reallocation_checks;
 #[path = "../../../../src-tauri/src/recovery.rs"]
 mod recovery;
 #[path = "../../../../src-tauri/src/recovery_checkpoint.rs"]
@@ -110,6 +111,9 @@ mod recovery_output;
 mod recovery_output_checks;
 #[path = "../../../../src-tauri/src/recovery_tree.rs"]
 mod recovery_tree;
+#[path = "../../../../src-tauri/src/sector_copy.rs"]
+mod sector_copy;
+mod sector_copy_checks;
 #[path = "../../../../src-tauri/src/signature_checkpoint.rs"]
 mod signature_checkpoint;
 #[path = "../../../../src-tauri/src/signature_scan.rs"]
@@ -556,10 +560,16 @@ fn main() {
             .to_str()
             .map(str::to_owned)
     });
-    if matches!(
+    let reallocation = mode
+        .as_deref()
+        .and_then(reallocation_checks::EntryPoint::parse);
+    let is_4kn = matches!(
         mode.as_deref(),
         Some(
-            "Fat-Sectors-4Kn-Check"
+            "Sector-Copy-4Kn-Baseline"
+                | "Sector-Copy-4Kn-Verify"
+                | "Sector-Copy-4Kn-Verify-Report"
+                | "Fat-Sectors-4Kn-Check"
                 | "Fat-Sectors-4Kn-Report"
                 | "Fat-Sectors-4Kn-Diagnose"
                 | "Fat-Sectors-4Kn-Continue-Check"
@@ -600,10 +610,28 @@ fn main() {
                 | "Partition-Merge-4Kn-Fresh-Report"
                 | "Partition-Merge-4Kn-Fresh-Inspect"
         )
-    ) {
+    );
+    if is_4kn || reallocation.is_some() {
         TEST_SECTOR.set(4096).expect("guest sector configured once");
     }
-    let result = std::panic::catch_unwind(|| match mode.as_deref() {
+    let result = std::panic::catch_unwind(|| match reallocation {
+        Some(entry) => entry.run(),
+        None => dispatch(mode.as_deref()),
+    })
+    .unwrap_or_else(|_| Err("Guest test panicked; inspect state before retrying".into()));
+    notice(&match result {
+        Ok(text) => text,
+        Err(error) => format!("GUEST CHECK FAILED\n\n{error}\n\nNo automatic rollback/retry. Partial targets remain offline. Host execution is forbidden."),
+    });
+}
+
+fn dispatch(mode: Option<&str>) -> Result<String, String> {
+    match mode {
+        Some("Sector-Copy-4Kn-Baseline") => sector_copy_checks::baseline(),
+        Some("Sector-Copy-4Kn-Verify") => sector_copy_checks::verify(),
+        Some("Sector-Copy-4Kn-Verify-Report") => {
+            backup_protection::report(sector_copy_checks::VERIFY)
+        }
         Some("Allocation-Probe") => allocation_probe::inspect(),
         Some("Letter-Outcome") => letter_outcome_checks::check(),
         Some("Partition-Merge-4Kn-Prepare") => merge_checks::prepare(),
@@ -615,7 +643,9 @@ fn main() {
         Some("Partition-Merge-4Kn-Continue-Report") => merge_checks::continue_report(),
         Some("Partition-Merge-4Kn-Continue-Inspect") => merge_checks::continue_inspect(),
         Some("Partition-Merge-4Kn-Catalogue-Recheck") => merge_checks::catalogue_probe(),
-        Some("Partition-Merge-4Kn-Catalogue-Recheck-Report") => merge_checks::catalogue_probe_report(),
+        Some("Partition-Merge-4Kn-Catalogue-Recheck-Report") => {
+            merge_checks::catalogue_probe_report()
+        }
         Some("Partition-Merge-4Kn-Corrected") => merge_checks::corrected_check(),
         Some("Partition-Merge-4Kn-Corrected-Report") => merge_checks::corrected_report(),
         Some("Partition-Merge-4Kn-Corrected-Inspect") => merge_checks::corrected_inspect(),
@@ -794,7 +824,5 @@ fn main() {
         }
         Some("--advanced-checks" | "DiskStudio-Guest-Checks") => advanced::check(),
         _ => Err("Unknown guest-check mode; no test operation was started".into()),
-    })
-    .unwrap_or_else(|_| Err("Guest test panicked; inspect state before retrying".into()));
-    notice(&match result{Ok(text)=>text,Err(e)=>format!("GUEST CHECK FAILED\n\n{e}\n\nNo automatic rollback/retry. Partial targets remain offline. Host execution is forbidden.")});
+    }
 }

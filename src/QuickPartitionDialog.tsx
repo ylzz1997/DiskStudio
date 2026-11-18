@@ -22,7 +22,11 @@ import type {
 import { advanceQuickProgress } from "./quickProgress";
 import type { QuickProgress } from "./quickProgress";
 import { formatClusters, validateFormatOptions } from "./formatOptions";
-import { runPartitionOperation, errorText } from "./partitionOutcome";
+import {
+  batchResultLines,
+  runPartitionOperation,
+  errorText,
+} from "./partitionOutcome";
 import type { PartitionOutcome } from "./partitionOutcome";
 import { PartitionBatchProgress } from "./PartitionBatchProgress";
 
@@ -178,9 +182,12 @@ export function QuickPartitionDialog({
     running.current = true;
     try {
       await runPartitionOperation(
-        submitted,
-        (token) =>
-          executeQuickPartition(token, (event) => {
+        {
+          ...submitted,
+          targetName: `${diskTitle(disk, t)} · ${catalogText(disk.hardware?.model ?? "未提供型号")}`,
+        },
+        async (token) => {
+          const result = await executeQuickPartition(token, (event) => {
             setExecution(
               (previous) =>
                 previous && {
@@ -188,7 +195,17 @@ export function QuickPartitionDialog({
                   progress: advanceQuickProgress(previous.progress, event),
                 },
             );
-          }),
+          });
+          return {
+            verified: result.verified,
+            message: batchResultLines(
+              result,
+              submitted.steps.map(stepLabel),
+              t,
+              catalogText,
+            ).join("\n"),
+          };
+        },
         onRefresh,
         (outcome) => {
           onOutcome(outcome);

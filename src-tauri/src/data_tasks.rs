@@ -741,6 +741,31 @@ pub(crate) fn record_progress(id: &str, phase: &str, done: u64, total: u64) {
         }
     }
 }
+/// Cancel and the final no-overwrite rename share the same job-state lock.
+#[cfg(windows)]
+pub(crate) fn publish_verified_file(
+    id: &str,
+    message: String,
+    sha256: String,
+    publish: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut s = state();
+    if s.cancel.load(Ordering::Relaxed) {
+        return Err("任务已取消。".into());
+    }
+    let job = s
+        .job
+        .as_mut()
+        .filter(|job| job.id == id && job.state == "running")
+        .ok_or("任务已结束。")?;
+    publish()?;
+    job.state = "completed".into();
+    job.phase = "完成".into();
+    job.message = message;
+    job.sha256 = Some(sha256);
+    Ok(())
+}
+
 pub(crate) fn finish(id: &str, result: Result<(String, Option<String>), String>) {
     let mut s = state();
     let canceled = s.cancel.load(Ordering::Relaxed);

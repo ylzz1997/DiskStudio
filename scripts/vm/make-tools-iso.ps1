@@ -1,8 +1,12 @@
-param([switch]$Live)
+param(
+    [switch]$Live,
+    [string[]]$GuestTools
+)
 $ErrorActionPreference = 'Stop'
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $diskStudioVmRoot = Join-Path $diskStudioProject '.vm'
-$diskStudioStage = Join-Path $diskStudioVmRoot 'payload'
+$diskStudioPayload = Join-Path $diskStudioVmRoot 'payload'
+$diskStudioStage = $diskStudioPayload
 $diskStudioIso = Join-Path $diskStudioVmRoot 'media\diskstudio-tools.iso'
 if ($Live) { $diskStudioIso = Join-Path $diskStudioVmRoot ('media\diskstudio-tools-' + [guid]::NewGuid().ToString() + '.iso') }
 $diskStudioExe = Join-Path $diskStudioProject 'target\release\diskstudio.exe'
@@ -11,12 +15,34 @@ if (!$Live -and (Test-Path -LiteralPath (Join-Path $diskStudioVmRoot 'run.json')
     $diskStudioRun = Get-Content -LiteralPath (Join-Path $diskStudioVmRoot 'run.json') -Raw | ConvertFrom-Json
     if (Get-Process -Id $diskStudioRun.pid -ErrorAction SilentlyContinue) { throw 'Shut down the VM before replacing its optical media' }
 }
-foreach ($diskStudioDirectory in @($diskStudioVmRoot, $diskStudioStage, (Join-Path $diskStudioVmRoot 'media'))) {
+if ($GuestTools -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
+foreach ($diskStudioDirectory in @($diskStudioVmRoot, $diskStudioPayload, (Join-Path $diskStudioVmRoot 'media'))) {
     if (Test-Path -LiteralPath $diskStudioDirectory) {
         if ((Get-Item -LiteralPath $diskStudioDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'VM folders must not be links or junctions' }
     } else { New-Item -ItemType Directory -Path $diskStudioDirectory | Out-Null }
 }
 if (Test-Path -LiteralPath $diskStudioIso) { throw 'Tools ISO already exists; preserve it or remove that single file after shutting down the VM' }
+if ($GuestTools) {
+    # Use a fresh staging directory. Older payloads and ISO files may still be
+    # needed for failure diagnosis and must not be changed.
+    $diskStudioSelected = @{}
+    foreach ($diskStudioName in $GuestTools) {
+        if ($diskStudioName -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,110}\.exe$' -or
+            $diskStudioName -ieq 'DiskStudio.exe' -or $diskStudioSelected.ContainsKey($diskStudioName)) {
+            throw "Invalid or duplicate guest driver name: $diskStudioName"
+        }
+        $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+        if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Guest driver must be a regular file: $diskStudioName"
+        }
+        $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+    }
+    $diskStudioStage = Join-Path $diskStudioVmRoot ('payload-selected-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $diskStudioStage | Out-Null
+    foreach ($diskStudioName in $diskStudioSelected.Keys) {
+        Copy-Item -LiteralPath $diskStudioSelected[$diskStudioName] -Destination (Join-Path $diskStudioStage $diskStudioName)
+    }
+}
 foreach ($diskStudioExisting in (Get-ChildItem -LiteralPath $diskStudioStage -Recurse -Force)) {
     if ($diskStudioExisting.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload must not contain links or junctions' }
 }

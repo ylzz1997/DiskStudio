@@ -1,4 +1,7 @@
 {
+  "已合并的文件位于保留卷根目录下的 {folder}。": "Os arquivos mesclados estão em {folder}, na raiz do volume mantido.",
+  "磁盘已确认脱机。": "O disco foi confirmado como offline.",
+  "未能确认磁盘脱机。{reason}": "Não foi possível confirmar que o disco está offline. {reason}",
   "磁盘管理": "Gerenciamento de discos",
   "文件恢复": "Recuperação de arquivos",
   "备份与克隆": "Backup e clonagem",
@@ -1576,5 +1579,16 @@
   "扫描完成，找到 {count} 项文件名称/命名数据流（含 {aliases} 个额外名称）；未能解析 {skipped} 条文件记录或数据流、{directoryErrors} 个目录链路。命名数据流单独导出，暂不枚举目录附带的数据流；名称可能指向同一文件，目录未必完整，内容需恢复后核对。": "Verificação concluída. {count} nomes e fluxos nomeados encontrados, incluindo {aliases} nomes adicionais. Não foi possível interpretar {skipped} registros ou fluxos e {directoryErrors} vínculos de diretório. Fluxos nomeados são exportados separadamente. Fluxos de diretórios não são listados. Nomes podem apontar para o mesmo arquivo. Diretórios podem estar incompletos. Confira o conteúdo recuperado.",
   "Ext 扫描完成：{count} 个现存文件，{unsupported} 个暂不支持提取，跳过 {special} 个符号链接或特殊文件、{directories} 个不支持的目录。未执行删除恢复或日志重放。": "Verificação Ext concluída. {count} arquivos existentes encontrados, dos quais {unsupported} não podem ser extraídos. {special} links simbólicos ou arquivos especiais e {directories} diretórios incompatíveis foram ignorados. Não houve recuperação de arquivos excluídos nem reaplicação do diário.",
   "已达到结果或目录项上限。": "Limite de resultados ou entradas de diretório atingido.",
-  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Verificação por assinatura concluída. {count} candidatos encontrados e {rejected} candidatos incompletos, acima do limite ou incompatíveis ignorados. Cada arquivo pode ter até 256 MiB e cada estrutura até 65536 campos. Os fragmentos não são remontados e a decodificação pode falhar."
+  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Verificação por assinatura concluída. {count} candidatos encontrados e {rejected} candidatos incompletos, acima do limite ou incompatíveis ignorados. Cada arquivo pode ter até 256 MiB e cada estrutura até 65536 campos. Os fragmentos não são remontados e a decodificação pode falhar.",
+  "复制扇区": "Copiar setores",
+  "回读输出文件": "Reler o arquivo de saída",
+  "导出扇区范围到另一块磁盘": "Exportar um intervalo de setores para outro disco",
+  "绝对 LBA {first}–{last} · {size} B": "LBA absoluto {first}–{last} · {size} B",
+  "保存到另一块物理磁盘的新 .bin 文件。复制时会锁定在线源卷，并完整回读文件校验 SHA-256。": "Salva em um novo arquivo .bin em outro disco físico. A cópia bloqueia os volumes de origem online e relê o arquivo inteiro para verificar seu SHA-256.",
+  "请选择普通 .bin 文件名。": "Escolha um nome comum para o arquivo .bin.",
+  "输出文件长度与确认范围不一致。": "O tamanho do arquivo de saída difere do intervalo confirmado.",
+  "导出文件回读 SHA-256 不一致。": "O SHA-256 do arquivo exportado diverge na releitura.",
+  "{error} 未完成文件保留为 {name}。": "{error} O arquivo parcial foi mantido como {name}.",
+  "源扇区内容或范围已变化，请重新读取后导出。": "O conteúdo ou intervalo do setor de origem mudou. Releia-o antes de exportá-lo.",
+  "文件已存在，请使用新文件名。": "O arquivo já existe. Escolha outro nome."
 }

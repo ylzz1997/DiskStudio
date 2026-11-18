@@ -4,6 +4,7 @@ import { Dialog, FormError } from "./components";
 import { useLocale } from "./i18n/LanguageProvider";
 import { MessageError } from "./i18n/translate";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
+import { SectorCopyPanel } from "./SectorCopyPanel";
 import { errorText } from "./partitionOutcome";
 import { formatSize, type Disk } from "./types";
 import {
@@ -39,7 +40,7 @@ export function SectorViewer({
   const [partition, setPartition] = useState(
     initialPartition === undefined ? "" : String(initialPartition),
   );
-  const [tab, setTab] = useState<"view" | "search">("view");
+  const [tab, setTab] = useState<"view" | "search" | "copy">("view");
   const [position, setPosition] = useState("0"),
     [unit, setUnit] = useState<"sector" | "byte">("sector");
   const [page, setPage] = useState<SectorPage | null>(null),
@@ -109,6 +110,7 @@ export function SectorViewer({
             next?.id === control.current.id
           ) {
             setSearch(next);
+            if (next.result.state !== "running") control.current.id = "";
             setBusy(next.result.state === "running");
           }
         } catch (e) {
@@ -338,7 +340,9 @@ export function SectorViewer({
   return (
     <Dialog
       wide
-      title={editing ? t("编辑扇区") : t("扇区查看")}
+      title={
+        editing ? t("编辑扇区") : tab === "copy" ? t("复制扇区") : t("扇区查看")
+      }
       subtitle={`${diskTitle(disk, t)} · ${formatSize(disk.size)}`}
       onClose={() => {
         if (control.current.busy) return;
@@ -371,17 +375,28 @@ export function SectorViewer({
         <div className="sector-tabs">
           <button
             className={tab === "view" ? "active" : ""}
-            disabled={editing}
+            disabled={editing || (busy && tab === "copy")}
             onClick={() => setTab("view")}
           >
             {t("查看")}
           </button>
           <button
             className={tab === "search" ? "active" : ""}
-            disabled={editing}
+            disabled={editing || (busy && tab === "copy")}
             onClick={() => setTab("search")}
           >
             {t("搜索")}
+          </button>
+          <button
+            className={tab === "copy" ? "active" : ""}
+            disabled={editing || (busy && tab !== "copy")}
+            onClick={() => {
+              setTab("copy");
+              setError(null);
+              setNotice(null);
+            }}
+          >
+            {t("复制扇区")}
           </button>
         </div>
       </div>
@@ -677,6 +692,16 @@ export function SectorViewer({
             </div>
           )}
         </>
+      ) : tab === "copy" ? (
+        <SectorCopyPanel
+          key={partition}
+          selectSource={selection}
+          size={size}
+          sectorSize={disk.sectorSize}
+          offset={partition ? (selected?.start ?? 0) : 0}
+          initialSector={page?.sector ?? 0}
+          onBusy={setBusy}
+        />
       ) : (
         <>
           <div className="sector-search-pattern">
@@ -1053,13 +1078,15 @@ export function SectorViewer({
           )}
         </>
       )}
-      <p className="surface-note">
-        {tab === "view"
-          ? t("位置相对于所选范围；在线卷的内容可能变化。")
-          : encoding === "hex"
-            ? t("? 匹配一个十六进制位，?? 匹配一个字节；最多保留 1024 项。")
-            : t("文本按所选编码匹配，最多保留 1024 项；遇到读取错误会停止。")}
-      </p>
+      {tab !== "copy" && (
+        <p className="surface-note">
+          {tab === "view"
+            ? t("位置相对于所选范围；在线卷的内容可能变化。")
+            : encoding === "hex"
+              ? t("? 匹配一个十六进制位，?? 匹配一个字节；最多保留 1024 项。")
+              : t("文本按所选编码匹配，最多保留 1024 项；遇到读取错误会停止。")}
+        </p>
+      )}
       <FormError message={errorMessage} />
       {notice && (
         <p className="surface-note" role="status">

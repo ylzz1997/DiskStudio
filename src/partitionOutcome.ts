@@ -1,4 +1,5 @@
 import type { PartitionPlan } from "./types";
+import type { Translate } from "./i18n/translate";
 
 export interface PartitionOutcome {
   plan: Omit<PartitionPlan, "token" | "expiresAt">;
@@ -9,6 +10,33 @@ export interface PartitionOutcome {
 
 export const errorText = (error: unknown) =>
   String(error instanceof Error ? error.message : error);
+
+export interface BatchExecution {
+  message: string;
+  verified: boolean;
+  completed: number;
+  failure: string | null;
+}
+
+export function batchResultLines(
+  result: BatchExecution,
+  labels: readonly string[],
+  t: Translate,
+  catalogText: (text: string) => string,
+): string[] {
+  return labels.map((label, index) => {
+    const status =
+      index < result.completed
+        ? t("已完成并核对")
+        : index === result.completed
+          ? t("已停止，结果待核对")
+          : t("未执行");
+    const line = `${index + 1}. ${status} · ${label}`;
+    return index === result.completed && result.failure !== null
+      ? `${line}\n${catalogText(result.failure)}`
+      : line;
+  });
+}
 
 // The caller consumes the confirmation before calling this function. Publish to
 // the application owner before refreshing: the selected disk may disappear.

@@ -1,4 +1,4 @@
-//! Native file adapter shared by backup, restore and browsing. Paths originate
+//! Native file adapter for backups and verified file output. Paths originate
 //! only in native dialogs; actual handles are bound to their physical location.
 //! Encryption never creates a plaintext temporary file.
 use crate::{
@@ -155,7 +155,7 @@ impl Publication {
     pub fn binding(&self) -> FileBinding {
         self.bindings[1].clone()
     }
-    /// Caller must have verified the entire decrypted archive chain first.
+    /// Caller must have verified the complete output first.
     pub fn publish(self) -> Result<(), String> {
         self.validate()?;
         crate::recovery_output::finish(&self.file, &self.directory, &self.name)
@@ -175,6 +175,41 @@ pub fn create(
     {
         return Err("请选择普通 .dsbackup 文件名。".into());
     }
+    let (file, publication) =
+        create_output(path, name, other_disk, required, "目标备份已存在，未覆盖。")?;
+    let output = match password {
+        Some(password) => {
+            Output::Encrypted(backup_encryption::Writer::new(file, password).map_err(err)?)
+        }
+        None => Output::Plain(file),
+    };
+    Ok((output, publication))
+}
+
+pub(crate) fn create_sector_output(
+    path: &Path,
+    source: &Target,
+    size: u64,
+) -> Result<(File, Publication), String> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            *name == crate::data_io::safe_name(name)
+                && name.to_ascii_lowercase().ends_with(".bin")
+                && !crate::recovery_export::reserved(name)
+        })
+        .ok_or("请选择普通 .bin 文件名。")?;
+    create_output(path, name, source, size, "文件已存在，请使用新文件名。")
+}
+
+fn create_output(
+    path: &Path,
+    name: &str,
+    other_disk: &Target,
+    required: u64,
+    exists_message: &str,
+) -> Result<(File, Publication), String> {
     let parent =
         platform::destination_folder(path.parent().ok_or("输出目录无效")?, other_disk, required)?;
     let (parent, disk) = platform::folder_location(&parent)?;
@@ -186,7 +221,7 @@ pub fn create(
         FileBinding::new(&directory.try_clone().map_err(err)?.into_std_file(), &disk)?;
     FileBinding::validate_all(std::slice::from_ref(&parent_binding))?;
     if directory.exists(name) {
-        return Err("目标备份已存在，未覆盖。".into());
+        return Err(exists_message.into());
     }
     let mut options = OpenOptions::new();
     options
@@ -208,11 +243,5 @@ pub fn create(
         name: name.into(),
     };
     publication.validate()?;
-    let output = match password {
-        Some(password) => {
-            Output::Encrypted(backup_encryption::Writer::new(file, password).map_err(err)?)
-        }
-        None => Output::Plain(file),
-    };
-    Ok((output, publication))
+    Ok((file, publication))
 }

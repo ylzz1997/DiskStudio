@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
-import { runPartitionOperation } from "./partitionOutcome";
+import { batchResultLines, runPartitionOperation } from "./partitionOutcome";
+import { translate } from "./i18n/translate";
 import type { PartitionOutcome } from "./partitionOutcome";
 import type { PartitionPlan } from "./types";
 
@@ -14,6 +15,29 @@ const plan: PartitionPlan = {
   warning: "Z → 无",
   expiresAt: 10,
 };
+
+it("renders verified, stopped and skipped steps from the terminal batch result", () => {
+  const steps = ["Copy", "Move", "Resize"];
+  const t: Parameters<typeof batchResultLines>[2] = (key, fields) =>
+    translate("en", key, fields);
+  expect(
+    batchResultLines(
+      {
+        completed: 1,
+        verified: false,
+        failure: "Windows error 5",
+        message: "原始批次记录",
+      },
+      steps,
+      t,
+      (text) => text,
+    ),
+  ).toEqual([
+    "1. Completed and verified · Copy",
+    "2. Stopped. Result pending verification. · Move\nWindows error 5",
+    "3. Skipped · Resize",
+  ]);
+});
 
 it("publishes the bound result before a refresh that removes the target", async () => {
   let owner: PartitionOutcome | null = null;

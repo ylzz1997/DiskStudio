@@ -1,4 +1,7 @@
 {
+  "已合并的文件位于保留卷根目录下的 {folder}。": "The merged files are in {folder} at the root of the retained volume.",
+  "磁盘已确认脱机。": "The disk was verified offline.",
+  "未能确认磁盘脱机。{reason}": "Could not verify that the disk is offline. {reason}",
   "磁盘管理": "Disk Management",
   "文件恢复": "File Recovery",
   "备份与克隆": "Backup & Clone",
@@ -1576,5 +1579,16 @@
   "扫描完成，找到 {count} 项文件名称/命名数据流（含 {aliases} 个额外名称）；未能解析 {skipped} 条文件记录或数据流、{directoryErrors} 个目录链路。命名数据流单独导出，暂不枚举目录附带的数据流；名称可能指向同一文件，目录未必完整，内容需恢复后核对。": "Scan complete. Found {count} names and named streams, including {aliases} additional names. Could not parse {skipped} file records or streams and {directoryErrors} directory links. Named streams are exported separately. Directory streams are not listed. Names may refer to the same file, directories may be incomplete, and recovered content needs verification.",
   "Ext 扫描完成：{count} 个现存文件，{unsupported} 个暂不支持提取，跳过 {special} 个符号链接或特殊文件、{directories} 个不支持的目录。未执行删除恢复或日志重放。": "Ext scan complete. Found {count} existing files, including {unsupported} that cannot be extracted. Skipped {special} symbolic links or special files and {directories} unsupported directories. No deleted-file recovery or journal replay was performed.",
   "已达到结果或目录项上限。": "Reached a result or directory entry limit.",
-  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Signature scan complete. Found {count} candidates and skipped {rejected} incomplete, oversized, or unsupported candidates. A file may be at most 256 MiB and a structure may contain at most 65536 fields. Fragments are not reassembled and candidates may not decode."
+  "签名扫描完成，找到 {count} 个候选；忽略 {rejected} 个不完整、超限或不支持结构的候选。单文件上限 256 MiB，结构最多 65536 个字段；不重组碎片，不保证可解码。": "Signature scan complete. Found {count} candidates and skipped {rejected} incomplete, oversized, or unsupported candidates. A file may be at most 256 MiB and a structure may contain at most 65536 fields. Fragments are not reassembled and candidates may not decode.",
+  "复制扇区": "Copy sectors",
+  "回读输出文件": "Read back output file",
+  "导出扇区范围到另一块磁盘": "Export a sector range to another disk",
+  "绝对 LBA {first}–{last} · {size} B": "Absolute LBA {first}–{last} · {size} B",
+  "保存到另一块物理磁盘的新 .bin 文件。复制时会锁定在线源卷，并完整回读文件校验 SHA-256。": "Save to a new .bin file on another physical disk. The copy locks online source volumes and reads back the whole file to verify its SHA-256.",
+  "请选择普通 .bin 文件名。": "Choose a regular .bin filename.",
+  "输出文件长度与确认范围不一致。": "The output file length differs from the confirmed range.",
+  "导出文件回读 SHA-256 不一致。": "The SHA-256 of the exported file differs on readback.",
+  "{error} 未完成文件保留为 {name}。": "{error} The partial file was retained as {name}.",
+  "源扇区内容或范围已变化，请重新读取后导出。": "The source sector content or range changed. Read the sector again before exporting.",
+  "文件已存在，请使用新文件名。": "This file already exists. Choose a new filename."
 }

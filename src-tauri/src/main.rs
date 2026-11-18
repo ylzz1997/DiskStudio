@@ -59,6 +59,7 @@ mod recovery_export;
 #[cfg(windows)]
 mod recovery_output;
 mod recovery_tree;
+mod sector_copy;
 mod sector_data;
 mod sector_edit;
 mod sector_query;
@@ -479,7 +480,7 @@ async fn quick_partition_prepare(
 async fn quick_partition_execute(
     token: String,
     progress: tauri::ipc::Channel<partitions::quick::Progress>,
-) -> Result<partitions::Outcome, String> {
+) -> Result<partitions::quick::Execution, String> {
     tauri::async_runtime::spawn_blocking(move || {
         partitions::quick::execute_with_progress(token, |event| {
             // Progress delivery is advisory. A closed renderer must never repeat,
@@ -506,7 +507,7 @@ async fn partition_reallocation_prepare(
 async fn partition_reallocation_execute(
     token: String,
     progress: tauri::ipc::Channel<partitions::quick::Progress>,
-) -> Result<partitions::Outcome, String> {
+) -> Result<partitions::reallocation::Execution, String> {
     tauri::async_runtime::spawn_blocking(move || {
         partitions::reallocation::execute(token, |event| {
             let _ = progress.send(event);
@@ -705,6 +706,12 @@ async fn sector_export(id: String) -> Result<Option<String>, String> {
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
+async fn sector_copy_start(request: sector_copy::Request) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || sector_copy::start(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn sector_prepare_write(
     request: sector_write::Request,
 ) -> Result<sector_write::Plan, String> {
@@ -767,6 +774,7 @@ fn main() {
             sector_search,
             sector_status,
             sector_export,
+            sector_copy_start,
             sector_prepare_write,
             sector_execute_write,
             sector_discard_write,

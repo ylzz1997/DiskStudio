@@ -136,13 +136,7 @@ pub fn export(id: String) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
         run("导出扇区", || {
-            use crate::data_windows as platform;
-            use sha2::{Digest, Sha256};
-            use std::{
-                fs::OpenOptions,
-                io::{Read, Seek, SeekFrom, Write},
-                os::windows::fs::OpenOptionsExt,
-            };
+            use std::{fs::File, io::Cursor};
             let page = page_state()
                 .as_ref()
                 .filter(|p| p.id == id)
@@ -156,26 +150,11 @@ pub fn export(id: String) -> Result<Option<String>, String> {
             else {
                 return Ok(None);
             };
-            if !path
-                .extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.eq_ignore_ascii_case("bin"))
-            {
-                return Err("请使用 .bin 扩展名。".into());
-            }
-            let folder = platform::destination_folder(
+            crate::data_windows::destination_folder(
                 path.parent().ok_or("输出目录无效")?,
                 &page.source.target,
                 page.sector_size,
             )?;
-            let name = path.file_name().ok_or("输出文件名无效")?;
-            if name.to_string_lossy().contains(':') {
-                return Err("不支持数据流文件名。".into());
-            }
-            let output = folder.join(name);
-            if output.try_exists().map_err(|e| e.to_string())? {
-                return Err("文件已存在，请使用新文件名。".into());
-            }
             let fresh = read(ReadRequest {
                 source: page.source.clone(),
                 sector: page.sector,
@@ -187,35 +166,33 @@ pub fn export(id: String) -> Result<Option<String>, String> {
             {
                 return Err("源扇区内容或范围已变化，请重新读取后导出。".into());
             }
-            let partial = folder.join(format!(
-                "DiskStudio-sector-{}.partial",
-                uuid::Uuid::new_v4()
-            ));
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .share_mode(0)
-                .open(&partial)
-                .map_err(|e| e.to_string())?;
-            let write_result = (|| -> Result<(), String> {
-                file.write_all(&page.bytes)
-                    .and_then(|_| file.sync_all())
-                    .map_err(|e| e.to_string())?;
-                file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-                let mut verify = Vec::new();
-                file.read_to_end(&mut verify).map_err(|e| e.to_string())?;
-                if format!("{:x}", Sha256::digest(&verify)) != page.sha256 {
+            let (mut file, publication) = crate::backup_files::create_sector_output(
+                &path,
+                &page.source.target,
+                page.sector_size,
+            )?;
+            let name = path.file_name().ok_or("输出文件名无效")?.to_string_lossy();
+            (|| {
+                let hash = crate::sector_copy::copy_verified(
+                    &mut Cursor::new(&page.bytes),
+                    &mut file,
+                    page.sector_size,
+                    File::sync_all,
+                    |_, _| Ok(()),
+                )?;
+                if hash != page.sha256 {
                     return Err("导出文件回读 SHA-256 不一致。".into());
                 }
-                Ok(())
-            })();
-            drop(file);
-            write_result.map_err(|e| format!("{e}；未完成文件保留在 {}", partial.display()))?;
-            data_tasks::rename_new(&partial, &output)?;
+                publication.publish()
+            })()
+            .map_err(|error: String| {
+                crate::native_locale::current().format(
+                    "{error} 未完成文件保留为 {name}。",
+                    &[("error", &error), ("name", &format!("{name}.partial"))],
+                )
+            })?;
             Ok(Some(
-                output
-                    .to_string_lossy()
+                path.to_string_lossy()
                     .trim_start_matches("\\\\?\\")
                     .to_string(),
             ))

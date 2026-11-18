@@ -337,12 +337,13 @@ pub(super) fn run_steps<S>(
     mut title: impl FnMut(&S) -> String,
     mut run: impl FnMut(&S) -> Result<(), String>,
     mut progress: impl FnMut(Progress),
-) -> Outcome {
+) -> model::Execution {
     let mut lines = Vec::new();
-    let mut failed = false;
+    let mut failure = None;
+    let mut completed = 0;
     for (index, step) in steps.iter().enumerate() {
         let title = title(step);
-        if failed {
+        if failure.is_some() {
             lines.push(format!("{}. 未执行：{title}", index + 1));
         } else {
             progress(Progress {
@@ -353,6 +354,7 @@ pub(super) fn run_steps<S>(
             });
             match run(step) {
                 Ok(()) => {
+                    completed += 1;
                     lines.push(format!("{}. 已完成并核对：{title}", index + 1));
                     progress(Progress {
                         phase: Phase::Verified,
@@ -362,11 +364,11 @@ pub(super) fn run_steps<S>(
                     });
                 }
                 Err(e) => {
-                    failed = true;
                     lines.push(format!(
                         "{}. 已停止，结果未完整确认：{title}。{e}",
                         index + 1
                     ));
+                    failure = Some(e);
                     progress(Progress {
                         phase: Phase::Stopped,
                         completed: index,
@@ -377,12 +379,17 @@ pub(super) fn run_steps<S>(
             }
         }
     }
-    Outcome {
-        verified: !failed,
+    model::Execution {
+        verified: failure.is_none(),
         message: lines.join("\n"),
+        completed,
+        failure,
     }
 }
-pub fn execute(token: String, mut progress: impl FnMut(Progress)) -> Result<Outcome, String> {
+pub fn execute(
+    token: String,
+    mut progress: impl FnMut(Progress),
+) -> Result<model::Execution, String> {
     let _lock = OPERATION.try_lock().map_err(|_| "另一项磁盘操作正在执行")?;
     let pending = BATCH
         .lock()
@@ -601,10 +608,14 @@ mod tests {
         );
         assert_eq!(calls, 2);
         assert!(!result.verified);
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.failure.as_deref(), Some("injected provider failure"));
         assert_eq!(result.message.matches("未执行").count(), 2);
         assert_eq!(result.message.matches("已完成并核对").count(), 1);
         let result = run_steps(&steps, Step::title, |_| Ok(()), |_| {});
         assert!(result.verified);
+        assert_eq!(result.completed, steps.len());
+        assert_eq!(result.failure, None);
     }
     #[test]
     fn progress_reports_only_verified_steps_and_never_starts_skipped_steps() {

@@ -13,6 +13,7 @@ use std::{
 };
 
 const CONFIRM_FOR: Duration = Duration::from_secs(300);
+const MERGE_COPY_CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 static PENDING_BATCH: Mutex<Option<PendingBatch>> = Mutex::new(None);
 static RUNNING_BATCH: Mutex<Option<RunningBatch>> = Mutex::new(None);
@@ -471,7 +472,7 @@ pub(crate) fn prepare(request: model::Request) -> Result<Option<model::Preview>,
 pub(crate) fn execute(
     token: &str,
     mut progress: impl FnMut(crate::partitions::quick::Progress),
-) -> Result<Outcome, String> {
+) -> Result<model::Execution, String> {
     use crate::partitions::quick::{Phase, Progress};
     let _operation = OPERATION
         .try_lock()
@@ -567,19 +568,26 @@ pub(crate) fn execute(
     }))
     .map_err(|_| "空间重新分配异常结束。请检查实际布局和已保存的断点。".to_owned());
     let mut result = result;
+    let mut stop_offline = None;
     if let Ok(outcome) = &mut result {
-        if let Some(folder) = merge_folder {
+        if let Some(folder) = &merge_folder {
             outcome
                 .message
                 .push_str(&format!("\n已合并的文件位于保留卷根目录下的 {folder}。"));
         }
         if reopened && !requested_final_offline && !outcome.verified {
-            match settle_after_stop(&request.target, &verified) {
-                Ok(()) => outcome.message.push_str("\n磁盘已确认脱机。"),
-                Err(error) => outcome
-                    .message
-                    .push_str(&format!("\n未能确认磁盘脱机：{error}")),
-            }
+            stop_offline = Some(match settle_after_stop(&request.target, &verified) {
+                Ok(()) => {
+                    outcome.message.push_str("\n磁盘已确认脱机。");
+                    model::StopOffline::Verified
+                }
+                Err(reason) => {
+                    outcome
+                        .message
+                        .push_str(&format!("\n未能确认磁盘脱机：{reason}"));
+                    model::StopOffline::Failed { reason }
+                }
+            });
         }
     }
     *RUNNING_BATCH
@@ -593,7 +601,11 @@ pub(crate) fn execute(
             Err(error) => Err(error.clone()),
         },
     );
-    result
+    result.map(|batch| model::Execution {
+        batch,
+        merge_folder,
+        stop_offline,
+    })
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
@@ -809,17 +821,19 @@ fn stage_merge(
     {
         return Err("合并要求两个已确认的独立卷。".into());
     }
-    let lock = |selection, resolved| {
+    let lock = |selection, resolved, role: &str| {
         check_cancel(cancel)?;
-        let locks = data_windows::lock(&resolved)?;
-        let resolved = data_windows::resolve_locked(&selection, false, &resolved, &locks)?;
+        let locks = data_windows::lock(&resolved)
+            .map_err(|error| format!("{role}的卷锁获取失败。{error}"))?;
+        let resolved = data_windows::resolve_locked(&selection, false, &resolved, &locks)
+            .map_err(|error| format!("{role}的卷锁身份核对失败。{error}"))?;
         Ok::<_, String>(LockedMergeVolume {
             selection,
             resolved,
             locks,
         })
     };
-    let absorb = lock(absorb_selection, absorb_resolved)?;
+    let absorb = lock(absorb_selection, absorb_resolved, "被吸收卷")?;
     let verify_layout = || {
         let mut disk = data_windows::device(&absorb.resolved, false)?;
         current.archive.matches(&mut disk, || check_cancel(cancel))
@@ -839,10 +853,18 @@ fn stage_merge(
         &mut source_reader,
         cancel,
     )?;
-    // Open new readers after the copy and target lock so reads cannot be served
-    // from the older read cache. The initial source lock remains held.
+    // Release the physical-drive reader used during copying before asking
+    // Windows for exclusive access to the other volume on the same disk.
+    drop(source_reader);
+    // Read using fresh handles after obtaining the destination lock. The source
+    // volume lock remains held from cataloguing through verified removal.
     let keep = (|| {
-        let keep = lock(keep_selection, keep_resolved)?;
+        check_cancel(cancel)?;
+        // Windows can still deny FSCTL_LOCK_VOLUME immediately after the NTFS
+        // copy closes its file handles. Give that cleanup a short grace period
+        // before the single destination lock attempt.
+        std::thread::sleep(MERGE_COPY_CLOSE_GRACE);
+        let keep = lock(keep_selection, keep_resolved, "保留卷")?;
         absorb.revalidate()?;
         verify_layout()?;
         let mut source_reader = data_windows::reader(&absorb.resolved)?;

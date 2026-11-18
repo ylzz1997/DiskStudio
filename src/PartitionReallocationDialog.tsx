@@ -4,8 +4,12 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { Dialog, FormError, Hint } from "./components";
 import { defaultFormatOptions, formatClusters } from "./formatOptions";
 import { PartitionBatchProgress } from "./PartitionBatchProgress";
-import { errorText, runPartitionOperation } from "./partitionOutcome";
-import type { PartitionOutcome } from "./partitionOutcome";
+import {
+  batchResultLines,
+  errorText,
+  runPartitionOperation,
+} from "./partitionOutcome";
+import type { BatchExecution, PartitionOutcome } from "./partitionOutcome";
 import { advanceQuickProgress } from "./quickProgress";
 import type { QuickProgress } from "./quickProgress";
 import type { QuickEntry } from "./quickPartition";
@@ -34,6 +38,11 @@ type Preview = PartitionPlan & {
   steps: Step[];
   journals: string[];
   mergeFolder: string | null;
+};
+type Execution = BatchExecution & {
+  mergeFolder: string | null;
+  stopOffline:
+    { state: "verified" } | { state: "failed"; reason: string } | null;
 };
 
 export function reallocationCandidate(
@@ -156,6 +165,11 @@ export function PartitionReallocationDialog({
   const { t, catalogText } = useLocale();
   const split = mode === "split";
   const merge = mode === "merge";
+  const title = merge
+    ? t("合并分区")
+    : split
+      ? t("拆分分区")
+      : t("重新分配空间");
   const neighbours = merge ? mergeCandidates(disk, partition, target) : [];
   const [absorbNumber, setAbsorbNumber] = useState(neighbours[0]?.number ?? -1);
   const absorbed = neighbours.find((other) => other.number === absorbNumber);
@@ -331,7 +345,11 @@ export function PartitionReallocationDialog({
     onBusy(true);
     try {
       await runPartitionOperation(
-        submitted,
+        {
+          ...submitted,
+          title,
+          targetName: `${diskTitle(disk, t)} · ${catalogText(disk.hardware?.model ?? "未提供型号")}`,
+        },
         async (token) => {
           const progress = new Channel<QuickProgress>();
           progress.onmessage = (event) =>
@@ -343,10 +361,36 @@ export function PartitionReallocationDialog({
                 },
             );
           try {
-            return await invoke("partition_reallocation_execute", {
-              token,
-              progress,
-            });
+            const result = await invoke<Execution>(
+              "partition_reallocation_execute",
+              {
+                token,
+                progress,
+              },
+            );
+            const lines = batchResultLines(
+              result,
+              submitted.steps.map((step) => stepLabel(step, t)),
+              t,
+              catalogText,
+            );
+            if (result.mergeFolder) {
+              lines.push(
+                t("已合并的文件位于保留卷根目录下的 {folder}。", {
+                  folder: result.mergeFolder,
+                }),
+              );
+            }
+            if (result.stopOffline?.state === "verified")
+              lines.push(t("磁盘已确认脱机。"));
+            if (result.stopOffline?.state === "failed") {
+              lines.push(
+                t("未能确认磁盘脱机。{reason}", {
+                  reason: catalogText(result.stopOffline.reason),
+                }),
+              );
+            }
+            return { verified: result.verified, message: lines.join("\n") };
           } finally {
             progress.onmessage = () => {};
           }
@@ -383,7 +427,7 @@ export function PartitionReallocationDialog({
   return (
     <Dialog
       wide
-      title={merge ? t("合并分区") : split ? t("拆分分区") : t("重新分配空间")}
+      title={title}
       subtitle={[
         diskTitle(disk, t),
         disk.hardware?.model,

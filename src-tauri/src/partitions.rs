@@ -205,6 +205,9 @@ pub struct Outcome {
     pub verified: bool,
 }
 
+#[cfg(any(test, windows))]
+#[path = "partition_merge.rs"]
+pub(crate) mod merge;
 #[cfg(windows)]
 #[path = "windows_storage.rs"]
 pub(crate) mod platform;
@@ -215,9 +218,6 @@ pub(crate) mod policy;
 pub mod quick;
 #[path = "partition_reallocation.rs"]
 pub(crate) mod reallocation;
-#[cfg(any(test, windows))]
-#[path = "partition_merge.rs"]
-pub(crate) mod merge;
 
 pub fn status() -> Status {
     #[cfg(windows)]

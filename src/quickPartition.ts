@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { QuickProgress } from "./quickProgress";
+import type { BatchExecution } from "./partitionOutcome";
 import { native } from "./backend";
 import { MiB } from "./types";
 import type {
@@ -61,7 +62,7 @@ export async function prepareQuickPartition(
 export async function executeQuickPartition(
   token: string,
   onProgress: (event: QuickProgress) => void,
-): Promise<{ message: string; verified: boolean }> {
+): Promise<BatchExecution> {
   if (!native) throw new Error("浏览器不执行磁盘操作。");
   const progress = new Channel<QuickProgress>();
   progress.onmessage = onProgress;

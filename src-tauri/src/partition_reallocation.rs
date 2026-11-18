@@ -27,6 +27,22 @@ pub(crate) struct Preview {
     pub merge_folder: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub(crate) enum StopOffline {
+    Verified,
+    Failed { reason: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Execution {
+    #[serde(flatten)]
+    pub batch: quick::Execution,
+    pub merge_folder: Option<String>,
+    pub stop_offline: Option<StopOffline>,
+}
+
 pub(crate) fn prepare(request: Request) -> Result<Option<Preview>, String> {
     #[cfg(windows)]
     {
@@ -42,7 +58,7 @@ pub(crate) fn prepare(request: Request) -> Result<Option<Preview>, String> {
 pub(crate) fn execute(
     token: String,
     progress: impl FnMut(quick::Progress),
-) -> Result<super::Outcome, String> {
+) -> Result<Execution, String> {
     #[cfg(windows)]
     {
         super::platform::reallocation::execute(&token, progress)

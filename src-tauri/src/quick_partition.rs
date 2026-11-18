@@ -247,13 +247,23 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
     }
 }
 #[allow(dead_code)] // The guarded guest driver also exercises this no-observer API.
-pub fn execute(token: String) -> Result<super::Outcome, String> {
+pub fn execute(token: String) -> Result<Execution, String> {
     execute_with_progress(token, |_| {})
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Execution {
+    pub message: String,
+    pub verified: bool,
+    pub completed: usize,
+    pub failure: Option<String>,
+}
+
 pub fn execute_with_progress(
     token: String,
     progress: impl FnMut(Progress),
-) -> Result<super::Outcome, String> {
+) -> Result<Execution, String> {
     #[cfg(windows)]
     {
         super::platform::quick::execute(token, progress)

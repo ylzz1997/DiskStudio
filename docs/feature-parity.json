@@ -1,12 +1,13 @@
 {
-  "reviewedAt": "2026-11-16",
+  "reviewedAt": "2026-11-19",
   "target": "补齐 DiskGenius 的用户功能；不是任选一组。逐项实现与验收，不发布空入口。",
   "sources": [
     "https://www.diskgenius.cn/help/",
     "https://www.diskgenius.cn/introduce.php",
     "https://www.diskgenius.com/editions.php",
     "https://www.diskgenius.com/manual/format-partition.php",
-    "https://www.diskgenius.com/manual/verify-or-repair-bad-sectors.php"
+    "https://www.diskgenius.com/manual/verify-or-repair-bad-sectors.php",
+    "https://www.diskgenius.com/manual/copy-sectors.php"
   ],
   "rules": [
     "一份正式程序；宿主仅查看 UI 和固定 WMI SELECT 元数据。",
@@ -84,6 +85,7 @@
         "smart",
         "surface-scan",
         "sector-view-edit",
+        "sector-copy",
         "wipe",
         "free-space-wipe",
         "trim",
@@ -220,13 +222,17 @@
     {
       "id": "partition-split-merge",
       "status": "in-progress",
-      "detail": "已实现拆分、相邻及非相邻未分配空间分配、从供给卷释放空间和相邻 NTFS 分区合并。拆分先缩小原卷再创建尾部分区，可指定新卷格式。非相邻空闲空间从紧邻空闲的一侧逐项移动，再扩大目标。各操作接通一次确认、逐步执行与复核、停止及桌面菜单。步骤按 GPT GUID 和精确字节范围识别，核对卷关联、主备 GPT、原生布局、分页保护和非目标字段。搬移在另一物理盘保存独立断点，完整回读后临时联机以完成后续步骤，批次结束确认脱机。合并把被吸收卷迁入保留卷根目录下的新目录，恢复文件和目录的时间、属性与安全描述符，并重新读取两个锁定的卷。只有确认源内容未变、目标目录仍匹配其名称和记录号、目录清单及各数据流 SHA-256 相符后，才持锁提交 Windows 删除分区方法。删除后核对 GPT 与保留卷绑定，再按计划移动或扩容。无法安全还原的名称、权限或元数据会中止合并，残留副本留在新目录。46 项定向 Rust 测试、5 项定向前端测试、Windows 应用与来宾驱动编译和前端类型检查通过。首轮正式构建通过 711 项集中检查并核对来宾二进制。4Kn 来宾 A/9 并入 A/8 的原生预览及取消通过。实际执行被源卷 TxF 日志识别拦截，独立诊断确认目标目录未创建、两盘 GPT 和源样本完整；修正 TxF 卷根属性及安全描述符流后，隔离来宾通过完整源清单和样本迁移。Windows 在还原所有者时返回错误 1307，独立读回通过两盘 GPT、源文件与 DACL、暂存样本和硬链接。所有者修正版 2eab3b6f… 通过 719 项集中检查，同一正式程序在 4Kn 来宾用全新的 A/10 与 A/11 夹具通过向右合并。A/11 移除，A/10 扩至 384 MiB，独立读回核对四份字节样本、命名流、硬链接、所有者与 DACL、写入时间及两盘 GPT。左侧合并、故障注入以及拆分和空间分配的原生验收仍待完成。",
+      "detail": "已实现拆分、相邻及非相邻未分配空间分配、从供给卷释放空间和相邻 NTFS 分区合并。拆分先缩小原卷再创建尾部分区，可指定新卷格式。非相邻空闲空间从紧邻空闲的一侧逐项移动，再扩大目标。各操作接通一次确认、逐步执行与复核、停止及桌面菜单。步骤按 GPT GUID 和精确字节范围识别，核对卷关联、主备 GPT、原生布局、分页保护和非目标字段。搬移在另一物理盘保存独立断点，完整回读后临时联机以完成后续步骤，批次结束确认脱机。合并把被吸收卷迁入保留卷根目录下的新目录，恢复文件和目录的时间、属性与安全描述符，并重新读取两个锁定的卷。只有确认源内容未变、目标目录仍匹配其名称和记录号、目录清单及各数据流 SHA-256 相符后，才持锁提交 Windows 删除分区方法。删除后核对 GPT 与保留卷绑定，再按计划移动或扩容。无法安全还原的名称、权限或元数据会中止合并，残留副本留在新目录。46 项定向 Rust 测试、5 项定向前端测试、Windows 应用与来宾驱动编译和前端类型检查通过。首轮正式构建通过 711 项集中检查并核对来宾二进制。4Kn 来宾 A/9 并入 A/8 的原生预览及取消通过。实际执行被源卷 TxF 日志识别拦截，独立诊断确认目标目录未创建、两盘 GPT 和源样本完整；修正 TxF 卷根属性及安全描述符流后，隔离来宾通过完整源清单和样本迁移。Windows 在还原所有者时返回错误 1307，独立读回通过两盘 GPT、源文件与 DACL、暂存样本和硬链接。所有者修正版 2eab3b6f… 通过 719 项集中检查，同一正式程序在 4Kn 来宾用全新的 A/10 与 A/11 夹具通过向右合并。A/11 移除，A/10 扩至 384 MiB，独立读回核对四份字节样本、命名流、硬链接、所有者与 DACL、写入时间及两盘 GPT。Alpha 正式程序 131b51ab… 在隔离 4Kn 来宾通过 A/11 拆分（384→320 MiB，尾部新建 64 MiB NTFS）和相邻空间分配（A/18 从 128 扩至 160 MiB）。两项操作中 B 盘写入计数未增加。随后通过跨分区空间分配，A/13 起点由 3200 移至 3264 MiB，A/12 扩至 192 MiB，A 最终脱机，断点存于 B。从供给卷转移 64 MiB 通过，A/14 缩至 320 MiB，A/15 起点由 4480 移至 4416 MiB 后扩至 192 MiB，A 最终脱机，断点存于 B。四个阶段均独立回读校验全部八份样本、两盘 GPT 和来宾系统盘布局。A/16 并入 A/17 的向左合并在复制后遇到保留卷独占锁错误 5，后续步骤未提交。独立只读诊断确认 A 的布局仍与转移完成时相符，B GPT、来宾系统盘布局、八份原始样本及暂存副本均通过核对，诊断期间 A/B 写入计数未增加。首轮新增两对向左合并夹具时来宾意外重启，复核第二块卷的干净 NTFS、主备引导和原始 GPT 后，仅继续未执行步骤。受控占用下 A/20 并入 A/21 复制后因保留卷锁返回错误 5，验证原分区、样本与暂存副本均保留。无测试占用句柄的 A/22 并入 A/23 也在同处停止。独立读回六份原始样本，两次暂存的被吸收卷样本均逐字节相符，两盘 GPT 和来宾 OS 布局通过；后验 A/B 无新增写入。工作树已缩短复制阶段物理盘读句柄的生命周期，并标明失败的卷角色，Windows 编译检查通过。修订版 71f10fa9… 使用同一桌面程序和只读光盘在 4Kn 来宾完成占用场景的安全停止验证。A/26 并入 A/27 在无测试占用句柄时仍遇到保留卷锁错误 5。独立读回核对两盘 GPT、原始样本、两份暂存副本和客体系统盘布局。独立来宾诊断显示两个目标卷均可单独锁定，保留卷也可与源卷同时锁定。另用新夹具复现复制完成后立即锁定收到错误 5，在 251 毫秒时取得锁并回读校验。正式修复在关闭复制句柄后等待 500 毫秒，再尝试一次独占锁。9a616414… 通过集中合成检查与桌面构建，本地、留档和来宾载荷散列一致。4Kn 原生占用用例 A/30 并入 A/31 安全停止，独立核对原始布局、样本和暂存副本。无占用用例 A/32 并入 A/33 通过全部四步，保留卷起点 8832→8704 MiB，容量 256→384 MiB，A 最终脱机。独立回读确认已吸收分区移除、两盘 GPT、来宾系统盘布局和新旧样本及暂存副本均符合预期，回读期间 A/B 无新增写入。",
       "evidence": [
         ".vm/partition-reallocation-planner-status.json",
         ".vm/partition-reallocation-execution-status.json",
         ".vm/partition-merge-catalogue-status.json",
         ".vm/partition-merge-output-status.json",
-        ".vm/partition-merge-batch-status.json"
+        ".vm/partition-merge-batch-status.json",
+        ".vm/partition-reallocation-4kn-status.json",
+        ".vm/partition-reallocation-4kn-fresh-left-status.json",
+        ".vm/partition-reallocation-revised-status.json",
+        ".vm/partition-reallocation-grace-status.json"
       ]
     },
     {
@@ -448,7 +454,12 @@
     {
       "id": "sector-view-edit",
       "status": "in-progress",
-      "detail": "已实现单扇区查看、十进制/十六进制位置、ASCII、大小端整数解释、内存比较基准、另盘导出并回读 SHA-256；支持 Hex ? 通配符、UTF 文本 ASCII 大小写选项、1–16 项 Any/All 条件及相对偏移、跨块重叠匹配、取消和 1024 个匹配上限。多条件支持正向或实际从尾部反向读取，组合跨度限 64 KiB；修改条件或方向清除旧结果。打开面板不读设备。字节暂存、差异预览、单次确认写回已实现，写回限非系统 GPT Windows 数据分区，保持整盘脱机；f920 构建在 VM B/9 末扇区完成 00→2A 单字节写回、SHA-256 校验和独立脱机读回，A 写入计数不变，见 .vm/sector-edit-acceptance-status.json。查看、通配符、多条件 Any/All 验收分别见 .vm/sector-view-status.json、.vm/sector-search-options-status.json、.vm/sector-multi-status.json；历史 f920 构建的 All/Any 均在 VM B/9 完成全范围扫描，分别返回 2/7 项，各读取 512 MiB，扫描期间 A/B 写入计数不变。8eb55cdc 构建通过反向 All/Any、正向 All 回归、整盘反向取消及末尾 GPT 结果定位，A/B 写入计数不变，见 .vm/sector-reverse-status.json；363 项检查通过。文本通配符、选区复制导出和其他范围写回尚未实现；4Kn、掉电及介质故障尚未实际验收。"
+      "detail": "已实现单扇区查看、十进制/十六进制位置、ASCII、大小端整数解释、内存比较基准、另盘导出并回读 SHA-256；支持 Hex ? 通配符、UTF 文本 ASCII 大小写选项、1–16 项 Any/All 条件及相对偏移、跨块重叠匹配、取消和 1024 个匹配上限。多条件支持正向或实际从尾部反向读取，组合跨度限 64 KiB；修改条件或方向清除旧结果。打开面板不读设备。字节暂存、差异预览、单次确认写回已实现，写回限非系统 GPT Windows 数据分区，保持整盘脱机；f920 构建在 VM B/9 末扇区完成 00→2A 单字节写回、SHA-256 校验和独立脱机读回，A 写入计数不变，见 .vm/sector-edit-acceptance-status.json。查看、通配符、多条件 Any/All 验收分别见 .vm/sector-view-status.json、.vm/sector-search-options-status.json、.vm/sector-multi-status.json；历史 f920 构建的 All/Any 均在 VM B/9 完成全范围扫描，分别返回 2/7 项，各读取 512 MiB，扫描期间 A/B 写入计数不变。8eb55cdc 构建通过反向 All/Any、正向 All 回归、整盘反向取消及末尾 GPT 结果定位，A/B 写入计数不变，见 .vm/sector-reverse-status.json；363 项检查通过。文本通配符和其他范围写回尚未实现；4Kn、掉电及介质故障尚未实际验收。"
+    },
+    {
+      "id": "sector-copy",
+      "status": "partial",
+      "detail": "整盘或分区内指定起始相对 LBA 和扇区数量，显示绝对 LBA 与精确字节数，由原生对话框选择另一物理磁盘上的新 .bin 文件。复制前后复核来源、布局和卷锁，分段复制，完整回读 SHA-256，核对后无覆盖发布。读取失败或取消时保留已创建的 .partial，现有单扇区导出复用同一发布保护。1159 项集中检查和桌面构建通过，4badab69… 本地、留档和光盘载荷散列一致。同一正式程序在 4Kn 隔离 VM 中从脱机 A 导出整盘 LBA 0–1、A/32 的前三扇区及当前单扇区至 B，独立逐字节与长度比对通过，记录各文件 SHA-256。保存框取消及同盘拒绝通过，未生成拒绝路径的最终文件或 .partial。A 保持脱机且写入计数未增加，A/B GPT 和客体 OS 布局一致。英文界面的同盘拒绝提示仍沿用中文恢复/备份文案。在线来源锁定、512 字节原生路径、大范围及运行中取消待验收，见 .vm/sector-copy-batch-status.json。目标设备写入、坏扇区跳过或填充及断点续作仍待实现。"
     },
     {
       "id": "wipe",

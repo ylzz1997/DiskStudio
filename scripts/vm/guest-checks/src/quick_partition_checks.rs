@@ -28,7 +28,7 @@ struct Native {
     baseline: Baseline,
     entries: Vec<Entry>,
 }
-fn parts() -> Result<Vec<partitions::policy::Partition>, String> {
+pub(super) fn parts() -> Result<Vec<partitions::policy::Partition>, String> {
     inventory()?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;

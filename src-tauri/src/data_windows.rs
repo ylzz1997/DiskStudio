@@ -36,6 +36,13 @@ pub struct Resolved {
     pub(crate) data_lock_proof: Option<DataLockProof>,
 }
 impl Resolved {
+    pub(crate) fn same_data_binding(&self, other: &Self) -> bool {
+        self.data_lock_proof
+            .as_ref()
+            .zip(other.data_lock_proof.as_ref())
+            .is_some_and(|(left, right)| left.fingerprint == right.fingerprint)
+    }
+
     pub(crate) fn verify_partition_snapshot(
         &self,
         disk: &Disk,

@@ -4,6 +4,14 @@
 
 所有 QEMU、下载、系统盘、测试盘、检查点、工具光盘、测试临时文件和日志集中在项目 `.vm/`。脚本不安装系统服务、不修改 PATH、不提权、不自动启用 Windows 功能。
 
+## 扇区范围复制
+
+`build-sector-copy.ps1` 绑定已完成的桌面构建，只编译 4Kn 客体核对工具。将 `Sector-Copy-4Kn-Baseline.exe`、`Sector-Copy-4Kn-Verify.exe` 和 `Sector-Copy-4Kn-Verify-Report.exe` 与同一份 `DiskStudio.exe` 放入只读工具光盘。验证 payload SHA-256，运行 `node scripts/vm/lab.mjs preflight`，再在 DiskStudio-Test 中启动基线工具。
+
+基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
+
+如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。
+
 ## FAT 与 exFAT 保留数据缩放
 
 `build-fat-resize.ps1` 只编译客体驱动，绑定已完成桌面程序的 SHA-256。只在通过身份、容量和隔离预检的 DiskStudio-Test 内运行 `Fat-Resize-Check.exe`。它用跨构建的单次标记保护八次操作，匹配 A 的四个已有测试卷并各建立独立文件，不删除或格式化分区。每次缩放后核对脱机状态、精确 GPT 几何、独立读取的 65,553 字节文件及 SHA-256。在后续扩容之前单独联机并确认 Windows 能识别缩容的卷。失败停止且不重试，结束时 A 保持脱机，B 只用于核对。
@@ -158,11 +166,54 @@ node scripts/vm/lab.mjs preflight
 
 构建输出 `target/release/diskstudio.exe`，测试留档副本为 `.vm/artifacts/DiskStudio.exe`。工具盘中的 `DiskStudio.exe` 是同一文件，`build-info.json` 记录生产构建 SHA-256。可在客体从光盘直接运行，或复制到桌面。历史 `DiskStudio-Host.exe` / `DiskStudio-VM.exe` 留在 `.vm/artifacts/` 供追溯，不再由构建脚本生成或使用。
 
-`make-tools-iso.ps1` 使用 IMAPI 文件系统镜像 API 创建普通 ISO 文件，不挂载、不刻录，不访问宿主物理光驱。每次 `-Live` 生成独立 ISO，旧文件仍留在 `.vm/media/`。热切换核对 QMP 身份、三块固定 QCOW2 后端、唯一只读光驱、新文件路径/类型与 SHA-256，不增加共享目录或网络。
+`make-tools-iso.ps1` 使用 IMAPI 文件系统镜像 API 创建普通 ISO 文件，不挂载、不刻录，不访问宿主物理光驱。每次 `-Live` 生成独立 ISO，旧文件仍留在 `.vm/media/`。为单批验收制盘时，可追加 `-GuestTools` 并传入来自 `.vm/payload/` 的驱动文件名数组，只包含正式程序和选中的驱动；无需移动或删除旧驱动。热切换核对 QMP 身份、三块固定 QCOW2 后端、唯一只读光驱、新文件路径/类型与 SHA-256，不增加共享目录或网络。
 
 WebView2 安装器仅供客体需要时使用；当前客体已有可用运行时，宿主无需安装。
 
 ## 功能验收
+
+### 4Kn 拆分、空间重新分配与左侧合并
+
+`build-partition-reallocation.ps1` 绑定已完成的正式程序 SHA-256，只在宿主编译驱动。使用 `start --4kn`、`preflight` 和只读工具光盘。来宾入口再次核对 UUID、固定三盘、命名空间 1 的完整 A/B 序列号以及两种扇区大小。首次 `Partition-Reallocation-4Kn-Prepare.exe` 需要 A/B 已联机可写，且 A 的 2048–5504 MiB 全部空闲。它只在该范围创建八个带 131,089 字节样本的 NTFS 分区，核对 B 的原有断点卷 `DS4KMOVEJRN`，保存 GPT 基线。已有一次性标记时停止，不清理、不覆盖或重跑。
+
+在实际桌面程序中按下表依次预览和确认。每步通过后打开对应的来宾检查器。预览与执行只能选已经核对序列号的 A；搬移时原生文件夹对话框选择 B 的 `DS4KMOVEJRN`。从跨分区分配开始，成功后程序应让 A 保持脱机。先完成脱机只读检查，再单独确认联机以准备下一项。失败时检查保存结果和真实布局。
+
+| 来宾检查器后缀 | 原生操作 | 预期范围 |
+| --- | --- | --- |
+| `Split` | 拆分 `DSREALLOCSPLIT`，尾部 64 MiB 采用 NTFS、默认簇和 `NEWVOLUME` | 原卷起点 2048 MiB、缩至 320 MiB；新卷 2368 MiB、64 MiB |
+| `Adjacent` | 给 `DSREALLOCADJ` 分配右侧 2688 MiB 开始的 32 MiB 空闲空间 | 保持起点 2560 MiB，增至 160 MiB |
+| `Across` | 给 `DSREALLOCGROW` 分配 3328 MiB 开始的 64 MiB 空闲空间 | 中间卷 `DSREALLOCMOVE` 起点 3200→3264 MiB；接收卷增至 192 MiB |
+| `Transfer` | 从 `DSREALLOCDONOR` 向 `DSREALLOCRECV` 转移 64 MiB | 供给卷缩至 320 MiB；接收卷移至 4416 MiB，再增至 192 MiB |
+| `Merge-Left` | 保留 `DSREALLOCKEEP`，吸收左侧 `DSREALLOCLEFT` | 左卷删除，保留卷移至 5120 MiB、增至 384 MiB，吸收样本位于新合并目录 |
+
+检查器通过主备 GPT 和 Windows 原生布局核对 A 的保存基线与预期变化，逐字节验证所有样本及 SHA-256，确认 B 的 GPT 和客体 OS 的布局元数据不变。检查器只读取测试盘；同名 `-Report` 只显示已有日志。测试夹具接通和运行结果单独记录。
+
+如果 QEMU 窗口未接收宿主键盘输入，先在来宾界面聚焦分配容量栏，再运行 `node scripts/vm/lab.mjs reallocation-capacity-keys 32` 或传入 `64`。命令复核固定 4Kn 来宾与完整设备清单，只向来宾输入对应数字。提交前仍须在原生预览核对磁盘、分区和每项步骤。
+
+向左合并若在暂存后因保留卷锁失败而停止，使用 `build-partition-reallocation.ps1 -InspectMergeLockFailure` 生成单独的只读检查器及 `-Report`。检查器要求 A/B 联机，按 `Transfer` 成功后的布局核对分区与全部原始样本，另外在保留卷新目录中回读被吸收卷的样本。此检查既不复提合并，也不修改卷状态。
+
+`build-partition-reallocation.ps1 -FreshLeftMerge` 生成 `Partition-Reallocation-4Kn-Left-*` 批次，用于已经完成 `Transfer` 且历史左合并已核对停留在原布局的 4Kn 来宾。`Left-Prepare` 验证历史 GPT 基线和空闲范围，只在 A 的 5632–6528 MiB 内一次性创建两对普通 NTFS 分区与四份独立样本。验证 B 的断点卷后，按以下顺序用同一桌面程序测试。
+
+1. 启动 `Left-Hold` 并保留提示窗口。这会持有 `DSBUSYKEEP` 上一个已核对的只读文件句柄。在桌面程序中保留 `DSBUSYKEEP`、吸收左侧 `DSBUSYFROM`，断点选择已核对的 B 卷。记录保留卷锁失败结果后，关闭持有窗口。`Left-Busy` 独立核对未变化的 GPT、原始样本和暂存副本。
+2. `Left-Busy` 通过后，在另一对分区上保留 `DSLEFTKEEP`、吸收左侧 `DSLEFTFROM`，仍用 B 保存断点。`Left-Success` 核对 A 保持脱机、源记录移除、保留卷起点由 6272 移至 6144 MiB 并扩至 384 MiB、两阶段的合并目录及原样本和非目标 GPT。
+
+对应的 `-Report` 仅读保存结果。旧 A/16 与 A/17 和新用例的失败状态留作核查，每次合并在桌面程序中只提交一次。
+
+首轮 `Left-Prepare` 在来宾意外重启时停在第二块卷的格式化，留下第一块完整夹具。`build-partition-reallocation.ps1 -ResumeFreshLeft` 只生成针对该中断的检查和续验入口。`Left-Interrupted` 绑定原桌面与原驱动散列、完整日志序列、历史 GPT、两块已创建范围和剩余空闲范围，并读取第二块卷的 NTFS 主备引导、干净状态和样本状态。通过后 `Left-Resume` 复核相同证据，仅在样本不存在时首次创建样本，并准备未曾提交的两块分区。使用原来的 `Left-Hold`、`Left-Busy`、`Left-Success` 完成后续验收。
+
+占用用例通过了安全停止检查。没有测试占用句柄的 A/22 与 A/23 也在复制后遇到保留卷锁失败。`build-partition-reallocation.ps1 -InspectCleanStop` 生成单独的只读 `Left-Clean-Stopped` 及其报告入口，核对两盘 GPT、来宾 OS 布局、两对新卷的原始样本和两份暂存副本。记录见 `.vm/partition-reallocation-4kn-fresh-left-status.json`。
+
+新正式构建使用 `build-partition-reallocation.ps1 -RevisedLeftMerge`。`Left-Revised-Prepare` 先核对 Alpha 的 GPT 基线、原始样本及两份暂存副本，然后仅在 A 的 6656–7552 MiB 新建四个夹具。依次用 `Left-Revised-Hold` 验证 `DSRVBUSYFROM` 并入 `DSRVBUSYKEEP` 的占用路径，再用 `Left-Revised-Busy` 独立核对。干净路径在 `DSRVLEFTFROM` 与 `DSRVLEFTKEEP` 上执行，同样将断点保存在 B。成功后 `Left-Revised-Success` 核对保留卷移至 7168 MiB、扩至 384 MiB 且 A 脱机。若复制后在保留卷锁处停止，则运行 `Left-Revised-Clean-Stopped` 核对保留的两卷和暂存副本。各检查均比较非目标 GPT 与 Alpha 样本。
+
+修订版 `71f10fa9…` 的占用用例通过安全停止与独立回读。无测试占用句柄的 A/26 并入 A/27 仍在保留卷锁处遇到 Windows 错误 5。两次测试均保留原分区、样本与暂存副本，B 的写入计数保持 224，独立回读期间 A/B 没有新增写入。见 `.vm/partition-reallocation-revised-status.json`。
+
+`build-partition-reallocation.ps1 -ProbeRevisedLeftLock` 只生成独立卷锁探测和报告入口，复用同一桌面散列。关闭来宾 DiskStudio 后运行 `Left-Revised-Lock-Probe`。它先核对隔离配置、已保存的 GPT 基线及暂存样本，再短暂尝试锁定 A 上的固定目标卷。它分别探测原占用目标单独锁定、无占用目标单独锁定和持有源卷锁时锁定无占用目标，最后复核三盘布局。探测不提交合并。
+
+三个独立锁探测均通过。`-ProbeLockAfterCopy` 在 A 的 7680–8064 MiB 空闲区新建两卷，只执行正式 NTFS 复制和卷锁探测。复制关闭文件句柄之后，立即锁定收到 Windows 错误 5，约 251 毫秒时锁定并回读副本成功。随后独立核对 GPT 和样本。
+
+`-LockGrace` 绑定加入 500 毫秒等待的正式程序。在 A 的 8192–9088 MiB 空闲区准备两对新夹具。按 `Grace-Prepare`、`Grace-Hold`、`Grace-Busy` 的顺序验证 `DSGBUSYFROM` 并入 `DSGBUSYKEEP` 时的占用路径。正常路径保留 `DSGLEFTKEEP`，吸收 `DSGLEFTFROM`，断点仍在 B。`Grace-Success` 核对保留卷移至 8704 MiB、增至 384 MiB、A 脱机、样本字节以及非目标 GPT。失败时选择符合实际结果的只读检查器。
+
+正式程序 `9a616414…` 的两种路径均通过 4Kn 原生验收。A/30 并入 A/31 在占用期间安全停止。A/32 并入 A/33 完成复制、核对、删除、移动、扩容和最终脱机。独立回读核对两盘 GPT、来宾 OS 布局、原样本及暂存副本，回读期间 A/B 无新增写入。见 `.vm/partition-reallocation-grace-status.json`。
 
 ### 固定盘符与操作结果修复批次
 
