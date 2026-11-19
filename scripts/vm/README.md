@@ -58,6 +58,8 @@ RAID 镜像验收使用 Ubuntu 的 `seed-lvm-raid-matrix-4kn` 和 `lvm-raid-matr
 
 缺盘读取验收复用同一份 RAID VHDX。运行 `build-lvm.ps1 -RaidDegraded`，并在只读工具光盘选择 `Lvm-Degraded-4Kn-Prepare.exe` 和 `Lvm-Degraded-4Kn-Inspect.exe`。准备工具核对 A 上已存在的镜像，在 B 创建本次输出目录。原生界面先选 PV 1、PV 2 和 PV 4，验证默认状态下需要缺失成员的卷不可读。勾选允许缺盘读取后，将缺一个成员的 `r5` 和缺两个成员的 `r6` 的 `nested` 分别导出到 B。后验核对 Linux 摘要、缺盘清单标记、三个所选成员范围和分区布局。
 
+RAID10 far 和 offset 验收使用 Ubuntu 的 `seed-lvm-raid10-layouts-4kn` 和 `lvm-raid10-layouts-4kn` 阶段。LVM2 分配夹具的组件，Linux dm-raid 分别写入全组轮转的 far 和组内轮转的 offset。普通文件夹具的 LVM2 文本记录对应的布局和位图区域。用 `extract-lvm-fixtures.py` 提取普通文件后，运行 `node scripts/vm/build-lvm-image.mjs --raid10` 和 `build-lvm.ps1 -Raid10`，在只读工具光盘选择 `Lvm-Raid10-4Kn-Prepare.exe` 与 `Lvm-Raid10-4Kn-Inspect.exe`。在原生界面选齐四个成员，分别导出两个卷的 `nested` 目录。后验核对 Linux 文件摘要、四个来源范围、完整镜像及受保护布局。
+
 跨盘删除恢复验收使用 Ubuntu 的 `seed-lvm-cross-deleted-4kn` 和 `lvm-cross-deleted-4kn` 阶段生成两个普通物理卷文件。384 MiB 条带逻辑卷内的 Btrfs 只读快照保留了已从源子卷删除的 `nested/deleted.bin`。Linux 独立检查文件系统和数据校验，并以只读挂载确认删除文件、改名对照和现存对照。用 `extract-lvm-fixtures.py` 提取夹具后，运行 `build-lvm.ps1 -CrossDeleted`，在只读工具光盘选择 `Lvm-Cross-4Kn-Prepare.exe` 和 `Lvm-Cross-4Kn-Inspect.exe`。准备工具核对正式载荷，只在 A 的 13、13.5 GiB 和 B 的 13 GiB 处逐字节空白且未分配的范围创建分区。先选 A 与 B 的成员，扫描唯一删除候选并验证 B 不能作为输出。再选 A 的两个成员，将同一候选保留目录导出到 B。后验核对原始 SHA-256、历史目录、物理卷导出清单和受保护的布局。
 
 薄置备镜像验收使用 Ubuntu 的 `seed-lvm-thin-snapshots-4kn` 和 `lvm-thin-snapshots-4kn` 阶段。薄池的数据和元数据分别放在两个物理卷中。Linux 从 Ext4 原卷生成快照并改写原卷，再独立核对两个版本的文件与未分配空间。用 `extract-lvm-fixtures.py` 提取普通文件，运行 `node scripts/vm/build-lvm-image.mjs --thin`、`build-lvm.ps1 -Thin`。用 `make-tools-iso.ps1 -Live -LvmFixture` 选择 `Lvm-Thin-4Kn-Prepare.exe` 和 `Lvm-Thin-4Kn-Inspect.exe`，复用 A 上已有的夹具卷。从镜像浏览入口分别选择 `origin` 和 `point1`，将各自的 `nested` 文件夹导出到报告指定的 B 盘目录，再运行后验工具核对两个版本和受保护的分区布局。

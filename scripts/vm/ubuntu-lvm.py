@@ -239,7 +239,7 @@ def lvm_crc(data):
 
 
 def raid10_descriptors(images):
-    """Change only two text segment types in the inactive test PVs, preserving the MDA layout."""
+    """Bind the inactive test PVs to the layout and bitmap region used by dm-raid."""
     for image in images:
         with image.open("r+b") as stream:
             stream.seek(512)
@@ -260,8 +260,10 @@ def raid10_descriptors(images):
                 raise RuntimeError("Fixture metadata checksum differs")
             updated = original
             for name in FILES:
-                pattern = rb"(\n\s*" + name.encode() + rb"\s*\{[^}]*?type = )\"raid10(?:_near)?\""
-                updated, count = re.subn(pattern, rb'\g<1>"raid10_' + name.encode() + b'"', updated)
+                pattern = (rb"(\n\s*" + name.encode() + rb"\s*\{[^}]*?type = )\"raid10(?:_near)?\""
+                           rb"([^}]*?\bregion_size = )[0-9]+")
+                replacement = rb'\g<1>"raid10_' + name.encode() + rb'"\g<2>128'
+                updated, count = re.subn(pattern, replacement, updated)
                 if count != 1:
                     raise RuntimeError(f"Missing exact LVM2 descriptor for {name}")
             if offset + len(updated) > area_size:
@@ -280,7 +282,7 @@ def build_raid10(folder, devices, options):
     for name in FILES:
         run("lvcreate", *options, "--type", "raid10", "-i", "2", "-m", "1", "-I", "64", "-L", "48M", "-n", name, VG, *devices)
     report = json.loads(output("lvs", *options, "--all", "--segments", "--reportformat", "json", "--units", "b", "--nosuffix",
-                               "-o", "lv_name,lv_size,segtype,devices,regionsize", VG))["report"][0]["seg"]
+                               "-o", "lv_name,lv_size,segtype,devices", VG))["report"][0]["seg"]
     bases = {device: int(output("pvs", *options, "--noheadings", "--units", "b", "--nosuffix", "-o", "pe_start", device)) // 512
              for device in devices}
     tables = {}
@@ -294,17 +296,12 @@ def build_raid10(folder, devices, options):
                 if component["segtype"] != "linear" or size != (4 if kind == "rmeta" else 24) * MIB // 512:
                     raise RuntimeError("Unexpected LVM2 component layout")
                 rows.append((f"ds_{name}_{kind}_{role}", device, bases[device] + int(pe) * (4 * MIB // 512), size, kind))
-        volume, = [row for row in report if row["lv_name"] == name]
-        region = int(volume["regionsize"]) // 512
-        if region < 128 or region & (region - 1):
-            raise RuntimeError("Invalid LVM2 bitmap region")
-        tables[name] = rows, region
+        tables[name] = rows
     run("vgchange", *options, "-an", VG)
     for name, data in FILES.items():
         active = []
         try:
-            rows, region = tables[name]
-            for component, device, sector, size, kind in rows:
+            for component, device, sector, size, kind in tables[name]:
                 run("dmsetup", "create", component, "--table", f"0 {size} linear {device} {sector}")
                 active.append(component)
                 if kind == "rmeta":
@@ -316,7 +313,7 @@ def build_raid10(folder, devices, options):
             size = 48 * MIB // 512
             array = f"ds_layout_{name}"
             run("dmsetup", "create", array, "--table",
-                f"0 {size} raid raid10 {5 + bool(rotation)} 128 raid10_format {name} region_size {region}{rotation} 4 {members}")
+                f"0 {size} raid raid10 {5 + bool(rotation)} 128 raid10_format {name} region_size 128{rotation} 4 {members}")
             active.append(array)
             path = f"/dev/mapper/{array}"
             for _ in range(150):
