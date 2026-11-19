@@ -30,6 +30,8 @@ export function ImageBrowserPanel({
   onRead,
   lvmName,
   onLvm,
+  raidName,
+  onRaid,
 }: {
   info: ImageBrowseInfo | null;
   busy: boolean;
@@ -39,6 +41,8 @@ export function ImageBrowserPanel({
   onRead: (partition: number, mode: ImageBrowseMode) => void;
   lvmName?: string;
   onLvm: () => void;
+  raidName?: string;
+  onRaid: () => void;
 }) {
   const { t, language, catalogText } = useLocale();
   const [options, setOptions] = useState<ImageBrowseOptions>({
@@ -134,6 +138,12 @@ export function ImageBrowserPanel({
         {lvmName && <span>{lvmName}</span>}
         <button className="button" disabled={busy || !available} onClick={onLvm}>
           {t("浏览镜像中的 LVM2 逻辑卷")}
+        </button>
+      </div>
+      <div className="data-action-row">
+        {raidName && <span>{raidName}</span>}
+        <button className="button" disabled={busy || !available} onClick={onRaid}>
+          {t("虚拟 RAID")}
         </button>
       </div>
       {info && (

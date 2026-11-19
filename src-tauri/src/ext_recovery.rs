@@ -89,6 +89,12 @@ struct Geometry {
     metadata_csum: bool,
     checksum_seed: u32,
 }
+
+pub(crate) fn validate_existing<R: Read + Seek>(mut reader: R) -> Result<(), String> {
+    let length = reader.seek(SeekFrom::End(0)).map_err(err)?;
+    geometry(&mut Source { reader, length, cancel: Arc::new(AtomicBool::new(false)), reads: 0 }).map(|_| ())
+}
+
 fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> {
     let mut s = [0; 1024];
     source.read_at(1024, &mut s)?;

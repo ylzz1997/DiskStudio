@@ -534,8 +534,9 @@
     },
     {
       "id": "raid",
-      "status": "planned",
-      "detail": "虚拟 RAID 重组、参数验证与恢复"
+      "status": "in-progress",
+      "detail": "可显式选择 RAW/IMG 文件，按成员顺序、字节范围、扇区与条带参数只读重组 JBOD、RAID0/1/4、near RAID10、常见 RAID5 及 DDF RAID6。冗余布局按条带核对可用性；成员齐全的校验阵列抽查条带，成员顺序与布局需独立确认。支持 GPT/MBR 分区浏览或直接读取支持的文件系统，并跨盘导出与记录重组参数。Alpha 3 构建 4d589f8d… 通过 774 项集中检查和 449 项来宾工具测试。4Kn Windows 原生界面拒绝未对齐范围，成功组装三份 RAW 左对称 RAID5 成员。跨盘导出保留嵌套目录，独立核对文件与 Linux SHA-256、清单范围和顺序、三个源文件、两个测试盘 GPT 与来宾系统盘布局。完整阵列与分别缺任一成员的四组普通文件测试都符合完整逻辑 SHA-256。直接选择物理盘或分区、控制器专用布局和丢失分区搜索待实现。",
+      "evidence": [".vm/virtual-raid-batch-status.json"]
     },
     {
       "id": "lvm",

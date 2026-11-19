@@ -344,6 +344,31 @@ async fn data_image_lvm_scan(request: image_lvm_tasks::BrowseRequest) -> Result<
         .await
         .map_err(|e| e.to_string())?
 }
+use data_tasks::virtual_raid_tasks;
+#[tauri::command]
+fn data_virtual_raid_status() -> Option<virtual_raid_tasks::Status> {
+    virtual_raid_tasks::status()
+}
+#[tauri::command]
+async fn data_virtual_raid_select() -> Result<Option<image_files::Info>, String> {
+    tauri::async_runtime::spawn_blocking(virtual_raid_tasks::select).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_virtual_raid_open(request: virtual_raid_tasks::OpenRequest) -> Result<virtual_raid_tasks::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::open(request)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn data_virtual_raid_discard(id: String) -> Result<(), String> {
+    virtual_raid_tasks::discard(id)
+}
+#[tauri::command]
+fn data_virtual_raid_close(id: String) -> Result<(), String> {
+    virtual_raid_tasks::close(id)
+}
+#[tauri::command]
+async fn data_virtual_raid_scan(request: virtual_raid_tasks::ScanRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::scan(request)).await.map_err(|e| e.to_string())?
+}
 #[tauri::command]
 async fn image_source_select() -> Result<Option<image_files::Info>, String> {
     tauri::async_runtime::spawn_blocking(data_tasks::image_browse_tasks::sessions::select)
@@ -908,6 +933,12 @@ fn main() {
             data_image_lvm_open,
             data_image_lvm_close,
             data_image_lvm_scan,
+            data_virtual_raid_status,
+            data_virtual_raid_select,
+            data_virtual_raid_open,
+            data_virtual_raid_discard,
+            data_virtual_raid_close,
+            data_virtual_raid_scan,
             image_source_select,
             image_source_add,
             image_source_discard,

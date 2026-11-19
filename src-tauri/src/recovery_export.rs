@@ -95,6 +95,21 @@ pub struct PhysicalLvmMember {
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VirtualRaidSource {
+    pub config: disk_core::virtual_raid::Config,
+    pub members: Vec<VirtualRaidMember>,
+    pub partition: ImageSource,
+    pub checked_rows: usize,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualRaidMember {
+    pub file_name: Option<String>,
+    pub offset: String,
+    pub size: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub options: crate::export_metadata::Options,
     pub layout: Layout,
@@ -113,6 +128,8 @@ pub struct Plan {
     pub image_lvm_source: Option<ImageLvmSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub physical_lvm_source: Option<PhysicalLvmSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virtual_raid_source: Option<VirtualRaidSource>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub lvm_degraded_raid: bool,
 }
@@ -358,6 +375,7 @@ fn plan_with_directories(
         image_source: None,
         image_lvm_source: None,
         physical_lvm_source: None,
+        virtual_raid_source: None,
         lvm_degraded_raid: false,
     };
     let mut map = HashMap::from([(ROOT.to_string(), 0)]);
@@ -529,6 +547,8 @@ impl Plan {
             image_lvm_source: Option<&'a ImageLvmSource>,
             #[serde(skip_serializing_if = "Option::is_none")]
             physical_lvm_source: Option<&'a PhysicalLvmSource>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            virtual_raid_source: Option<&'a VirtualRaidSource>,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             lvm_degraded_raid: bool,
             completed: bool,
@@ -552,6 +572,7 @@ impl Plan {
             version: 3, options:self.options, completed, layout:self.layout, backup_source: self.backup_source.as_ref(), image_source: self.image_source.as_ref(),
             image_lvm_source: self.image_lvm_source.as_ref(),
             physical_lvm_source: self.physical_lvm_source.as_ref(),
+            virtual_raid_source: self.virtual_raid_source.as_ref(),
             lvm_degraded_raid: self.lvm_degraded_raid,
             saved_files: outcomes.iter().filter(|o| o.saved).count(),
             failed_files: outcomes.iter().filter(|o| !o.saved).count(),

@@ -12,6 +12,8 @@ pub(super) mod allocation;
 pub(super) mod lost;
 #[path = "lvm_checks.rs"]
 pub(super) mod lvm;
+#[path = "virtual_raid_checks.rs"]
+pub(super) mod virtual_raid;
 
 const CREATE_SIZE: u64 = 512 * MIB;
 const SHRUNK: u64 = 256 * MIB;

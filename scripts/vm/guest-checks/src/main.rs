@@ -611,6 +611,8 @@ fn main() {
                 | "Lvm-Cross-4Kn-Inspect"
                 | "Lvm-Raid10-4Kn-Prepare"
                 | "Lvm-Raid10-4Kn-Inspect"
+                | "Virtual-Raid-4Kn-Prepare"
+                | "Virtual-Raid-4Kn-Inspect"
                 | "Sector-Copy-4Kn-Baseline"
                 | "Sector-Copy-4Kn-Verify"
                 | "Sector-Copy-4Kn-Verify-Report"
@@ -721,6 +723,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Lvm-Cross-4Kn-Inspect") => btrfs_checks::lvm::cross::inspect(),
         Some("Lvm-Raid10-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID10),
         Some("Lvm-Raid10-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID10),
+        Some("Virtual-Raid-4Kn-Prepare") => btrfs_checks::virtual_raid::prepare(),
+        Some("Virtual-Raid-4Kn-Inspect") => btrfs_checks::virtual_raid::inspect(),
         Some("Sector-Copy-4Kn-Baseline") => sector_copy_checks::baseline(),
         Some("Sector-Copy-4Kn-Verify") => sector_copy_checks::verify(),
         Some("Sector-Copy-4Kn-Verify-Report") => {

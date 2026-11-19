@@ -34,6 +34,7 @@ fn plan(count: usize, workers: usize) -> Plan {
         image_source: None,
         image_lvm_source: None,
         physical_lvm_source: None,
+        virtual_raid_source: None,
         lvm_degraded_raid: false,
     }
 }

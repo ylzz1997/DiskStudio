@@ -28,13 +28,13 @@ mod platform {
         io::{Read, Seek, SeekFrom},
         os::windows::{
             fs::{MetadataExt, OpenOptionsExt},
-            io::AsRawHandle,
+            io::{AsRawHandle, FromRawHandle},
         },
         path::PathBuf,
         sync::{Arc, Mutex, OnceLock, Weak},
         time::UNIX_EPOCH,
     };
-    use windows_sys::Win32::Storage::FileSystem::*;
+    use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, Storage::FileSystem::*};
     struct Entry {
         info: FileInfo,
         file: File,
@@ -114,9 +114,21 @@ mod platform {
                 .map_err(|_| "镜像文件状态异常".to_string())?
                 .iter()
                 .map(|entry| {
-                    let file = entry.file.try_clone().map_err(|e| e.to_string())?;
-                    crate::data_io::Region::new(file, 0, entry.info.size)
-                        .map_err(|e| e.to_string())
+                    // DuplicateHandle shares the file pointer. ReOpenFile creates
+                    // an independent cursor for concurrent recovery workers.
+                    let handle = unsafe {
+                        ReOpenFile(
+                            entry.file.as_raw_handle(),
+                            FILE_GENERIC_READ,
+                            FILE_SHARE_READ,
+                            0,
+                        )
+                    };
+                    if handle == INVALID_HANDLE_VALUE {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    let file = unsafe { File::from_raw_handle(handle) };
+                    crate::data_io::Region::new(file, 0, entry.info.size).map_err(|e| e.to_string())
                 })
                 .collect()
         }
@@ -217,9 +229,13 @@ mod platform {
     }
 
     pub fn choose_lvm_members() -> Result<Option<Arc<Group>>, String> {
+        choose_raw_members("选择 LVM2 物理卷的 RAW/IMG 文件")
+    }
+
+    pub fn choose_raw_members(title: &str) -> Result<Option<Arc<Group>>, String> {
         let Some(paths) = rfd::FileDialog::new()
-            .set_title(crate::native_locale::text("选择 LVM2 物理卷的 RAW/IMG 文件"))
-            .add_filter(crate::native_locale::text("RAW/IMG 物理卷镜像"), &["img", "raw"])
+            .set_title(crate::native_locale::text(title))
+            .add_filter("RAW/IMG", &["img", "raw"])
             .pick_files()
         else {
             return Ok(None);
@@ -227,15 +243,34 @@ mod platform {
         if !(1..=disk_core::lvm::MAX_MEMBERS).contains(&paths.len()) {
             return Err("请选择 1–64 个 LVM2 物理卷来源。".into());
         }
+        let mut identities = HashSet::new();
         let entries = paths
             .into_iter()
             .map(|path| {
-                if !path.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("raw") || ext.eq_ignore_ascii_case("img")
-                }) {
+                if !path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("raw") || ext.eq_ignore_ascii_case("img")
+                    })
+                {
                     return Err("请选择 RAW/IMG 物理卷镜像。".into());
                 }
-                opened(path)
+                let entry = opened(path)?;
+                let mut info = BY_HANDLE_FILE_INFORMATION::default();
+                if unsafe { GetFileInformationByHandle(entry.file.as_raw_handle(), &mut info) } == 0
+                {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+                if !identities.insert((
+                    entry.disk.0.clone(),
+                    info.dwVolumeSerialNumber,
+                    info.nFileIndexHigh,
+                    info.nFileIndexLow,
+                )) {
+                    return Err("所选镜像包含重复的文件。".into());
+                }
+                Ok(entry)
             })
             .collect::<Result<_, _>>()?;
         Ok(Some(Arc::new(Group {
@@ -309,7 +344,9 @@ mod platform {
     }
 }
 #[cfg(windows)]
-pub use platform::{add, choose, choose_lvm_members, discard, read, take, Group};
+pub use platform::{
+    add, choose, choose_lvm_members, choose_raw_members, discard, read, take, Group,
+};
 #[cfg(not(windows))]
 pub fn read(_: &str, _: &str, _: u64, _: usize) -> Result<Vec<u8>, String> {
     Err("当前仅支持 Windows 原生文件选择。".into())

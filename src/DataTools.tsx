@@ -25,6 +25,7 @@ import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
 import { ImageLvmDialog, type ImageLvmInfo } from "./ImageLvmDialog";
+import { VirtualRaidDialog, type RaidFiles, type RaidView } from "./VirtualRaidDialog";
 import type { ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
@@ -169,6 +170,9 @@ export function DataTools({
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
   const [imageLvmInfo, setImageLvmInfo] = useState<ImageLvmInfo | null>(null);
   const [imageLvmOpen, setImageLvmOpen] = useState(false);
+  const [raidInfo, setRaidInfo] = useState<RaidView | null>(null);
+  const [raidFiles, setRaidFiles] = useState<RaidFiles | null>(null);
+  const [raidOpen, setRaidOpen] = useState(false);
   const [imageDraft, setImageDraft] = useState<{
     group: NativeImageGroup;
     options: ImageBrowseOptions;
@@ -191,7 +195,7 @@ export function DataTools({
   const resultsScanId =
     page === "backup"
       ? browsingImage
-        ? (imageLvmInfo?.scanId ?? imageInfo?.scanId ?? "")
+        ? (raidInfo?.scanId ?? imageLvmInfo?.scanId ?? imageInfo?.scanId ?? "")
         : browsingBackup
           ? (backupInfo?.scanId ?? "")
           : ""
@@ -305,7 +309,7 @@ export function DataTools({
       if (polling) return;
       polling = true;
       try {
-        const [next, backup, liveScan, savedProgress, image, imageLvm] =
+        const [next, backup, liveScan, savedProgress, image, imageLvm, raid] =
           await Promise.all([
             invoke<Job | null>("data_status"),
             invoke<BackupInfo | null>("data_backup_status"),
@@ -317,12 +321,14 @@ export function DataTools({
             invoke<RecoveryProgress | null>("data_recovery_progress_status"),
             invoke<ImageBrowseInfo | null>("data_image_status"),
             invoke<ImageLvmInfo | null>("data_image_lvm_status"),
+            invoke<RaidView | null>("data_virtual_raid_status"),
           ]);
         if (!alive) return;
         setJob(next);
         setBackupInfo(backup);
         setImageInfo(image);
         setImageLvmInfo(imageLvm);
+        setRaidInfo(raid);
         setScanId(
           typeof liveScan === "string" ? liveScan : (liveScan?.id ?? ""),
         );
@@ -859,6 +865,11 @@ export function DataTools({
             busy={!!busy}
             available={native}
             lvmName={imageLvmInfo?.name}
+            raidName={raidInfo?.name}
+            onRaid={() => {
+              setError("");
+              setRaidOpen(true);
+            }}
             onLvm={() => {
               setError("");
               setImageLvmOpen(true);
@@ -1417,12 +1428,50 @@ export function DataTools({
             page === "files" ||
             (page === "backup" &&
               browsingImage &&
-              (imageLvmInfo?.scanId ? imageLvmInfo.scanMode : imageInfo?.scanMode) === "existing")
+              (raidInfo?.scanId ? raidInfo.scanMode : imageLvmInfo?.scanId ? imageLvmInfo.scanMode : imageInfo?.scanMode) === "existing")
           }
           onRecover={(ids, layout, folder, options) =>
             void prepare(ids, layout, folder, options)
           }
           onPreview={(c) => void showPreview(c)}
+        />
+      )}
+      {raidOpen && page === "backup" && browsingImage && (
+        <VirtualRaidDialog
+          key={raidInfo?.id ?? raidFiles?.id}
+          busy={!!busy}
+          error={error}
+          files={raidFiles}
+          view={raidInfo}
+          onSelect={() => void action(async () => {
+            const selected = await invoke<RaidFiles | null>("data_virtual_raid_select");
+            if (selected) setRaidFiles(selected);
+          })}
+          onOpen={(request) => void action(async () => {
+            setRaidInfo(await invoke<RaidView>("data_virtual_raid_open", { request }));
+            setRaidFiles(null);
+          })}
+          onScan={(partition, mode) => void action(async () => {
+            if (!raidInfo) return;
+            const id = await invoke<string>("data_virtual_raid_scan", {
+              request: { id: raidInfo.id, partition, mode },
+            });
+            setOwnJobId(id);
+            setJob(await invoke<Job>("data_status"));
+            setRaidInfo(await invoke<RaidView>("data_virtual_raid_status"));
+            setRaidOpen(false);
+          })}
+          onClose={() => void action(async () => {
+            if (raidFiles) await invoke("data_virtual_raid_discard", { id: raidFiles.id });
+            setRaidFiles(null);
+            setRaidOpen(false);
+          })}
+          onCloseRaid={() => void action(async () => {
+            if (!raidInfo) return;
+            await invoke("data_virtual_raid_close", { id: raidInfo.id });
+            setRaidInfo(null);
+            setRaidOpen(false);
+          })}
         />
       )}
       {imageLvmOpen && page === "backup" && browsingImage && (

@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub mod image_browse_tasks;
 #[path = "recovery_tasks.rs"]
 pub mod recovery_tasks;
+#[path = "virtual_raid_tasks.rs"]
+pub mod virtual_raid_tasks;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -53,6 +55,7 @@ pub(crate) enum ScanSource {
         partition: u32,
     },
     ImageLvm(image_browse_tasks::lvm::Source),
+    VirtualRaid(virtual_raid_tasks::Source),
 }
 impl From<Selection> for ScanSource {
     fn from(source: Selection) -> Self {
@@ -200,6 +203,7 @@ impl ScanSource {
                 Ok(Box::new(opened.browser.reader(*partition)?))
             }
             Self::ImageLvm(source) => source.reader(cancel),
+            Self::VirtualRaid(source) => source.reader(),
         }
     }
     fn forbidden_disks(&self) -> Vec<Target> {
@@ -222,6 +226,7 @@ impl ScanSource {
             Self::Backup { opened, .. } => opened.source_disks.clone(),
             Self::Image { opened, .. } => opened.source_disks.clone(),
             Self::ImageLvm(source) => source.disks(),
+            Self::VirtualRaid(source) => source.disks(),
         }
     }
     #[cfg(windows)]
@@ -261,6 +266,10 @@ impl ScanSource {
                 source.validate()?;
                 Ok(source.label())
             }
+            Self::VirtualRaid(source) => {
+                source.validate()?;
+                source.label()
+            }
         }
     }
     #[cfg(windows)]
@@ -272,6 +281,9 @@ impl ScanSource {
             opened.validate()?;
         }
         if let Self::ImageLvm(source) = self {
+            source.validate()?;
+        }
+        if let Self::VirtualRaid(source) = self {
             source.validate()?;
         }
         let sources = self.forbidden_disks();
@@ -416,6 +428,9 @@ struct State {
     opened_backup: Option<OpenedBackup>,
     opened_image: Option<image_browse_tasks::Opened>,
     image_lvm: Option<Arc<image_browse_tasks::lvm::Saved>>,
+    virtual_raid: Option<Arc<virtual_raid_tasks::Saved>>,
+    #[cfg(windows)]
+    raid_draft: Option<Arc<crate::image_files::Group>>,
     scan_name: String,
     scan_mode: ScanMode,
     scan_completion: crate::directory_report::Completion,
@@ -433,6 +448,9 @@ impl Default for State {
             opened_backup: None,
             opened_image: None,
             image_lvm: None,
+            virtual_raid: None,
+            #[cfg(windows)]
+            raid_draft: None,
             scan_name: String::new(),
             scan_mode: ScanMode::AllFiles,
             scan_completion: crate::directory_report::Completion::Running,
@@ -500,7 +518,7 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
             ScanSource::LostBtrfs { members, .. } => {
                 Some(lost_status(members.first()?, members.len()))
             }
-            ScanSource::Backup { .. } | ScanSource::Image { .. } | ScanSource::ImageLvm(_) => {
+            ScanSource::Backup { .. } | ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_) => {
                 return None;
             }
         };
@@ -1002,6 +1020,10 @@ fn scan_source_mode(
         ScanSource::ImageLvm(source) => Some(source.clone()),
         _ => None,
     };
+    let virtual_raid = match &source {
+        ScanSource::VirtualRaid(source) => Some(source.clone()),
+        _ => None,
+    };
     {
         let mut s = state();
         s.scan = Some((id.clone(), source));
@@ -1056,6 +1078,9 @@ fn scan_source_mode(
                 bridge.healthy()?;
             }
             if let Some(source) = image_lvm {
+                source.validate()?;
+            }
+            if let Some(source) = virtual_raid {
                 source.validate()?;
             }
             Ok((message, None))
@@ -1924,6 +1949,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         export.physical_lvm_source = Some(source.provenance(None)?);
                         export.lvm_degraded_raid = source.degraded_raid;
                     }
+                    if let ScanSource::VirtualRaid(source) = &source {
+                        export.virtual_raid_source = Some(source.provenance()?);
+                    }
                     let size = export.total_bytes;
                     let Some(folder) = rfd::FileDialog::new()
                         .set_title(locale.text(if browsing {
@@ -1940,7 +1968,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         export.description(&locale),
                         locale.sentences(&[
                             "输出到新建目录，并保存文件名映射与成功/失败清单；不覆盖已有文件。每个文件在发布前完整回读并核对 SHA-256；不重建权限、链接及扩展属性；文件与目录时间、受支持属性按复制选项保存并记录结果。",
-                            if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_)) {
+                            if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_)) {
                                 "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。"
                             } else if browsing {
                                 "源卷未锁定，在线文件可能变化；这不是时间点快照，请核对副本内容。"
@@ -1951,6 +1979,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     ];
                     if export.lvm_degraded_raid {
                         warnings.push(locale.text("此 LVM2 卷使用缺盘读取。请独立核对导出文件内容。").to_owned());
+                    }
+                    if export.virtual_raid_source.is_some() {
+                        warnings.push(locale.text("虚拟 RAID 使用手动参数。请独立核对导出文件内容。").to_owned());
                     }
                     let warning = warnings.join(" ");
                     (

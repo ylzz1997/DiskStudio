@@ -7,7 +7,9 @@ pub mod lvm;
 pub mod mbr;
 pub mod partition_move;
 mod raid_field;
+mod raid_parity;
 pub mod table_check;
+pub mod virtual_raid;
 pub use image::parse_image;
 use serde::{Deserialize, Serialize};
 

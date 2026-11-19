@@ -101,7 +101,7 @@ fn create_stage_volume() -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn check_dir(path: &Path, serial: &str, partition: Option<u32>) -> Result<(), String> {
+pub(in crate::btrfs_checks) fn check_dir(path: &Path, serial: &str, partition: Option<u32>) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(err)?;
     if !metadata.is_dir()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
@@ -112,7 +112,7 @@ pub(super) fn check_dir(path: &Path, serial: &str, partition: Option<u32>) -> Re
     Ok(())
 }
 
-pub(super) fn create_fixture(path: &Path) -> Result<File, String> {
+pub(in crate::btrfs_checks) fn create_fixture(path: &Path) -> Result<File, String> {
     let file = OpenOptions::new()
         .create_new(true)
         .read(true)

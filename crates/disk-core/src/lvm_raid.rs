@@ -1,7 +1,6 @@
 //! LVM2 RAID component bindings and clean dm-raid membership checks.
 use super::*;
-#[path = "lvm_raid_parity.rs"]
-mod parity;
+use crate::raid_parity as parity;
 
 const COMPONENTS: &str = "LVM2 RAID 成员映射缺失、重复或不受支持。";
 const STATE: &str = "LVM2 RAID 成员未同步、事件代次不一致或元数据无效。";
@@ -274,6 +273,7 @@ impl Array {
                     as usize;
                 parity::Row::new(row, self.geometry.devices, level, layout).rebuild(
                     readers,
+                    |readers, window: &Window, bytes| window.read(readers, bytes),
                     &windows,
                     target,
                     &mut out[..amount],

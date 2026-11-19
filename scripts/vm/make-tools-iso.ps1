@@ -138,6 +138,16 @@ if ($GuestTools) {
             $diskStudioSelected.Add($diskStudioItem.Name, $diskStudioItem.FullName)
         }
     }
+    if ('Virtual-Raid-4Kn-Prepare.exe' -in $GuestTools) {
+        foreach ($diskStudioMember in 1..3) {
+            $diskStudioName = "Virtual-Raid-$diskStudioMember.raw"
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 25MB) {
+                throw 'Invalid immutable virtual RAID member'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
     $diskStudioStage = Join-Path $diskStudioVmRoot ('payload-selected-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $diskStudioStage | Out-Null
     foreach ($diskStudioName in $diskStudioSelected.Keys) {

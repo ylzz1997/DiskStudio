@@ -4474,6 +4474,26 @@ i {
   font-size: 13px;
   color: var(--muted);
 }
+.virtual-raid-members {
+  display: grid;
+  gap: 12px;
+  padding-inline-start: 24px;
+}
+.virtual-raid-members li::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.virtual-raid-members li > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-bottom: 6px;
+}
+.virtual-raid-members input {
+  width: 100%;
+  max-width: 12rem;
+  padding: 7px 9px;
+  font: inherit;
+}
 .image-browser-open-row select {
   min-width: 125px;
 }

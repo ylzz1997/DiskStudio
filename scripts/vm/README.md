@@ -429,3 +429,9 @@ A/B 两个 2 GiB ext4 的创建、Ubuntu 基线写入、2 GiB → 512 MiB → 3 
 ### 盘符与卷标验收
 
 `DiskStudio-Metadata-Checks.exe` 只在隔离 Windows VM 中启动；先校验 UUID、精确三盘身份和容量，在 A/B 各新建三个 64 MiB NTFS/exFAT/FAT32 分区。对每个分区执行修改卷标、清除卷标、恢复卷标、更换盘符、移除盘符、恢复盘符，共 36 次元数据变更。每步核对卷 GUID、文件系统、盘符/卷标和 64 KiB 文件内容，检查全部旧分区及 OS 布局不变；另要求被 OS 占用的 C 盘符在预览阶段即被拒绝。无盘符时通过已验证的新测试卷 GUID 路径核对文件，不访问客体 OS 数据。单次执行标记和逐步日志位于客体 `C:\ProgramData\DiskStudio-metadata-checks.txt`，失败后禁止自动重跑。测试增加每盘 192 MiB 占用，与原生 FAT 和新 Ext2/3 夹具合计仍应预先核对剩余空间。该程序目前只构建，未执行，结果不得视为已验收。
+
+### 虚拟 RAID 镜像验收
+
+`node scripts/vm/build-virtual-raid.mjs` 从 `.vm/virtual-raid-original.raw`（独立核对过的 48 MiB Ext4 LVM 逻辑卷）生成三份 25 MiB RAW 成员。虚拟 RAID5 使用左对称布局、64 KiB 条带，成员数据从 1 MiB 偏移开始。生成脚本独立计算校验条带，并生成逻辑内容和三个成员的 SHA-256 清单。
+
+确保存档中的 `DiskStudio.exe` 与当前桌面构建一致。运行 `scripts/vm/build-virtual-raid.ps1`，再用 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-4Kn-Prepare.exe','Virtual-Raid-4Kn-Inspect.exe')` 准备工具光盘。通过 4Kn 来宾预检后，在来宾中启动 Prepare。它核对正式程序与光盘成员的摘要，只在确认身份的 A/B 数据卷上创建源文件和输出目录。通过正式界面选齐成员，按文件名编号顺序组装，选择分区范围和 512 B 逻辑扇区。每个成员从字节 1048576 开始，长度为 25165824 字节。保留 `nested` 目录并跨盘导出。Inspect 独立核对目录、文件摘要、清单中的 RAID 参数、成员文件摘要和原有布局。Prepare 使用单次标记，遇到失败先核对当前目录和磁盘身份。
