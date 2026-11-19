@@ -3,6 +3,8 @@ use super::*;
 use crate::image_browser::{Browser, Info, Options};
 #[path = "image_session_tasks.rs"]
 pub mod sessions;
+#[path = "image_lvm_tasks.rs"]
+pub mod lvm;
 
 #[derive(Clone)]
 pub(crate) struct Opened {
@@ -71,6 +73,7 @@ pub fn close(id: String) -> Result<(), String> {
         return Err("镜像浏览会话已失效。".into());
     }
     clear_results(&mut s);
+    lvm::clear_for_image(&mut s);
     s.opened_image = None;
     Ok(())
 }
@@ -83,6 +86,7 @@ fn commit(s: &mut State, job_id: &str, opened: Opened) -> Result<(), String> {
         return Err("镜像打开已取消或任务失效；保留原镜像及目录。".into());
     }
     clear_results(s);
+    lvm::clear_for_image(s);
     s.opened_image = Some(opened);
     let job = s.job.as_mut().unwrap();
     job.state = "completed".into();
@@ -121,7 +125,7 @@ pub fn scan(request: ScanRequest) -> Result<String, String> {
             opened,
             partition: request.partition,
         },
-        Box::new(reader),
+        Some(Box::new(reader)),
         label,
         "读取镜像目录",
         request.mode,

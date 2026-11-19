@@ -34,10 +34,15 @@ pub struct Selection {
 #[derive(Clone)]
 pub(crate) enum ScanSource {
     Disk(Selection),
-    Lost {
-        source: Selection,
-        range: crate::surface_scan::Range,
-        candidate: crate::lost_partitions::Candidate,
+    Lvm(crate::lvm_tasks::Source),
+    BtrfsMembers {
+        members: Vec<Selection>,
+        allow_missing: bool,
+    },
+    Lost(crate::lost_partition_tasks::Source),
+    LostBtrfs {
+        members: Vec<crate::lost_partition_tasks::Source>,
+        allow_missing: bool,
     },
     Backup {
         opened: OpenedBackup,
@@ -47,6 +52,7 @@ pub(crate) enum ScanSource {
         opened: image_browse_tasks::Opened,
         partition: u32,
     },
+    ImageLvm(image_browse_tasks::lvm::Source),
 }
 impl From<Selection> for ScanSource {
     fn from(source: Selection) -> Self {
@@ -69,32 +75,122 @@ impl OpenedBackup {
         Ok(())
     }
 }
+#[cfg(windows)]
+impl crate::lost_partition_tasks::Source {
+    fn reader(&self, cancel: &AtomicBool) -> Result<Box<dyn backup_archive::Source>, String> {
+        let resolved = platform::resolve(&self.selection, false, false)?;
+        let reader = crate::lost_partitions::candidate_reader(
+            platform::device(&resolved, false)?,
+            resolved.size,
+            resolved
+                .disk
+                .logical_sector_size
+                .ok_or("缺少设备扇区大小")?,
+            self.range,
+            &self.candidate,
+            cancel,
+        )?;
+        Ok(Box::new(reader))
+    }
+    fn label(&self) -> Result<String, String> {
+        let label = platform::resolve(&self.selection, false, false)?.label;
+        Ok(format!(
+            "{label} · {} · LBA {}",
+            self.candidate.filesystem,
+            self.candidate.offset / self.range.sector
+        ))
+    }
+}
 impl ScanSource {
     #[cfg(windows)]
-    fn reader(&self) -> Result<Box<dyn backup_archive::Source>, String> {
+    fn lock_sources(&self, needed: bool) -> Result<Vec<platform::StableRead>, String> {
         match self {
-            Self::Lost {
-                source,
-                range,
-                candidate,
-            } => {
-                let resolved = platform::resolve(source, false, false)?;
-                let reader = crate::lost_partitions::candidate_reader(
-                    platform::device(&resolved, false)?,
-                    resolved.size,
-                    resolved
-                        .disk
-                        .logical_sector_size
-                        .ok_or("缺少设备扇区大小")?,
-                    *range,
-                    candidate,
-                    &AtomicBool::new(false),
-                )?;
-                Ok(Box::new(reader))
+            Self::Disk(source) if needed => Ok(vec![platform::StableRead::lock(source)?]),
+            Self::BtrfsMembers { members, .. } => {
+                members.iter().map(platform::StableRead::lock).collect()
             }
+            Self::Lvm(source) => source
+                .members
+                .iter()
+                .map(platform::StableRead::lock)
+                .collect(),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    #[cfg(windows)]
+    fn extraction_readers(
+        &self,
+        locks: &[platform::StableRead],
+        cancel: &AtomicBool,
+    ) -> Result<RecoveryReaders, String> {
+        if let Self::Lvm(source) = self {
+            return Ok(RecoveryReaders::Single(Box::new(
+                source.reader(locks, cancel)?,
+            )));
+        }
+        if let Self::BtrfsMembers {
+            members,
+            allow_missing,
+        } = self
+        {
+            if locks.len() != members.len() {
+                return Err("Btrfs 缺少成员读取凭据。".into());
+            }
+            let readers = locks
+                .iter()
+                .map(|lock| Ok(Box::new(lock.reader()?) as Box<dyn backup_archive::Source>))
+                .collect::<Result<_, String>>()?;
+            return Ok(RecoveryReaders::Btrfs {
+                readers,
+                access: if *allow_missing {
+                    BtrfsRead::Degraded
+                } else {
+                    BtrfsRead::Complete
+                },
+            });
+        }
+        if let Self::LostBtrfs {
+            members,
+            allow_missing,
+        } = self
+        {
+            return Ok(RecoveryReaders::Btrfs {
+                readers: members
+                    .iter()
+                    .map(|member| member.reader(cancel))
+                    .collect::<Result<_, _>>()?,
+                access: BtrfsRead::Recovered {
+                    allow_missing: *allow_missing,
+                },
+            });
+        }
+        if let [lock] = locks {
+            return Ok(RecoveryReaders::Single(Box::new(lock.reader()?)));
+        }
+        let reader = self.reader(cancel)?;
+        if matches!(self, Self::Lost(source) if source.candidate.filesystem == "Btrfs") {
+            return Ok(RecoveryReaders::Btrfs {
+                readers: vec![reader],
+                access: BtrfsRead::Recovered {
+                    allow_missing: true,
+                },
+            });
+        }
+        Ok(RecoveryReaders::Single(reader))
+    }
+
+    #[cfg(windows)]
+    fn reader(&self, cancel: &AtomicBool) -> Result<Box<dyn backup_archive::Source>, String> {
+        match self {
+            Self::Lost(source) => source.reader(cancel),
             Self::Disk(source) => Ok(Box::new(platform::reader(&platform::resolve(
                 source, false, false,
             )?)?)),
+            Self::BtrfsMembers { .. } | Self::LostBtrfs { .. } => {
+                Err("Btrfs 须按整组读取成员。".into())
+            }
+            Self::Lvm(_) => Err("LVM2 须按卷组读取成员。".into()),
             Self::Backup { opened, partition } => {
                 opened.validate()?;
                 Ok(Box::new(opened.browser.reader(*partition)?))
@@ -103,31 +199,56 @@ impl ScanSource {
                 opened.validate()?;
                 Ok(Box::new(opened.browser.reader(*partition)?))
             }
+            Self::ImageLvm(source) => source.reader(cancel),
         }
     }
     fn forbidden_disks(&self) -> Vec<Target> {
         match self {
-            Self::Disk(s) | Self::Lost { source: s, .. } => vec![s.target.clone()],
+            Self::Disk(s) => vec![s.target.clone()],
+            Self::Lvm(source) => source.members.iter().map(|s| s.target.clone()).collect(),
+            Self::Lost(s) => vec![s.selection.target.clone()],
+            Self::LostBtrfs { members, .. } => {
+                let mut seen = std::collections::HashSet::new();
+                members
+                    .iter()
+                    .map(|member| &member.selection.target)
+                    .filter(|target| seen.insert(&target.0))
+                    .cloned()
+                    .collect()
+            }
+            Self::BtrfsMembers { members, .. } => {
+                members.iter().map(|s| s.target.clone()).collect()
+            }
             Self::Backup { opened, .. } => opened.source_disks.clone(),
             Self::Image { opened, .. } => opened.source_disks.clone(),
+            Self::ImageLvm(source) => source.disks(),
         }
     }
     #[cfg(windows)]
     fn label(&self) -> Result<String, String> {
         match self {
-            Self::Lost {
-                source,
-                range,
-                candidate,
-            } => {
-                let label = platform::resolve(source, false, false)?.label;
-                Ok(format!(
-                    "{label} / 找到的 {} / 起始 LBA {}",
-                    candidate.filesystem,
-                    candidate.offset / range.sector
-                ))
+            Self::Lost(source) => source.label(),
+            Self::Lvm(source) => {
+                let labels = source
+                    .members
+                    .iter()
+                    .map(|member| platform::resolve(member, false, false).map(|r| r.label))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{} · {}", source.label, labels.join(" + ")))
             }
+            Self::LostBtrfs { members, .. } => Ok(members
+                .iter()
+                .map(|member| member.label())
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" + ")),
             Self::Disk(s) => Ok(platform::resolve(s, false, false)?.label),
+            Self::BtrfsMembers { members, .. } => {
+                let labels = members
+                    .iter()
+                    .map(|member| platform::resolve(member, false, false).map(|r| r.label))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("Btrfs · {}", labels.join(" + ")))
+            }
             Self::Backup { opened, partition } => {
                 opened.validate()?;
                 opened.browser.source_label(*partition)
@@ -135,6 +256,10 @@ impl ScanSource {
             Self::Image { opened, partition } => {
                 opened.validate()?;
                 opened.browser.label(*partition)
+            }
+            Self::ImageLvm(source) => {
+                source.validate()?;
+                Ok(source.label())
             }
         }
     }
@@ -145,6 +270,9 @@ impl ScanSource {
         }
         if let Self::Image { opened, .. } = self {
             opened.validate()?;
+        }
+        if let Self::ImageLvm(source) = self {
+            source.validate()?;
         }
         let sources = self.forbidden_disks();
         if sources.is_empty() {
@@ -157,6 +285,114 @@ impl ScanSource {
         Ok(result.unwrap())
     }
 }
+
+enum RecoveryReaders {
+    Single(Box<dyn backup_archive::Source>),
+    #[cfg(windows)]
+    Btrfs {
+        readers: Vec<Box<dyn backup_archive::Source>>,
+        access: BtrfsRead,
+    },
+}
+
+#[cfg(windows)]
+enum BtrfsRead {
+    Complete,
+    Degraded,
+    Recovered { allow_missing: bool },
+}
+
+#[cfg(windows)]
+fn open_btrfs(
+    readers: Vec<Box<dyn backup_archive::Source>>,
+    access: BtrfsRead,
+    cancel: &AtomicBool,
+) -> Result<disk_core::btrfs::Volume<Box<dyn backup_archive::Source>>, String> {
+    let checkpoint = || crate::btrfs_recovery::stop(cancel);
+    match access {
+        BtrfsRead::Complete => disk_core::btrfs::open_members(readers, checkpoint),
+        BtrfsRead::Degraded => disk_core::btrfs::open_degraded(readers, checkpoint),
+        BtrfsRead::Recovered { allow_missing } => {
+            disk_core::btrfs::open_recovered_members(readers, allow_missing, checkpoint)
+        }
+    }
+}
+
+impl RecoveryReaders {
+    fn scan(
+        self,
+        mode: ScanMode,
+        cancel: Arc<AtomicBool>,
+        tick: impl FnMut(u64, u64) -> Result<(), String>,
+        found: impl FnMut(Candidate),
+        directory: impl FnMut(recovery_tree::Directory) -> Result<(), String>,
+    ) -> Result<String, String> {
+        match self {
+            Self::Single(reader) => {
+                recovery::scan_filesystem_owned(reader, mode, cancel, tick, found, directory)
+            }
+            #[cfg(windows)]
+            Self::Btrfs { readers, access } => {
+                let volume = open_btrfs(readers, access, &cancel)?;
+                crate::btrfs_recovery::scan_volume(volume, mode, &cancel, tick, found, directory)
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn extract(
+        self,
+        candidate: &Candidate,
+        out: &mut impl Write,
+        limit: u64,
+        cancel: Arc<AtomicBool>,
+        tick: impl FnMut(u64) -> Result<(), String>,
+    ) -> Result<recovery::Extraction, String> {
+        match self {
+            Self::Single(reader) => {
+                recovery::extract_owned_with_metadata(reader, candidate, out, limit, cancel, tick)
+            }
+            Self::Btrfs { readers, access } => {
+                let recovery::Locator::Btrfs(location) = &candidate.locator else {
+                    return Err("文件不属于当前 Btrfs 成员视图。".into());
+                };
+                if !candidate.supported {
+                    return Err(candidate.note.clone());
+                }
+                let volume = open_btrfs(readers, access, &cancel)?;
+                crate::btrfs_recovery::extract_from(
+                    volume, candidate, location, out, limit, &cancel, tick,
+                )
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn directory_metadata(
+        self,
+        directory: &recovery_tree::Directory,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<crate::file_metadata::Metadata, String> {
+        match self {
+            Self::Single(reader) => crate::directory_metadata::read(reader, directory, cancel),
+            Self::Btrfs { readers, access } => {
+                let Some(crate::directory_metadata::Proof::Btrfs(location)) =
+                    directory.metadata.directory_proof.as_ref()
+                else {
+                    return Err("目录缺少 Btrfs 成员视图凭据。".into());
+                };
+                let volume = open_btrfs(readers, access, &cancel)?;
+                crate::btrfs_recovery::directory_metadata_in(
+                    volume,
+                    location,
+                    &directory.name,
+                    &cancel,
+                )
+            }
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
@@ -179,6 +415,7 @@ struct State {
     scan: Option<(String, ScanSource)>,
     opened_backup: Option<OpenedBackup>,
     opened_image: Option<image_browse_tasks::Opened>,
+    image_lvm: Option<Arc<image_browse_tasks::lvm::Saved>>,
     scan_name: String,
     scan_mode: ScanMode,
     scan_completion: crate::directory_report::Completion,
@@ -195,6 +432,7 @@ impl Default for State {
             scan: None,
             opened_backup: None,
             opened_image: None,
+            image_lvm: None,
             scan_name: String::new(),
             scan_mode: ScanMode::AllFiles,
             scan_completion: crate::directory_report::Completion::Running,
@@ -245,6 +483,7 @@ pub struct LostScanStatus {
     filesystem: String,
     size: u64,
     start_sector: u64,
+    members: usize,
 }
 // UI polling reads retained state only; never resolve a disk or open a device.
 pub fn scan_status() -> Option<ScanStatus> {
@@ -256,15 +495,14 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
     }
     s.scan.as_ref().and_then(|(id, source)| {
         let lost = match source {
-            ScanSource::Disk(_) => None,
-            ScanSource::Lost {
-                range, candidate, ..
-            } => Some(LostScanStatus {
-                filesystem: candidate.filesystem.clone(),
-                size: candidate.size,
-                start_sector: candidate.offset / range.sector,
-            }),
-            ScanSource::Backup { .. } | ScanSource::Image { .. } => return None,
+            ScanSource::Disk(_) | ScanSource::Lvm(_) | ScanSource::BtrfsMembers { .. } => None,
+            ScanSource::Lost(source) => Some(lost_status(source, 1)),
+            ScanSource::LostBtrfs { members, .. } => {
+                Some(lost_status(members.first()?, members.len()))
+            }
+            ScanSource::Backup { .. } | ScanSource::Image { .. } | ScanSource::ImageLvm(_) => {
+                return None;
+            }
         };
         Some(ScanStatus {
             id: id.clone(),
@@ -273,21 +511,33 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
         })
     })
 }
+fn lost_status(source: &crate::lost_partition_tasks::Source, members: usize) -> LostScanStatus {
+    LostScanStatus {
+        filesystem: source.candidate.filesystem.clone(),
+        size: source.candidate.size,
+        start_sector: source.candidate.offset / source.range.sector,
+        members,
+    }
+}
 // This endpoint only matches retained memory state: it must never resolve or
 // open the requested source. Returning to a page does not initiate device I/O.
 fn matching_browse_id(s: &State, source: &Selection) -> Option<String> {
     if source.partition.is_none() || !matches!(s.scan_mode, ScanMode::Existing) {
         return None;
     }
-    s.scan.as_ref().and_then(|(id, saved)| match saved {
-        ScanSource::Disk(saved)
-            if saved.target == source.target
-                && saved.layout_key == source.layout_key
-                && saved.partition == source.partition =>
-        {
-            Some(id.clone())
-        }
-        _ => None,
+    s.scan.as_ref().and_then(|(id, saved)| {
+        let primary = match saved {
+            ScanSource::Disk(saved) => Some(saved),
+            ScanSource::BtrfsMembers { members, .. } => members.first(),
+            _ => None,
+        };
+        primary
+            .filter(|saved| {
+                saved.target == source.target
+                    && saved.layout_key == source.layout_key
+                    && saved.partition == source.partition
+            })
+            .map(|_| id.clone())
     })
 }
 pub fn browse_id(source: Selection) -> Option<String> {
@@ -610,15 +860,47 @@ pub fn scan_lost(request: crate::lost_partition_tasks::BrowseRequest) -> Result<
             .try_lock()
             .map_err(|_| "另一项磁盘操作正在运行")?;
         idle(&state())?;
-        let (source, range, candidate) = crate::lost_partition_tasks::selected(request)?;
-        let source = ScanSource::Lost {
+        let source = ScanSource::Lost(crate::lost_partition_tasks::selected(request)?);
+        let label = source.label()?;
+        scan_source_mode(
             source,
-            range,
-            candidate,
+            None,
+            label,
+            "读取找到的分区目录",
+            ScanMode::AllFiles,
+            guard,
+        )
+    }
+}
+pub fn scan_lost_group(
+    request: crate::lost_partition_tasks::BrowseGroupRequest,
+) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        Err("当前仅支持 Windows 设备读取".into())
+    }
+    #[cfg(windows)]
+    {
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let allow_missing = request.allow_missing;
+        let members = crate::lost_partition_tasks::selected_group(request)?;
+        let source = ScanSource::LostBtrfs {
+            members,
+            allow_missing,
         };
         let label = source.label()?;
-        let reader = source.reader()?;
-        scan_source(source, reader, label, "读取找到的分区目录", guard)
+        scan_source_mode(
+            source,
+            None,
+            label,
+            "读取 Btrfs 成员",
+            ScanMode::AllFiles,
+            guard,
+        )
     }
 }
 fn scan_source(
@@ -628,19 +910,96 @@ fn scan_source(
     title: &str,
     guard: std::sync::MutexGuard<'_, ()>,
 ) -> Result<String, String> {
-    scan_source_mode(source, reader, label, title, ScanMode::AllFiles, guard)
+    scan_source_mode(
+        source,
+        Some(reader),
+        label,
+        title,
+        ScanMode::AllFiles,
+        guard,
+    )
 }
+
+pub fn scan_btrfs_members(
+    members: Vec<Selection>,
+    mode: ScanMode,
+    allow_missing: bool,
+) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (members, mode, allow_missing);
+        Err("恢复扫描当前仅支持 Windows".into())
+    }
+    #[cfg(windows)]
+    {
+        let minimum = if allow_missing { 1 } else { 2 };
+        if !(minimum..=disk_core::btrfs::MAX_MEMBERS).contains(&members.len())
+            || mode == ScanMode::Signatures
+            || members.iter().any(|member| member.partition.is_none())
+        {
+            return Err("请选择有效的 Btrfs 成员分区并使用文件系统扫描。".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        if members
+            .iter()
+            .any(|member| !seen.insert((member.target.0.as_str(), member.partition)))
+        {
+            return Err("Btrfs 成员分区重复。".into());
+        }
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let source = ScanSource::BtrfsMembers {
+            members,
+            allow_missing,
+        };
+        let label = source.label()?;
+        scan_source_mode(source, None, label, "读取 Btrfs 成员", mode, guard)
+    }
+}
+
+pub fn scan_lvm(request: crate::lvm_tasks::BrowseRequest) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        Err("当前仅支持 Windows 设备读取".into())
+    }
+    #[cfg(windows)]
+    {
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let (source, deleted) = crate::lvm_tasks::selected(request)?;
+        let source = ScanSource::Lvm(source);
+        let label = source.label()?;
+        let mode = if deleted {
+            ScanMode::Deleted
+        } else {
+            ScanMode::AllFiles
+        };
+        scan_source_mode(source, None, label, "读取 LVM2 逻辑卷", mode, guard)
+    }
+}
+
 fn scan_source_mode(
     source: ScanSource,
-    reader: Box<dyn backup_archive::Source>,
+    reader: Option<Box<dyn backup_archive::Source>>,
     label: String,
     title: &str,
     mode: ScanMode,
     guard: std::sync::MutexGuard<'_, ()>,
 ) -> Result<String, String> {
     let (id, cancel) = start(title)?;
+    #[cfg(windows)]
+    let source_for_io = source.clone();
     let image_bridge = match &source {
         ScanSource::Image { opened, .. } => Some(opened.bridge.clone()),
+        _ => None,
+    };
+    let image_lvm = match &source {
+        ScanSource::ImageLvm(source) => Some(source.clone()),
         _ => None,
     };
     {
@@ -651,6 +1010,7 @@ fn scan_source_mode(
         s.scan_name = label;
         s.scan_mode = mode;
         s.scan_completion = crate::directory_report::Completion::Running;
+        s.recovery_progress = None;
         s.pending = None;
     }
     let work_id = id.clone();
@@ -660,8 +1020,20 @@ fn scan_source_mode(
             let _guard = crate::OPERATION
                 .try_lock()
                 .map_err(|_| "另一项磁盘操作正在运行")?;
-            let message = recovery::scan_filesystem_owned(
-                reader,
+            #[cfg(windows)]
+            let locks = if reader.is_none() {
+                source_for_io.lock_sources(true)?
+            } else {
+                Vec::new()
+            };
+            let readers = match reader {
+                Some(reader) => RecoveryReaders::Single(reader),
+                #[cfg(windows)]
+                None => source_for_io.extraction_readers(&locks, &cancel)?,
+                #[cfg(not(windows))]
+                None => return Err("恢复扫描当前仅支持 Windows".into()),
+            };
+            let message = readers.scan(
                 mode,
                 cancel.clone(),
                 |done, total| progress(&work_id, &cancel, "读取目录", done, total),
@@ -676,8 +1048,15 @@ fn scan_source_mode(
                 },
                 |d| state().directories.insert(d),
             )?;
+            #[cfg(windows)]
+            for lock in &locks {
+                lock.verify()?;
+            }
             if let Some(bridge) = image_bridge {
                 bridge.healthy()?;
+            }
+            if let Some(source) = image_lvm {
+                source.validate()?;
             }
             Ok((message, None))
         }))
@@ -1054,7 +1433,9 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
                     .clone(),
             )
         };
-        let reader = source.reader()?;
+        let locked = source.lock_sources(matches!(c.locator, recovery::Locator::Btrfs(_)))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let readers = source.extraction_readers(&locked, &cancel)?;
         let extension = c.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         let limit = if ["png", "jpg", "jpeg", "gif", "bmp", "webp"].contains(&extension.as_str()) {
             8 * 1024 * 1024
@@ -1062,14 +1443,10 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
             64 * 1024
         };
         let mut bytes = vec![];
-        recovery::extract_owned(
-            reader,
-            &c,
-            &mut bytes,
-            limit,
-            Arc::new(AtomicBool::new(false)),
-            |_| Ok(()),
-        )?;
+        readers.extract(&c, &mut bytes, limit, cancel, |_| Ok(()))?;
+        for lock in &locked {
+            lock.verify()?;
+        }
         Ok(Preview {
             name: c.name,
             bytes,
@@ -1539,6 +1916,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     if let ScanSource::Image { opened, partition } = &source {
                         export.image_source = Some(opened.browser.provenance(*partition)?);
                     }
+                    if let ScanSource::ImageLvm(source) = &source {
+                        export.image_lvm_source = Some(source.provenance()?);
+                        export.lvm_degraded_raid = source.degraded_raid();
+                    }
+                    if let ScanSource::Lvm(source) = &source {
+                        export.physical_lvm_source = Some(source.provenance(None)?);
+                        export.lvm_degraded_raid = source.degraded_raid;
+                    }
                     let size = export.total_bytes;
                     let Some(folder) = rfd::FileDialog::new()
                         .set_title(locale.text(if browsing {
@@ -1551,11 +1936,11 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         return Ok(None);
                     };
                     let folder = source.destination(&folder, size)?;
-                    let warning = [
+                    let mut warnings = vec![
                         export.description(&locale),
                         locale.sentences(&[
                             "输出到新建目录，并保存文件名映射与成功/失败清单；不覆盖已有文件。每个文件在发布前完整回读并核对 SHA-256；不重建权限、链接及扩展属性；文件与目录时间、受支持属性按复制选项保存并记录结果。",
-                            if matches!(source, ScanSource::Image { .. }) {
+                            if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_)) {
                                 "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。"
                             } else if browsing {
                                 "源卷未锁定，在线文件可能变化；这不是时间点快照，请核对副本内容。"
@@ -1563,7 +1948,11 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                                 "已删除内容可能被覆盖或被 TRIM 清除，导出成功不代表原内容完整。"
                             },
                         ]),
-                    ].join(" ");
+                    ];
+                    if export.lvm_degraded_raid {
+                        warnings.push(locale.text("此 LVM2 卷使用缺盘读取。请独立核对导出文件内容。").to_owned());
+                    }
+                    let warning = warnings.join(" ");
                     (
                         if export.directory_selection {
                             if browsing {
@@ -2035,6 +2424,26 @@ pub(crate) fn run(
         } => {
             let total = export.total_bytes;
             source.label()?; // Revalidate retained source identity/layout even for directory-only exports.
+            let locked = source.lock_sources(
+                files
+                    .iter()
+                    .any(|c| matches!(c.locator, recovery::Locator::Btrfs(_)))
+                    || export.folders.iter().any(|folder| {
+                        folder.source.as_ref().is_some_and(|d| {
+                            matches!(
+                                d.metadata.directory_proof,
+                                Some(crate::directory_metadata::Proof::Btrfs(_))
+                            )
+                        })
+                    }),
+            )?;
+            if let ScanSource::Lvm(lvm) = &source {
+                if Some(lvm.provenance(Some(&locked))?) != export.physical_lvm_source {
+                    return Err("LVM2 导出来源范围已变化，请重新准备。".into());
+                }
+                // Verify the bound volume-group transaction before creating output.
+                lvm.reader(&locked, cancel)?;
+            }
             progress(id, cancel, "恢复文件", 0, total)?;
             let root = source.destination(&folder, total.saturating_add(32 * 1024 * 1024))?;
             let (_, expected) = platform::folder_location(&root)?;
@@ -2059,20 +2468,27 @@ pub(crate) fn run(
                     if c.size != entry.size {
                         return Err("导出容量与计划不一致".into());
                     }
-                    let reader = source.reader()?;
-                    let extracted = recovery::extract_owned_with_metadata(
-                        reader,
+                    let extracted = source.extraction_readers(&locked, cancel)?.extract(
                         c,
                         out,
                         u64::MAX,
                         cancel.clone(),
                         tick,
                     )?;
+                    for lock in &locked {
+                        lock.verify()?;
+                    }
                     out.extracted_metadata(extracted.metadata);
                     Ok(extracted.bytes)
                 },
                 |directory| {
-                    crate::directory_metadata::read(source.reader()?, directory, cancel.clone())
+                    let metadata = source
+                        .extraction_readers(&locked, cancel)?
+                        .directory_metadata(directory, cancel.clone())?;
+                    for lock in &locked {
+                        lock.verify()?;
+                    }
+                    Ok(metadata)
                 },
                 |done| progress(id, cancel, &phase, done, total),
             )
@@ -2403,11 +2819,11 @@ mod tests {
         s.scan_name = "retained disk / NTFS / LBA 32768".into();
         s.scan = Some((
             "candidate-scan".into(),
-            ScanSource::Lost {
-                source: selection("a", None),
+            ScanSource::Lost(crate::lost_partition_tasks::Source {
+                selection: selection("a", None),
                 range,
                 candidate,
-            },
+            }),
         ));
         let json = serde_json::to_value(scan_status_in(&s).unwrap()).unwrap();
         assert_eq!(json["id"], "candidate-scan");

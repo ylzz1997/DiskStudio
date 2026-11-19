@@ -85,6 +85,14 @@ pub enum Action {
         partition: u32,
         size: u64,
     },
+    BtrfsFormat {
+        partition: u32,
+        label: String,
+    },
+    BtrfsResize {
+        partition: u32,
+        size: u64,
+    },
     Delete {
         partition: u32,
     },
@@ -124,6 +132,8 @@ impl Action {
             | Self::FatResize { partition, .. }
             | Self::ExtFormat { partition, .. }
             | Self::ExtResize { partition, .. }
+            | Self::BtrfsFormat { partition, .. }
+            | Self::BtrfsResize { partition, .. }
             | Self::SetLabel { partition, .. }
             | Self::SetDriveLetter { partition, .. }
             | Self::Delete { partition } => Some(*partition),
@@ -137,6 +147,8 @@ impl Action {
             Self::Format { file_system, .. } => file_system.title(),
             Self::ExtFormat { file_system, .. } => file_system.title(),
             Self::ExtResize { .. } => "调整 Ext 文件系统大小",
+            Self::BtrfsFormat { .. } => "Btrfs 格式化",
+            Self::BtrfsResize { .. } => "调整 Btrfs 文件系统大小",
             Self::FatResize { .. } => "调整 FAT / exFAT 分区大小",
             Self::Resize { .. } => "调整分区大小",
             Self::Delete { .. } => "删除分区",

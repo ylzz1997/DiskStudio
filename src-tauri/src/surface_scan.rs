@@ -9,6 +9,14 @@ use std::{
 pub const BLOCK: u64 = 1024 * 1024;
 pub const CELLS: usize = 256;
 const MAX_ERRORS: usize = 1024;
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    #[default]
+    Forward,
+    Backward,
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Options {

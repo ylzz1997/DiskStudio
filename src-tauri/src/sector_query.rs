@@ -1,5 +1,6 @@
 //! Bounded, fixed-width byte conditions. No device access in this module.
 use crate::sector_data::{self, CompiledPattern, Pattern, SearchResult, MAX_HITS};
+pub use crate::surface_scan::Direction;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Seek, SeekFrom},
@@ -9,13 +10,6 @@ use std::{
 const MAX_CONDITIONS: usize = 16;
 const MAX_SPAN: usize = 65536;
 const CHUNK: usize = 65536;
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum Direction {
-    #[default]
-    Forward,
-    Backward,
-}
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {

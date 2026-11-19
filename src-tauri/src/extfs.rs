@@ -1,4 +1,4 @@
-//! Native Ext2/3/4 tools, restricted to one inherited handle and one partition extent.
+//! Native Linux filesystem tools, restricted to one inherited handle and one partition extent.
 //! Called only after an explicit partition preview/confirmation, never inventory.
 use crate::{
     data_io::Region,
@@ -10,7 +10,7 @@ use policy::{Disk, Partition};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     mem::{offset_of, size_of},
     os::windows::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
@@ -27,14 +27,20 @@ const ASSETS: [(&str, &[u8]); 4] = [
     ),
     ("mke2fs.conf", include_bytes!("../ext4-engine/mke2fs.conf")),
 ];
+const BTRFS_TOOL: &str = "diskstudio-mkbtrfs.exe";
+const BTRFS_ASSETS: [(&str, &[u8]); 1] = [(
+    BTRFS_TOOL,
+    include_bytes!("../btrfs-engine/diskstudio-mkbtrfs.exe"),
+)];
 struct Engine {
     directory: PathBuf,
+    assets: &'static [(&'static str, &'static [u8])],
     held: Vec<File>,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
         self.held.clear();
-        for (name, _) in ASSETS {
+        for (name, _) in self.assets {
             let _ = fs::remove_file(self.directory.join(name));
         }
         let _ = fs::remove_dir(&self.directory);
@@ -42,14 +48,18 @@ impl Drop for Engine {
 }
 impl Engine {
     fn new() -> Result<Self, String> {
+        Self::load("ext4", &ASSETS)
+    }
+    fn load(tag: &str, assets: &'static [(&'static str, &'static [u8])]) -> Result<Self, String> {
         let directory =
-            std::env::temp_dir().join(format!("DiskStudio-ext4-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("DiskStudio-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory).map_err(error)?;
         let mut engine = Self {
             directory,
+            assets,
             held: vec![],
         };
-        for (name, bytes) in ASSETS {
+        for (name, bytes) in assets.iter().copied() {
             let path = engine.directory.join(name);
             let mut file = OpenOptions::new()
                 .write(true)
@@ -68,7 +78,7 @@ impl Engine {
             let mut actual = vec![];
             held.read_to_end(&mut actual).map_err(error)?;
             if actual != bytes {
-                return Err("Ext 引擎完整性校验失败。".into());
+                return Err("文件系统工具完整性校验失败。".into());
             }
             engine.held.push(held);
         }
@@ -84,8 +94,12 @@ impl Engine {
         sector: u64,
         write: bool,
     ) -> Result<String, String> {
-        if !["mke2fs.exe", "e2fsck.exe", "resize2fs.exe"].contains(&tool) {
-            return Err("未知 Ext 操作。".into());
+        if !self
+            .assets
+            .iter()
+            .any(|(name, _)| *name == tool && tool.ends_with(".exe"))
+        {
+            return Err("未知文件系统工具。".into());
         }
         let mut child = Command::new(self.directory.join(tool))
             .args(args)
@@ -224,7 +238,82 @@ fn super_bytes(file: &File, offset: u64, length: u64) -> Result<Vec<u8>, String>
     Ok(b[1024..2048].to_vec())
 }
 pub fn is_action(action: &Action) -> bool {
-    matches!(action, Action::ExtFormat { .. } | Action::ExtResize { .. })
+    matches!(
+        action,
+        Action::ExtFormat { .. }
+            | Action::ExtResize { .. }
+            | Action::BtrfsFormat { .. }
+            | Action::BtrfsResize { .. }
+    )
+}
+
+fn btrfs_format_proof(file: &File, p: &Partition) -> Result<String, String> {
+    if p.size < 128 * policy::MIB {
+        return Err("Btrfs 格式化要求分区至少 128 MiB，起点和容量按 4 KiB 对齐。".into());
+    }
+    let mut region =
+        Region::new(file.try_clone().map_err(error)?, p.offset, p.size).map_err(error)?;
+    let mut hash = Sha256::new();
+    let mut bytes = vec![0; policy::MIB as usize];
+    region.read_exact(&mut bytes).map_err(error)?;
+    hash.update(&bytes);
+    for offset in [64 * policy::MIB, 256 * 1024 * policy::MIB, p.size - 4096] {
+        if offset + 4096 <= p.size {
+            region.seek(SeekFrom::Start(offset)).map_err(error)?;
+            region.read_exact(&mut bytes[..4096]).map_err(error)?;
+            hash.update(&bytes[..4096]);
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn write_btrfs(
+    engine: &Engine,
+    file: &File,
+    offset: u64,
+    length: u64,
+    sector: u64,
+    label: &str,
+) -> Result<(), String> {
+    let id = uuid::Uuid::new_v4();
+    let label_hex = label
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    engine.run(
+        BTRFS_TOOL,
+        &[
+            &offset.to_string(),
+            &length.to_string(),
+            &sector.to_string(),
+            &label_hex,
+            &id.simple().to_string(),
+        ],
+        file,
+        offset,
+        length,
+        sector,
+        true,
+    )?;
+    file.sync_all().map_err(error)?;
+    let mut region =
+        Region::new(file.try_clone().map_err(error)?, offset, length).map_err(error)?;
+    disk_core::btrfs::verify_format(&mut region, *id.as_bytes(), label)
+}
+
+fn btrfs_resize_plan(
+    file: &File,
+    partition: &Partition,
+    size: u64,
+) -> Result<disk_core::btrfs::ResizePlan, String> {
+    let mut region = Region::new(
+        file.try_clone().map_err(error)?,
+        partition.offset,
+        partition.size,
+    )
+    .map_err(error)?;
+    disk_core::btrfs::plan_resize(&mut region, size)
 }
 fn resolved(
     request: &Request,
@@ -251,10 +340,29 @@ pub fn preview(
     disk: &Disk,
     parts: &[&Partition],
     p: &Partition,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let resolved = resolved(request, disk, parts)?;
     let file = device::device(&resolved, false)?;
     check_native_target(&native_layout(&file, parts)?, p)?;
+    if let Action::BtrfsResize { size, .. } = request.action {
+        let plan = btrfs_resize_plan(&file, p, size)?;
+        let bytes = plan.relocation_bytes();
+        let summary = (bytes > 0).then(|| {
+            let size = format!("{:.2}", bytes as f64 / policy::MIB as f64);
+            crate::native_locale::current().format(
+                "预计搬移并逐条带回读核对 {size} MiB 的 Btrfs 数据和元数据。",
+                &[("size", &size)],
+            )
+        });
+        return Ok((plan.proof(), summary));
+    }
+    if matches!(request.action, Action::BtrfsFormat { .. }) {
+        let before = btrfs_format_proof(&file, p)?;
+        if btrfs_format_proof(&file, p)? != before {
+            return Err("检查期间 Btrfs 格式化目标发生变化，请重新预览。".into());
+        }
+        return Ok((before, None));
+    }
     let before = super_bytes(&file, p.offset, p.size)?;
     if let Action::ExtResize { size, .. } = request.action {
         let superblock = parse_super(&before, p.size)?;
@@ -298,7 +406,7 @@ pub fn preview(
     if super_bytes(&file, p.offset, p.size)? != before {
         return Err("检查期间 Ext 元数据发生变化，请重新预览。".into());
     }
-    Ok(format!("{:x}", Sha256::digest(&before)))
+    Ok((format!("{:x}", Sha256::digest(&before)), None))
 }
 
 const HEADER: usize = offset_of!(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry);
@@ -594,7 +702,16 @@ pub fn execute(
     proof: &str,
 ) -> Result<Outcome, String> {
     let r = resolved(request, disk, parts)?;
-    let engine = Engine::new()?;
+    let btrfs_format = matches!(request.action, Action::BtrfsFormat { .. });
+    let btrfs_size = match request.action {
+        Action::BtrfsResize { size, .. } => Some(size),
+        _ => None,
+    };
+    let engine = match &request.action {
+        Action::BtrfsFormat { .. } => Some(Engine::load("btrfs", &BTRFS_ASSETS)?),
+        Action::BtrfsResize { .. } => None,
+        _ => Some(Engine::new()?),
+    };
     let _locks = device::lock(&r)?;
     device::verify_locks(&_locks, &r, parts)?;
     // WMI's provider needs to open the disk itself. Complete its fresh metadata
@@ -614,8 +731,22 @@ pub fn execute(
     let file = device::exclusive_device(&fresh)?;
     let layout = native_layout(&file, parts)?;
     check_native_target(&layout, p)?;
-    let before = super_bytes(&file, p.offset, p.size)?;
-    if format!("{:x}", Sha256::digest(&before)) != proof {
+    let btrfs_plan = btrfs_size
+        .map(|size| btrfs_resize_plan(&file, p, size))
+        .transpose()?;
+    let before = if btrfs_format || btrfs_plan.is_some() {
+        Vec::new()
+    } else {
+        super_bytes(&file, p.offset, p.size)?
+    };
+    let actual_proof = if let Some(plan) = &btrfs_plan {
+        plan.proof()
+    } else if btrfs_format {
+        btrfs_format_proof(&file, p)?
+    } else {
+        format!("{:x}", Sha256::digest(&before))
+    };
+    if actual_proof != proof {
         return Err("文件系统元数据与预览不同，请重新预览。".into());
     }
     let sector = disk.logical_sector_size.ok_or("扇区大小未知")?;
@@ -632,12 +763,35 @@ pub fn execute(
             return Err("脱机后分区布局发生变化。".into());
         }
         let target_size = match &request.action {
+            Action::BtrfsFormat { label, .. } => {
+                let engine = engine.as_ref().ok_or("缺少 Btrfs 格式化工具。")?;
+                write_btrfs(engine, &file, p.offset, p.size, sector, label)?;
+                p.size
+            }
+            Action::BtrfsResize { size, .. } => {
+                let plan = btrfs_plan.as_ref().ok_or("缺少 Btrfs 缩放计划。")?;
+                if *size > p.size {
+                    resize_layout(&file, &layout, p, *size)?;
+                }
+                let mut target = Region::new(
+                    file.try_clone().map_err(error)?,
+                    p.offset,
+                    p.size.max(*size),
+                )
+                .map_err(error)?;
+                disk_core::btrfs::resize(&mut target, plan)?;
+                if *size < p.size {
+                    resize_layout(&file, &layout, p, *size)?;
+                }
+                *size
+            }
             Action::ExtFormat {
                 label,
                 file_system,
                 block_size,
                 ..
             } => {
+                let engine = engine.as_ref().ok_or("缺少 Ext 工具。")?;
                 let label_hex = label
                     .as_bytes()
                     .iter()
@@ -669,6 +823,7 @@ pub fn execute(
                 p.size
             }
             Action::ExtResize { size, .. } => {
+                let engine = engine.as_ref().ok_or("缺少 Ext 工具。")?;
                 engine.run(
                     "e2fsck.exe",
                     &["-f", "-n", "diskstudio"],
@@ -719,41 +874,44 @@ pub fn execute(
             }
             _ => return Err("不匹配的 Ext 操作".into()),
         };
-        file.sync_all().map_err(error)?;
-        let after = parse_super(&super_bytes(&file, p.offset, target_size)?, target_size)?;
-        if after.blocks * after.block_size != target_size
-            || old.as_ref().is_some_and(|old| {
-                old.uuid != after.uuid
-                    || old.label != after.label
-                    || old.block_size != after.block_size
-                    || old.file_system != after.file_system
-            })
-        {
-            return Err("Ext 容量、UUID 或卷标后验核对失败。".into());
-        }
-        if let Action::ExtFormat {
-            label,
-            file_system,
-            block_size,
-            ..
-        } = &request.action
-        {
-            if after.label != label.as_bytes()
-                || after.file_system != *file_system
-                || after.block_size != u64::from(*block_size)
+        if !btrfs_format && btrfs_plan.is_none() {
+            let engine = engine.as_ref().ok_or("缺少 Ext 工具。")?;
+            file.sync_all().map_err(error)?;
+            let after = parse_super(&super_bytes(&file, p.offset, target_size)?, target_size)?;
+            if after.blocks * after.block_size != target_size
+                || old.as_ref().is_some_and(|old| {
+                    old.uuid != after.uuid
+                        || old.label != after.label
+                        || old.block_size != after.block_size
+                        || old.file_system != after.file_system
+                })
             {
-                return Err("Ext 文件系统类型、块大小或卷标核对失败。".into());
+                return Err("Ext 容量、UUID 或卷标后验核对失败。".into());
             }
+            if let Action::ExtFormat {
+                label,
+                file_system,
+                block_size,
+                ..
+            } = &request.action
+            {
+                if after.label != label.as_bytes()
+                    || after.file_system != *file_system
+                    || after.block_size != u64::from(*block_size)
+                {
+                    return Err("Ext 文件系统类型、块大小或卷标核对失败。".into());
+                }
+            }
+            engine.run(
+                "e2fsck.exe",
+                &["-f", "-n", "diskstudio"],
+                &file,
+                p.offset,
+                target_size,
+                sector,
+                false,
+            )?;
         }
-        engine.run(
-            "e2fsck.exe",
-            &["-f", "-n", "diskstudio"],
-            &file,
-            p.offset,
-            target_size,
-            sector,
-            false,
-        )?;
         let mut updated: Vec<_> = parts.iter().map(|p| (*p).clone()).collect();
         for e in &mut updated {
             if e.partition_number == p.partition_number {
@@ -849,6 +1007,82 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn embedded_btrfs_format_verifies_unicode_label_mirrors_and_extent_guards() {
+        let engine = Engine::load("btrfs", &BTRFS_ASSETS).unwrap();
+        for (index, sector, length, label) in [
+            (0, 512, 128 * policy::MIB, "资料归档"),
+            (1, 4096, 256 * policy::MIB, ""),
+        ] {
+            let path = engine.directory.join(format!("btrfs-{index}.img"));
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let guard = [0xa7; 4096];
+            let offset = policy::MIB;
+            let end = offset + length;
+            file.set_len(end + policy::MIB).unwrap();
+            for at in [offset - 4096, end] {
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.write_all(&guard).unwrap();
+            }
+            write_btrfs(&engine, &file, offset, length, sector, label).unwrap();
+            assert!(write_btrfs(&engine, &file, offset + 512, length, sector, label).is_err());
+            assert_eq!(file.metadata().unwrap().len(), end + policy::MIB);
+            let mut actual = [0; 4096];
+            for at in [offset - 4096, end] {
+                file.seek(SeekFrom::Start(at)).unwrap();
+                file.read_exact(&mut actual).unwrap();
+                assert_eq!(actual, guard);
+            }
+            drop(file);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn btrfs_resize_commits_in_a_bounded_image_and_preserves_neighbor_bytes() {
+        let engine = Engine::load("btrfs", &BTRFS_ASSETS).unwrap();
+        let path = engine.directory.join("btrfs-resize.img");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let offset = policy::MIB;
+        let initial = 256 * policy::MIB;
+        let total = 384 * policy::MIB;
+        file.set_len(offset + total).unwrap();
+        let guard = [0x73; 4096];
+        for at in [offset - 4096, offset + total - 4096] {
+            file.seek(SeekFrom::Start(at)).unwrap();
+            file.write_all(&guard).unwrap();
+        }
+        write_btrfs(&engine, &file, offset, initial, 4096, "事务校验").unwrap();
+        for (before, after) in [
+            (initial, 128 * policy::MIB),
+            (128 * policy::MIB, 320 * policy::MIB),
+        ] {
+            let mut region = Region::new(file.try_clone().unwrap(), offset, before).unwrap();
+            let plan = disk_core::btrfs::plan_resize(&mut region, after).unwrap();
+            let mut target =
+                Region::new(file.try_clone().unwrap(), offset, before.max(after)).unwrap();
+            disk_core::btrfs::resize(&mut target, &plan).unwrap();
+        }
+        for at in [offset - 4096, offset + total - 4096] {
+            file.seek(SeekFrom::Start(at)).unwrap();
+            let mut data = [0; 4096];
+            file.read_exact(&mut data).unwrap();
+            assert_eq!(data, guard);
+        }
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn embedded_engine_formats_and_resizes_all_ext_types_and_block_sizes() {
         for fs in [

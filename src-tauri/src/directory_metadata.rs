@@ -23,6 +23,7 @@ pub(crate) enum Proof {
     },
     Fat(crate::fat_recovery::Location),
     Ext(crate::ext_recovery::DirectoryLocation),
+    Btrfs(crate::btrfs_recovery::Location),
 }
 pub(crate) fn boot(reader: &mut (impl Read + Seek)) -> Result<[u8; 32], String> {
     reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -70,6 +71,9 @@ pub(crate) fn read<R: Read + Seek + 'static>(
         }
         Proof::Ext(location) => {
             crate::ext_recovery::directory_metadata(reader, location, &directory.name, cancel)
+        }
+        Proof::Btrfs(location) => {
+            crate::btrfs_recovery::directory_metadata(reader, location, &directory.name, &cancel)
         }
     }
 }

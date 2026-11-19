@@ -117,6 +117,8 @@ export type PartitionAction =
       blockSize: number;
     }
   | { type: "extResize"; partition: number; size: number }
+  | { type: "btrfsFormat"; partition: number; label: string }
+  | { type: "btrfsResize"; partition: number; size: number }
   | { type: "setLabel"; partition: number; label: string }
   | { type: "setDriveLetter"; partition: number; letter: string | null }
   | { type: "delete"; partition: number };

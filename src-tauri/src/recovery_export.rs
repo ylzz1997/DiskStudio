@@ -61,6 +61,40 @@ pub struct ImageSource {
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImageLvmSource {
+    pub volume_group: String,
+    pub sequence: u64,
+    pub logical_volume: String,
+    pub logical_volume_id: String,
+    pub members: Vec<ImageLvmMember>,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageLvmMember {
+    pub files: Vec<String>,
+    pub format: String,
+    pub offset: String,
+    pub size: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicalLvmSource {
+    pub volume_group: String,
+    pub sequence: u64,
+    pub logical_volume: String,
+    pub logical_volume_id: String,
+    pub members: Vec<PhysicalLvmMember>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhysicalLvmMember {
+    pub disk_number: u32,
+    pub partition: Option<u32>,
+    pub offset: String,
+    pub size: String,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Plan {
     pub options: crate::export_metadata::Options,
     pub layout: Layout,
@@ -75,6 +109,12 @@ pub struct Plan {
     pub backup_source: Option<BackupSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_source: Option<ImageSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_lvm_source: Option<ImageLvmSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_lvm_source: Option<PhysicalLvmSource>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lvm_degraded_raid: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,6 +356,9 @@ fn plan_with_directories(
         skipped,
         backup_source: None,
         image_source: None,
+        image_lvm_source: None,
+        physical_lvm_source: None,
+        lvm_degraded_raid: false,
     };
     let mut map = HashMap::from([(ROOT.to_string(), 0)]);
     let mut temporary: HashMap<String, HashSet<String>> = HashMap::new();
@@ -482,6 +525,12 @@ impl Plan {
             backup_source: Option<&'a BackupSource>,
             #[serde(skip_serializing_if = "Option::is_none")]
             image_source: Option<&'a ImageSource>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            image_lvm_source: Option<&'a ImageLvmSource>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            physical_lvm_source: Option<&'a PhysicalLvmSource>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            lvm_degraded_raid: bool,
             completed: bool,
             saved_files: usize,
             failed_files: usize,
@@ -501,6 +550,9 @@ impl Plan {
         let mut bytes = Limited(vec![]);
         serde_json::to_writer(&mut bytes, &Report {
             version: 3, options:self.options, completed, layout:self.layout, backup_source: self.backup_source.as_ref(), image_source: self.image_source.as_ref(),
+            image_lvm_source: self.image_lvm_source.as_ref(),
+            physical_lvm_source: self.physical_lvm_source.as_ref(),
+            lvm_degraded_raid: self.lvm_degraded_raid,
             saved_files: outcomes.iter().filter(|o| o.saved).count(),
             failed_files: outcomes.iter().filter(|o| !o.saved).count(),
             unprocessed_files: self.entries.len().saturating_sub(outcomes.len()),
@@ -911,6 +963,47 @@ mod tests {
                 })
             );
             assert_eq!(report["completed"], completed);
+        }
+    }
+    #[test]
+    fn physical_lvm_export_records_every_selected_range_without_device_paths() {
+        let mut plan = plan(&[file(1, "a", None)], &Catalog::default(), Layout::Tree).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_slice(&plan.manifest(&[], true).unwrap()).unwrap();
+        assert!(report.get("physicalLvmSource").is_none());
+        plan.physical_lvm_source = Some(PhysicalLvmSource {
+            volume_group: "vg".into(),
+            sequence: 3,
+            logical_volume: "history".into(),
+            logical_volume_id: "lv-id".into(),
+            members: vec![
+                PhysicalLvmMember {
+                    disk_number: 1,
+                    partition: Some(4),
+                    offset: "8192".into(),
+                    size: "4096".into(),
+                },
+                PhysicalLvmMember {
+                    disk_number: 2,
+                    partition: None,
+                    offset: "0".into(),
+                    size: "8192".into(),
+                },
+            ],
+        });
+        for completed in [false, true] {
+            let report: serde_json::Value =
+                serde_json::from_slice(&plan.manifest(&[], completed).unwrap()).unwrap();
+            assert_eq!(
+                report["physicalLvmSource"],
+                serde_json::json!({
+                    "volumeGroup": "vg", "sequence": 3, "logicalVolume": "history", "logicalVolumeId": "lv-id",
+                    "members": [
+                        {"diskNumber":1, "partition":4, "offset":"8192", "size":"4096"},
+                        {"diskNumber":2, "partition":null, "offset":"0", "size":"8192"}
+                    ]
+                })
+            );
         }
     }
     struct MemoryWriter {

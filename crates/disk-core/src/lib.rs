@@ -1,9 +1,12 @@
 //! Pure disk models, bounded image-header parsing and FAT metadata generation.
 //! Intentionally no filesystem, raw-device, process, mount or elevation APIs.
+pub mod btrfs;
 pub mod fat_format;
 mod image;
+pub mod lvm;
 pub mod mbr;
 pub mod partition_move;
+mod raid_field;
 pub mod table_check;
 pub use image::parse_image;
 use serde::{Deserialize, Serialize};

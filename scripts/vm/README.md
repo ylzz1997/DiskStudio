@@ -4,6 +4,68 @@
 
 所有 QEMU、下载、系统盘、测试盘、检查点、工具光盘、测试临时文件和日志集中在项目 `.vm/`。脚本不安装系统服务、不修改 PATH、不提权、不自动启用 Windows 功能。
 
+## Btrfs 原生界面验收
+
+`build-btrfs.ps1` 将 4Kn 客体工具绑定到已完成的桌面程序哈希。`Btrfs-Lab-4Kn-Create.exe` 核对身份后仅在 A 的未分配空间创建一个 512 MiB Linux 分区，并记录其分区号、位置和其余 GPT 布局。在同一工具光盘的正式程序内以 `DSBTRFS4KN` 为卷标格式化该分区。`Inspect` 复核范围、卷标、超级块与设备树，并确认 A 保持脱机和其余布局不变。`Online` 核对已格式化或已缩小的指定分区后联机 A，供原生界面依次调整到 256 MiB 与 768 MiB。每次调整后再次运行 `Inspect`。
+
+Windows 正常关机后，`node scripts/vm/ubuntu.mjs btrfs-verify` 将同一对 4Kn 磁盘以只读方式接入 Ubuntu。提前用 `seed-btrfs-verify` 准备只读种子。Ubuntu 核对 A 上的卷标、分区类型和 768 MiB 容量，运行 `btrfs check --readonly`，并只读挂载核对空目录。正式构建 `28ac3b7b…` 在 A/33 的三项原生操作及 Ubuntu 独立检查均通过。记录见 `.vm/btrfs-batch-status.json`。
+
+尾部条带搬移使用 `build-btrfs.ps1 -Relocation`，将同一桌面构建、两个来宾入口和 384 MiB 的 `DSBTRFSMOVE` 样本绑定到 SHA-256。用 `make-tools-iso.ps1 -Live -BtrfsMoveFixture` 选择 `Btrfs-Lab-4Kn-Move-Prepare.exe` 和 `Btrfs-Lab-4Kn-Move-Inspect.exe` 生成只读工具光盘。准备入口只在 A 的新 Linux GPT 分区写入样本，完成校验后联机 A。用桌面程序预览该分区缩到 192 MiB，预计搬移 80 MiB，再提交一次。检查入口核对 A 脱机、其余分区和来宾 OS 布局，并完整回读样本的 51 个文件。
+
+如果首轮因空闲范围不足在建分区前结束，可用 `-Relocation -ReuseFixture` 和 `Btrfs-Lab-4Kn-Move-Reuse.exe`、`Btrfs-Lab-4Kn-Move-Reuse-Inspect.exe`。此入口按旧批次记录和固定字节范围核对已验收的 768 MiB 空白 A/33，锁卷脱机后再次验证其空目录，才准备同大小的有文件样本。原生缩容预览为 768→192 MiB，搬移量仍为 80 MiB。
+
+Windows 正常关机后运行 Ubuntu 的 `btrfs-move-verify`。提前用 `seed-btrfs-move-verify` 建立只读种子。Ubuntu 只读检查文件系统和数据校验和，再挂载读出文件清单与内容 SHA-256。将该摘要与 Windows 后验记录核对。
+
+正式构建 `0b731c98…` 有 752 项集中检查通过，1 项按配置跳过。本地、留档和客体载荷 SHA-256 一致。首轮准备工具在创建分区前受自身操作锁阻断，随后复用已验证的空白 A/33。原生预览和实际缩容均通过。A 保持脱机，B 写入计数在缩容中未增加。Windows 后验和 Ubuntu 只读核对的 51 个文件内容摘要一致。详见 `.vm/btrfs-relocation-batch-status.json`。
+
+快照恢复样本由 `node scripts/vm/ubuntu.mjs seed-btrfs-snapshot-image` 和 `btrfs-snapshot-image` 生成。此阶段只给 Ubuntu 接入系统盘与种子光盘，文件系统建立在内存普通文件中。Linux 创建只读快照后删除一个内联文件和一个压缩文件，并保留改名、仍存在硬链接、未修改的三个对照。只读检查通过后，客体通过串口记录镜像及样本的 SHA-256。用 `extract-btrfs-snapshot.py` 读取该次串口日志，验证传输和解压，再保存普通镜像到 `.vm`。
+
+用 `build-btrfs.ps1 -Snapshot` 绑定正式程序和镜像摘要，使用 `make-tools-iso.ps1 -Live -BtrfsSnapshotFixture` 选择 `Btrfs-Lab-4Kn-Snapshot-Prepare.exe` 与 `Btrfs-Lab-4Kn-Snapshot-Inspect.exe`。来宾先核实普通镜像恰好提供两个已删除候选，再在 A 的新 Linux GPT 分区写入同一镜像并回读，完成后 A 脱机。用原生程序「找回删除文件」扫描指定分区，保留目录导出两个候选到 B 的指定文件夹。检查入口复核输出内容、嵌套目录、导出清单、A 的源镜像和两盘 GPT。
+
+真实快照样本检出了压缩文件末尾部分扇区的解码问题。修复后，`40e54920…` 的 753 项集中检查通过，1 项按配置跳过。同一正式程序在 4Kn A/34 上完成扫描、预览和导出，B 上的两个文件及嵌套目录经独立复查通过，两份摘要均与 Linux 原样本相符。A 保持脱机，源范围字节、两盘 GPT 及客体系统盘布局与基线一致。见 `.vm/btrfs-snapshot-batch-status.json`。
+
+保留事务恢复样本使用 `node scripts/vm/ubuntu.mjs seed-btrfs-retained-image` 和 `btrfs-retained-image` 生成。Linux 同步后记录活动子卷的根地址和事务代次，随后删除文件，确认无快照并运行 `btrfs check --readonly --check-data-csum`。用 `btrfs restore -t` 指定旧根，在内存中独立复核两个文件。`extract-btrfs-snapshot.py` 同样可提取 `btrfs-retained-image-*.log` 中的镜像，校验串口传输、镜像摘要和样本清单。
+
+用 `build-btrfs.ps1 -Retained` 绑定正式程序与镜像，使用 `make-tools-iso.ps1 -Live -BtrfsRetainedFixture` 选择 `Btrfs-Lab-4Kn-Retained-Prepare.exe` 和 `Btrfs-Lab-4Kn-Retained-Inspect.exe`。准备入口验证普通镜像中只有两个保留事务候选，再写入 A 的专用 Linux GPT 分区并回读。原生程序从脱机 A 扫描指定分区并按原目录导出至 B 上由准备入口报告的文件夹。检查入口复核完整内容、嵌套目录、导出清单、A 的源镜像和两盘 GPT。
+
+正式构建 `40e54920…` 在 4Kn A/35 完成无快照样本扫描、预览和导出。Linux 从第 7 代根读出的两个文件与 B 上回读的内容和 SHA-256 相符，改名、仍有硬链接和未改动的文件均未列入候选。A 保持脱机，扫描、导出及后验期间未新增写入，源范围、两盘 GPT 和客体系统盘布局也与基线相符。导出清单记录两个文件和两个目录的时间或属性提示。见 `.vm/btrfs-retained-batch-status.json`。
+
+使用 `node scripts/vm/ubuntu.mjs seed-btrfs-checksum-images` 和 `btrfs-checksum-images` 生成 xxHash64、SHA-256 和 BLAKE2b-256 普通镜像。该阶段只接入 Ubuntu 系统盘和只读种子，镜像在内存中创建。每个镜像含内联文本和嵌套目录中的 Zstd 文件。Linux 对每个镜像运行文件系统及数据校验检查，并重新只读挂载核对文件内容。用 `extract-btrfs-snapshot.py` 提取该次串口日志中的三份镜像与清单，存放在 `.vm/btrfs-native-checksum`。
+
+用 `build-btrfs.ps1 -Sha256` 将 SHA-256 样本和正式构建绑定。用 `make-tools-iso.ps1 -Live -BtrfsSha256Fixture` 选择 `Btrfs-Lab-4Kn-Sha256-Prepare.exe` 和 `Btrfs-Lab-4Kn-Sha256-Inspect.exe`。在 4Kn Windows 来宾中准备 A 上的 256 MiB 样本，通过正式程序预览并缩容至 192 MiB。检查入口复核两个文件、A 的 GPT 末端变更、A 脱机状态、B 的 GPT 和来宾系统盘布局。Windows 关机后，用 `seed-btrfs-sha256-verify` 准备种子，再运行 `btrfs-sha256-verify`，在 Ubuntu 中只读核对缩容后的文件系统和数据。
+
+三种普通镜像均完成 256→320→256 MiB 扩缩容往返及 256→192 MiB 缩容，两个文件的 SHA-256 一致。正式构建 `b5edec6d…` 在 4Kn A/36 通过 SHA-256 缩容、原生扫描和压缩文件预览。独立检查核对了 A 的 GPT 变更和脱机状态，B 的写入计数未增加。随后 Ubuntu 只读复查两份文件，内容与初始样本一致。见 `.vm/btrfs-checksum-batch-status.json`。
+
+用 `node scripts/vm/ubuntu.mjs seed-btrfs-members-images` 和 `btrfs-members-images` 在隔离 Ubuntu 内生成两个普通成员镜像。样本以 RAID0 存放文件数据，以 RAID1 镜像元数据。Linux 复核文件系统及数据校验，并从只读挂载中读取跨条带文件及只读快照里的删除文件。以 `extract-btrfs-snapshot.py` 提取该次记录的镜像和摘要。
+
+用 `build-btrfs.ps1 -Members` 以及 `make-tools-iso.ps1 -Live -BtrfsMembersFixture`，选择 `Btrfs-Lab-4Kn-Members-Prepare.exe` 和 `Btrfs-Lab-4Kn-Members-Inspect.exe`。准备入口验证普通镜像后，在 A 和 B 各创建一个 256 MiB Linux 分区并写入对应成员。两盘脱机后在原生界面选择报告中的两个分区，检查目录浏览、预览、删除候选和缺失成员的处理。检查入口独立回读两份成员镜像和两个文件，复核两盘 GPT 和客体系统盘布局。
+
+用 `seed-btrfs-parity-images` 和 `btrfs-parity-images` 生成 2 设备 RAID5 和 4 设备 RAID6 样本。两种样本的数据、元数据及系统块组都使用对应的 RAID 配置。Ubuntu 只挂载其虚拟系统盘和只读种子光盘，在内存中的普通文件上生成样本并核对数据。用 `extract-btrfs-snapshot.py` 校验并提取镜像。
+
+用 `build-btrfs.ps1 -Parity` 和 `make-tools-iso.ps1 -Live -BtrfsParityFixture` 选择 `Btrfs-Lab-4Kn-Parity-Prepare.exe` 和 `Btrfs-Lab-4Kn-Parity-Inspect.exe`。准备入口在 A 新建三个专用分区，写入一个 RAID5 成员与两个 RAID6 成员。A 脱机后，在原生程序显式允许缺盘读取。分别检查缺一个与缺两个成员时的目录和预览，再将 RAID6 的 `live/nested/striped.bin` 保留目录导出到报告指定的 B 盘目录。检查入口独立核对文件、三个成员镜像、两盘 GPT 与来宾系统盘布局。
+
+用 `seed-btrfs-allocation-image` 和 `btrfs-allocation-image` 生成带独立块组树的单设备普通镜像。Ubuntu 核对分配和数据校验，并只读挂载验证共享范围、稀疏文件、预分配文件和快照内容。用 `extract-btrfs-snapshot.py` 提取镜像。用 `build-btrfs.ps1 -Allocation` 和 `make-tools-iso.ps1 -Live -BtrfsAllocationFixture` 选择 `Btrfs-Lab-4Kn-Allocation-Prepare.exe`、`Btrfs-Lab-4Kn-Allocation-Archive.exe`、`Btrfs-Lab-4Kn-Allocation-Inspect.exe`。准备工具报告 A 的源分区、B 的目标分区及备份路径。先用正式界面发起已用空间备份，再用 Archive 核验备份。之后执行已用空间克隆并运行 Inspect。后验核对全部已复制范围、B 原有的空闲区、五个文件以及两盘 GPT 和来宾系统盘布局。
+
+用 `build-btrfs.ps1 -LostPartition` 和 `make-tools-iso.ps1 -Live -BtrfsLostFixture` 选择 `Btrfs-Lab-4Kn-Lost-Prepare.exe` 与 `Btrfs-Lab-4Kn-Lost-Inspect.exe`。准备工具核对 Linux 样本和完整 GPT，只在 A 的 14 GiB 起始、768 MiB 未登记且逐字节为零的范围放入两个样本。界面搜索报告指定的 LBA 范围，并从仅剩备用超级块的候选保留路径导出两个文件到 B。再选择主超级块完好的候选恢复一项 GPT Linux 数据条目。检查工具核对文件、完整源样本、前后 GPT 和来宾系统盘布局。
+
+用 `build-btrfs.ps1 -LostMembers` 和 `make-tools-iso.ps1 -Live -BtrfsLostMembersFixture` 选择 `Btrfs-Lab-4Kn-Lost-Group-Prepare.exe` 与 `Btrfs-Lab-4Kn-Lost-Group-Inspect.exe`。准备工具仅在 A 的 12 GiB 起始、768 MiB 未登记且逐字节为零的范围放入两个 Linux RAID0 数据成员。按报告分别搜索两个成员范围，在第二次搜索中联合选取上一次搜索的成员，预览并保留目录导出 `striped.bin` 到 B。检查工具比较两个完整成员、原有 GPT、来宾系统盘布局与 Linux 文件 SHA-256。
+
+用 `node scripts/vm/ubuntu.mjs seed-lvm-images-4kn` 和 `node scripts/vm/ubuntu.mjs lvm-images-4kn` 在单独的 Ubuntu 来宾生成普通 LVM2 镜像。Ubuntu 核对设备映射，分别检查 Ext4 线性卷和条带卷并读回嵌套文件。用 `extract-lvm-fixtures.py` 从验收串口日志提取两个镜像，随后使用 `build-lvm.ps1` 和 `make-tools-iso.ps1 -Live -LvmFixture` 选择 `Lvm-Lab-4Kn-Prepare.exe` 与 `Lvm-Lab-4Kn-Inspect.exe`。准备工具验证 A 两个固定范围未分配且逐字节为空后建立普通 Linux GPT 条目。按报告在文件恢复中先读取第一个物理卷，再读取完整卷组并保留目录导出条带文件到 B。后验核对两个逻辑卷、两份物理卷完整摘要、B 的导出及受保护布局。
+
+镜像浏览验收先运行 `node scripts/vm/build-lvm-image.mjs`，将两个物理卷放入 GPT 普通文件镜像，再转换为动态 VHDX，使用 QEMU 比对逻辑字节。然后运行 `build-lvm.ps1 -Images`，制作只读光盘并选择 `Lvm-Images-4Kn-Prepare.exe` 与 `Lvm-Images-4Kn-Inspect.exe`。准备工具核对正式载荷，在 4Kn 测试 A 的 12 GiB 处校验空闲范围并创建 1 GiB NTFS 夹具卷，核对其他既有分区，再写入两个完整 RAW 和 VHDX。原生界面从「备份与克隆 → 浏览镜像」分别读取两种来源，预览线性卷并保留目录导出条带卷文件到 B 的两个输出目录。后验工具比对三个源文件完整摘要、两份导出和各自清单记录的镜像范围，以及准备后的 A/B GPT 和来宾 OS 布局。
+
+RAID 镜像验收使用 Ubuntu 的 `seed-lvm-raid-matrix-4kn` 和 `lvm-raid-matrix-4kn` 阶段生成五个物理卷。Linux 等待阵列同步，核对七个 Ext4 逻辑卷并独立读回各自的文件。用 `extract-lvm-fixtures.py` 提取带摘要的镜像，再运行 `node scripts/vm/build-lvm-image.mjs --raid` 将五个物理卷组装成 VHDX。运行 `build-lvm.ps1 -Raid`，并用 `make-tools-iso.ps1 -Live -LvmFixture` 选择 `Lvm-Raid-4Kn-Prepare.exe` 和 `Lvm-Raid-4Kn-Inspect.exe`。准备工具将 VHDX 写入 A 上已有的 1 GiB NTFS 夹具卷。按工具提示在正式界面选择全部五个成员，将 `r1` 和 `r6` 的 `nested` 文件夹导出到 B 上各自的目录。后验工具核对 Linux 文件摘要、五个来源范围、源 VHDX 摘要、两盘 GPT 及来宾系统盘布局。
+
+缺盘读取验收复用同一份 RAID VHDX。运行 `build-lvm.ps1 -RaidDegraded`，并在只读工具光盘选择 `Lvm-Degraded-4Kn-Prepare.exe` 和 `Lvm-Degraded-4Kn-Inspect.exe`。准备工具核对 A 上已存在的镜像，在 B 创建本次输出目录。原生界面先选 PV 1、PV 2 和 PV 4，验证默认状态下需要缺失成员的卷不可读。勾选允许缺盘读取后，将缺一个成员的 `r5` 和缺两个成员的 `r6` 的 `nested` 分别导出到 B。后验核对 Linux 摘要、缺盘清单标记、三个所选成员范围和分区布局。
+
+跨盘删除恢复验收使用 Ubuntu 的 `seed-lvm-cross-deleted-4kn` 和 `lvm-cross-deleted-4kn` 阶段生成两个普通物理卷文件。384 MiB 条带逻辑卷内的 Btrfs 只读快照保留了已从源子卷删除的 `nested/deleted.bin`。Linux 独立检查文件系统和数据校验，并以只读挂载确认删除文件、改名对照和现存对照。用 `extract-lvm-fixtures.py` 提取夹具后，运行 `build-lvm.ps1 -CrossDeleted`，在只读工具光盘选择 `Lvm-Cross-4Kn-Prepare.exe` 和 `Lvm-Cross-4Kn-Inspect.exe`。准备工具核对正式载荷，只在 A 的 13、13.5 GiB 和 B 的 13 GiB 处逐字节空白且未分配的范围创建分区。先选 A 与 B 的成员，扫描唯一删除候选并验证 B 不能作为输出。再选 A 的两个成员，将同一候选保留目录导出到 B。后验核对原始 SHA-256、历史目录、物理卷导出清单和受保护的布局。
+
+薄置备镜像验收使用 Ubuntu 的 `seed-lvm-thin-snapshots-4kn` 和 `lvm-thin-snapshots-4kn` 阶段。薄池的数据和元数据分别放在两个物理卷中。Linux 从 Ext4 原卷生成快照并改写原卷，再独立核对两个版本的文件与未分配空间。用 `extract-lvm-fixtures.py` 提取普通文件，运行 `node scripts/vm/build-lvm-image.mjs --thin`、`build-lvm.ps1 -Thin`。用 `make-tools-iso.ps1 -Live -LvmFixture` 选择 `Lvm-Thin-4Kn-Prepare.exe` 和 `Lvm-Thin-4Kn-Inspect.exe`，复用 A 上已有的夹具卷。从镜像浏览入口分别选择 `origin` 和 `point1`，将各自的 `nested` 文件夹导出到报告指定的 B 盘目录，再运行后验工具核对两个版本和受保护的分区布局。
+
+传统快照验收使用 Ubuntu 的 `seed-lvm-cow-persistent-4kn` 和 `lvm-cow-persistent-4kn` 阶段。Linux 在不同物理卷上放置原卷和 COW 存储，创建两代快照并改写原卷。在 Ext4 文件系统之外额外变更 2 MiB，覆盖多个例外表区域。另创建以零卷为原卷的稀疏快照。用 `extract-lvm-fixtures.py` 提取镜像，运行 `node scripts/vm/build-lvm-image.mjs --cow` 和 `build-lvm.ps1 -Cow`。用 `make-tools-iso.ps1 -Live -LvmFixture` 选择 `Lvm-Cow-4Kn-Prepare.exe` 和 `Lvm-Cow-4Kn-Inspect.exe`，复用 A 上已有的夹具卷。从正式界面分别导出 `point1` 和 `sparse` 的 `nested` 到 B，随后核对两份文件、镜像清单和分区布局。
+
+正式构建 `16319c7c…` 核对了 A/37 + B/4 的完整成员组。原生界面拒绝单成员扫描，选齐后找到唯一的快照删除候选，并通过文本预览。磁盘管理的浏览入口列出并预览 640 KiB 的跨条带文件。独立回读确认两个文件与 Linux 摘要一致，两份完整成员镜像、GPT 和客体系统盘布局也与基线相符。两盘保持脱机，扫描和后验期间的写入计数均未增加。两盘都用作源成员，本用例覆盖原生读取和恢复候选，目标盘导出另行验收。见 `.vm/btrfs-members-batch-status.json`。
+
 ## 扇区范围复制
 
 `build-sector-copy.ps1` 绑定已完成的桌面构建，只编译 4Kn 客体核对工具。将 `Sector-Copy-4Kn-Baseline.exe`、`Sector-Copy-4Kn-Verify.exe` 和 `Sector-Copy-4Kn-Verify-Report.exe` 与同一份 `DiskStudio.exe` 放入只读工具光盘。验证 payload SHA-256，运行 `node scripts/vm/lab.mjs preflight`，再在 DiskStudio-Test 中启动基线工具。

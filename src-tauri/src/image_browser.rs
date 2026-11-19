@@ -260,6 +260,28 @@ impl Browser {
         )
         .map_err(|e| e.to_string())
     }
+    pub fn readers(&self, ids: &[u32]) -> Result<Vec<Region<Box<dyn Source>>>, String> {
+        let parts = ids
+            .iter()
+            .map(|id| self.part(*id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let source = if let Some(factory) = &self.factory {
+            Arc::new(Mutex::new(factory.reader()?))
+        } else {
+            self.source.as_ref().ok_or("镜像读取来源已失效")?.clone()
+        };
+        parts
+            .into_iter()
+            .map(|part| {
+                let reader = Box::new(SharedReader {
+                    source: source.clone(),
+                    pos: 0,
+                    size: self.info.size,
+                }) as Box<dyn Source>;
+                Region::new(reader, part.start, part.size).map_err(|e| e.to_string())
+            })
+            .collect()
+    }
     pub fn label(&self, id: u32) -> Result<String, String> {
         Ok(format!("{} / {}", self.info.name, self.part(id)?.name))
     }

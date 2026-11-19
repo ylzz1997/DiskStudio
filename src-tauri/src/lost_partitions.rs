@@ -7,6 +7,9 @@ use std::{
     io::{Read, Seek, SeekFrom},
     sync::atomic::{AtomicBool, Ordering},
 };
+#[path = "lost_btrfs.rs"]
+mod btrfs;
+
 const BLOCK: usize = 1024 * 1024;
 pub const MAX_CANDIDATES: usize = 256;
 const MAX_PROBES: usize = 65536;
@@ -19,8 +22,15 @@ pub struct Candidate {
     pub size: u64,
     pub evidence: String,
     pub warning: String,
+    pub can_restore: bool,
+    pub can_browse: bool,
+    pub btrfs_member_count: Option<usize>,
     #[serde(skip)]
     fingerprint: String,
+    #[serde(skip)]
+    btrfs_anchor: Option<u64>,
+    #[serde(skip)]
+    pub(crate) btrfs_member: Option<disk_core::btrfs::RecoveryMember>,
 }
 fn u16at(b: &[u8], n: usize) -> u64 {
     u16::from_le_bytes(b[n..n + 2].try_into().unwrap()) as u64
@@ -47,7 +57,13 @@ struct Probe<'a, R> {
 }
 impl<R: Read + Seek> Probe<'_, R> {
     fn read(&mut self, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let mut bytes = vec![0; len];
+        self.read_exact(offset, &mut bytes)?;
+        Ok(bytes)
+    }
+    fn read_exact(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), String> {
         canceled(self.cancel)?;
+        let len = bytes.len();
         if len > 128 * 1024
             || offset
                 .checked_add(len as u64)
@@ -55,17 +71,16 @@ impl<R: Read + Seek> Probe<'_, R> {
         {
             return Err("文件系统证据读取超出搜索范围".into());
         }
-        let mut bytes = vec![0; len];
         self.reader
             .seek(SeekFrom::Start(self.start + offset))
             .map_err(|e| e.to_string())?;
         self.reader
-            .read_exact(&mut bytes)
+            .read_exact(bytes)
             .map_err(|e| format!("候选证据读取失败，偏移 {}：{e}", self.start + offset))?;
         self.hash.update(offset.to_le_bytes());
         self.hash.update((len as u64).to_le_bytes());
-        self.hash.update(&bytes);
-        Ok(bytes)
+        self.hash.update(bytes);
+        Ok(())
     }
     fn limit(&mut self, size: u64, sector: u64) -> bool {
         if size < 4096 || size > self.size || size % sector != 0 {
@@ -436,7 +451,12 @@ pub fn probe<R: Read + Seek>(
         size: p.size,
         evidence,
         warning,
+        can_restore: true,
+        can_browse: true,
+        btrfs_member_count: None,
         fingerprint: format!("{:x}", p.hash.finalize()),
+        btrfs_anchor: None,
+        btrfs_member: None,
     }))
 }
 pub fn revalidate<R: Read + Seek>(
@@ -445,10 +465,19 @@ pub fn revalidate<R: Read + Seek>(
     candidate: &Candidate,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let current =
-        probe(reader, range, candidate.offset, cancel)?.ok_or("候选文件系统证据已失效")?;
+    let current = match candidate.btrfs_anchor {
+        Some(anchor) => {
+            let mut budget = btrfs::BUDGET;
+            btrfs::probe(reader, range, candidate.offset, anchor, cancel, &mut budget)?
+        }
+        None => probe(reader, range, candidate.offset, cancel)?,
+    }
+    .ok_or("候选文件系统证据已失效")?;
     if current.filesystem != candidate.filesystem
         || current.size != candidate.size
+        || current.can_restore != candidate.can_restore
+        || current.can_browse != candidate.can_browse
+        || current.btrfs_member != candidate.btrfs_member
         || current.fingerprint != candidate.fingerprint
     {
         return Err("候选文件系统证据已改变，请重新搜索。".into());
@@ -520,6 +549,8 @@ pub fn scan<R: Read + Seek>(
     let mut done = 0u64;
     let mut probes = 0usize;
     let mut found = 0usize;
+    let mut btrfs_offsets = std::collections::HashSet::new();
+    let mut btrfs_budget = btrfs::BUDGET;
     progress(0, None)?;
     while done < range.size {
         canceled(cancel)?;
@@ -533,7 +564,12 @@ pub fn scan<R: Read + Seek>(
             .read_exact(&mut bytes)
             .map_err(|e| format!("搜索读取失败，已检查 {done} 字节：{e}"))?;
         for i in (0..n).step_by(range.sector as usize) {
-            if !hint(&bytes[i..]) {
+            let offset = range.offset + done + i as u64;
+            let anchor = disk_core::btrfs::recovery_superblock_address(&bytes[i..])
+                .and_then(|relative| offset.checked_sub(relative).map(|start| (start, relative)))
+                .filter(|(start, _)| *start >= range.offset && !btrfs_offsets.contains(start));
+            let boot = hint(&bytes[i..]);
+            if !boot && anchor.is_none() {
                 continue;
             }
             canceled(cancel)?;
@@ -541,11 +577,25 @@ pub fn scan<R: Read + Seek>(
             if probes > MAX_PROBES {
                 return Err("引导特征过多，达到证据检查上限；请缩小搜索范围。".into());
             }
-            if let Some(candidate) = probe(reader, range, range.offset + done + i as u64, cancel)? {
+            let mut publish = |candidate| -> Result<(), String> {
                 found += 1;
                 progress(done + i as u64, Some(candidate))?;
                 if found == MAX_CANDIDATES {
                     return Err("已达到 256 个候选上限；结果不完整，请缩小范围。".into());
+                }
+                Ok(())
+            };
+            if boot {
+                if let Some(candidate) = probe(reader, range, offset, cancel)? {
+                    publish(candidate)?;
+                }
+            }
+            if let Some((start, relative)) = anchor {
+                if let Some(candidate) =
+                    btrfs::probe(reader, range, start, relative, cancel, &mut btrfs_budget)?
+                {
+                    btrfs_offsets.insert(start);
+                    publish(candidate)?;
                 }
             }
         }

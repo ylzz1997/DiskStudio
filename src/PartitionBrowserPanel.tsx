@@ -1,4 +1,5 @@
 import { ArrowLeft, FolderOpen, RefreshCcw } from "lucide-react";
+import type { ReactNode } from "react";
 import type { Partition } from "./types";
 import { formatSize } from "./types";
 import { partitionTitle } from "./LocalDiskView";
@@ -11,6 +12,7 @@ export function PartitionBrowserPanel({
   loaded,
   onRead,
   onBack,
+  children,
 }: {
   partition: Partition | undefined;
   busy: boolean;
@@ -18,6 +20,7 @@ export function PartitionBrowserPanel({
   loaded: boolean;
   onRead: () => void;
   onBack: () => void;
+  children?: ReactNode;
 }) {
   const { t, catalogText } = useLocale();
   return (
@@ -55,9 +58,10 @@ export function PartitionBrowserPanel({
           {loaded ? t("重新读取目录") : t("读取目录")}
         </button>
       </div>
+      {children}
       <p className="data-footnote">
         {t(
-          "读取现存文件和目录，随后可预览、筛选并复制到其他磁盘。支持 NTFS、FAT、exFAT 和干净卸载的 Ext2/3/4；无需分配盘符。首次读取可能需要等待。",
+          "可浏览 NTFS、FAT、exFAT 以及干净卸载的 Ext2/3/4 和 Btrfs 分区。读取后可预览文件并复制到其他磁盘。",
         )}
       </p>
       <p className="data-footnote">

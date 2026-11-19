@@ -203,7 +203,11 @@ export function TableRestoreDialog({
           <p>
             <strong>{preview.target}</strong>
             <br />
-            {recovery ? catalogText(preview.name) : preview.name}
+            {recovery
+              ? t("恢复 {count} 个找到的分区记录", {
+                  count: preview.changes.length.toLocaleString(language),
+                })
+              : preview.name}
           </p>
           <dl>
             <div>

@@ -628,6 +628,7 @@ function Workspace() {
       {modal === "lostPartitions" && disk && (
         <LostPartitionDialog
           disk={disk}
+          disks={disks}
           onRefresh={refreshLocal}
           onBusy={operationBusy}
           onClose={() => setModal(null)}

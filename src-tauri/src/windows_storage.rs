@@ -396,15 +396,13 @@ fn disk_read_context(
     if retained.is_some_and(|(old, _)| old.fingerprint != fingerprint) {
         return Err("锁定期间磁盘、分区或卷信息变化。".into());
     }
+    let title = crate::native_locale::current()
+        .format("磁盘 {number}", &[("number", &disk.number.to_string())]);
     let resolved = crate::data_windows::Resolved {
         disk: disk.clone(),
         offset: 0,
         size: disk.size,
-        label: format!(
-            "磁盘 {} · {}",
-            disk.number,
-            disk.serial_number.as_deref().unwrap_or("")
-        ),
+        label: format!("{title} · {}", disk.serial_number.as_deref().unwrap_or("")),
         volumes: volumes
             .iter()
             .map(|(_, v)| volume_manage::volume_key(v.volume_path.as_deref().unwrap_or("")))
@@ -1148,15 +1146,13 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
     let (binding, _) = s.bind(&request)?;
     let (filesystem_proof, filesystem_summary) = if crate::extfs::is_action(&request.action) {
         let d = s.disk(&request.target)?;
-        (
-            Some(crate::extfs::preview(
-                &request,
-                d,
-                &policy::layout(d, &s.partitions)?,
-                s.partition(&request.target, request.action.partition().unwrap())?,
-            )?),
-            None,
-        )
+        let (proof, summary) = crate::extfs::preview(
+            &request,
+            d,
+            &policy::layout(d, &s.partitions)?,
+            s.partition(&request.target, request.action.partition().unwrap())?,
+        )?;
+        (Some(proof), summary)
     } else if let Action::FatResize { partition, .. } = request.action {
         let d = s.disk(&request.target)?;
         let (proof, summary) = fat_resize::preview(
@@ -1178,7 +1174,8 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
         Action::Create { size, .. }
         | Action::Resize { size, .. }
         | Action::FatResize { size, .. }
-        | Action::ExtResize { size, .. } => Some(size),
+        | Action::ExtResize { size, .. }
+        | Action::BtrfsResize { size, .. } => Some(size),
         Action::Delete { .. } => Some(0),
         _ => before,
     };
@@ -1195,6 +1192,8 @@ pub fn prepare(mut request: Request) -> Result<Plan, String> {
         Action::FatResize { .. } => "将锁定整盘的卷，执行后磁盘保持脱机。扩容先调整 GPT，缩容先调整文件系统。请先备份，执行期间请勿关闭程序或计算机。",
         Action::Delete { .. } => "删除所选数据分区及其卷，分区内的数据将无法正常访问。",
         Action::ExtFormat { .. } => "所选分区的现有数据将被清除，并建立所选 Ext 文件系统。会锁定整块磁盘的卷并使磁盘脱机，完成后保持脱机。执行期间请勿关闭程序或计算机。",
+        Action::BtrfsFormat { .. } => "所选分区的现有数据将被清除。新 Btrfs 文件系统使用单设备和 CRC32C。磁盘会脱机，完成后保持脱机。",
+        Action::BtrfsResize { .. } => "已核对 Btrfs 块组。扩容先扩大分区，缩容先缩小文件系统。磁盘在操作后保持脱机。请先备份，执行期间请勿关闭程序或计算机。",
         Action::ExtResize { .. } => "已检查 Ext 文件系统。扩容先扩大分区再扩大文件系统；缩容先缩小文件系统再缩小分区。保留现有文件，不移动起始位置。会锁定整块磁盘并保持脱机；断电或 I/O 失败仍可能损坏数据，请先备份，执行期间请勿关闭程序。",
     };
     let mut warning = locale.text(warning).to_owned();
@@ -1488,6 +1487,8 @@ fn execute_bound(
         )?,
         Action::ExtFormat { .. }
         | Action::ExtResize { .. }
+        | Action::BtrfsFormat { .. }
+        | Action::BtrfsResize { .. }
         | Action::FatResize { .. }
         | Action::SetLabel { .. }
         | Action::SetDriveLetter { .. } => unreachable!(),
@@ -1632,6 +1633,8 @@ fn verify(current: &Session, r: &Request, before: &Session) -> Result<bool, Stri
         }
         Action::ExtFormat { .. }
         | Action::ExtResize { .. }
+        | Action::BtrfsFormat { .. }
+        | Action::BtrfsResize { .. }
         | Action::FatResize { .. }
         | Action::SetLabel { .. }
         | Action::SetDriveLetter { .. } => false,

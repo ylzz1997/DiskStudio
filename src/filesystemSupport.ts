@@ -49,7 +49,16 @@ export const filesystemSupport: readonly FilesystemSupport[] = [
     freeWipe: "未实现",
   },
   {
-    name: "ReFS / APFS / HFS+ / Btrfs / XFS / 其他",
+    name: "Btrfs",
+    browse: "干净卸载的单设备或多设备卷",
+    recover: "只读快照或保留事务候选",
+    format: "单设备 CRC32C",
+    resize: "单设备末端缩放 · 支持搬移尾部条带",
+    allocatedCopy: "单设备 · 分配记录校验",
+    freeWipe: "未实现",
+  },
+  {
+    name: "ReFS / APFS / HFS+ / XFS / 其他",
     browse: "未实现",
     recover: "未实现",
     format: "未实现",
@@ -62,6 +71,15 @@ export const filesystemSupport: readonly FilesystemSupport[] = [
 export function isFatResizeFilesystem(filesystem: string) {
   return ["FAT", "FAT12", "FAT16", "FAT32", "EXFAT"].includes(
     filesystem.toUpperCase(),
+  );
+}
+
+export function hasBtrfsFormatGeometry(disk: Disk, partition: Partition) {
+  return (
+    partition.size >= 128 * 1024 * 1024 &&
+    partition.start % 4096 === 0 &&
+    partition.size % 4096 === 0 &&
+    (disk.sectorSize === 512 || disk.sectorSize === 4096)
   );
 }
 
@@ -104,12 +122,16 @@ export function selectedFilesystemSupport(
     format: windows
       ? "NTFS、FAT12/16/32、exFAT"
       : ext
-        ? "Ext2、Ext3、Ext4"
+        ? hasBtrfsFormatGeometry(disk, partition)
+          ? "Ext2、Ext3、Ext4、Btrfs"
+          : "Ext2、Ext3、Ext4"
         : "当前分区不可格式化",
     resize: ntfsResize
       ? "NTFS 末端缩放，容量范围由 Windows 检查"
       : ext
-        ? "需显式检查 Ext 文件系统及支持的特性"
+        ? hasBtrfsFormatGeometry(disk, partition)
+          ? "需显式检查 Ext 或 Btrfs 文件系统及支持的特性"
+          : "需显式检查 Ext 文件系统及支持的特性"
         : fatResize
           ? "需显式检查 FAT 或 exFAT 的完整目录、分配与尾部空间"
           : "当前分区不可调整大小",

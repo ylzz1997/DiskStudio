@@ -1,4 +1,7 @@
 [workspace]
 members = ["crates/disk-core", "src-tauri"]
-exclude = ["vendor/ext4-view", "vendor/ntfs"]
+exclude = ["vendor/btrfs-disk", "vendor/ext4-view", "vendor/ntfs"]
 resolver = "2"
+
+[patch.crates-io]
+btrfs-disk = { path = "vendor/btrfs-disk" }

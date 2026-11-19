@@ -333,6 +333,20 @@ fn launch(
                             )?
                         }
                         None => {
+                            if disk_core::btrfs::has_magic(&mut reader, r.size)? {
+                                drop(reader);
+                                let locked = platform::StableRead::lock(&source)?;
+                                let message = crate::btrfs_recovery::scan(
+                                    locked.reader()?,
+                                    mode,
+                                    &cancel,
+                                    tick,
+                                    found,
+                                    directory,
+                                )?;
+                                locked.verify()?;
+                                return Ok((message, None));
+                            }
                             return crate::recovery::scan_filesystem_owned(
                                 reader,
                                 mode,

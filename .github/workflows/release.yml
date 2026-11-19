@@ -50,15 +50,16 @@ jobs:
 
           $thirdParty = Join-Path $package 'third-party'
           New-Item -ItemType Directory -Path $thirdParty | Out-Null
-          Copy-Item -Recurse -LiteralPath 'third-party/e2fsprogs' -Destination $thirdParty
+          Copy-Item -Recurse -LiteralPath 'third-party/e2fsprogs', 'third-party/winbtrfs', 'third-party/btrfs-transaction' -Destination $thirdParty
           $scripts = Join-Path $package 'scripts'
           New-Item -ItemType Directory -Path $scripts | Out-Null
-          Copy-Item -Recurse -LiteralPath 'scripts/ext4' -Destination $scripts
-          foreach ($component in @('ntfs', 'ext4-view')) {
+          Copy-Item -Recurse -LiteralPath 'scripts/ext4', 'scripts/btrfs' -Destination $scripts
+          foreach ($component in @('ntfs', 'ext4-view', 'btrfs-disk')) {
             $notices = Join-Path $thirdParty $component
             New-Item -ItemType Directory -Path $notices | Out-Null
             Copy-Item -LiteralPath "vendor/$component/LICENSE-APACHE", "vendor/$component/LICENSE-MIT" -Destination $notices
           }
+          Copy-Item -LiteralPath 'vendor/btrfs-disk/GPL-2.0.txt', 'vendor/btrfs-disk/Linux-syscall-note' -Destination (Join-Path $thirdParty 'btrfs-disk')
           "name=$name" >> $env:GITHUB_OUTPUT
           "path=$package" >> $env:GITHUB_OUTPUT
       - name: Upload portable package

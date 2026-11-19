@@ -28,6 +28,8 @@ export function ImageBrowserPanel({
   onOpen,
   onClose,
   onRead,
+  lvmName,
+  onLvm,
 }: {
   info: ImageBrowseInfo | null;
   busy: boolean;
@@ -35,6 +37,8 @@ export function ImageBrowserPanel({
   onOpen: (options: ImageBrowseOptions) => void;
   onClose: () => void;
   onRead: (partition: number, mode: ImageBrowseMode) => void;
+  lvmName?: string;
+  onLvm: () => void;
 }) {
   const { t, language, catalogText } = useLocale();
   const [options, setOptions] = useState<ImageBrowseOptions>({
@@ -126,6 +130,12 @@ export function ImageBrowserPanel({
         </div>
         {info && <p className="data-footnote">{info.files.join(" · ")}</p>}
       </details>
+      <div className="data-action-row">
+        {lvmName && <span>{lvmName}</span>}
+        <button className="button" disabled={busy || !available} onClick={onLvm}>
+          {t("浏览镜像中的 LVM2 逻辑卷")}
+        </button>
+      </div>
       {info && (
         <>
           <label className="backup-browser-partition">
@@ -187,7 +197,7 @@ export function ImageBrowserPanel({
         </p>
         <p className="data-footnote">
           {t(
-            "文件系统支持 NTFS、FAT、exFAT，以及干净卸载的 Ext2/3/4 现存文件。源镜像只读、不挂载；提取到其他磁盘并逐文件核对 SHA-256。删除候选不保证内容完整。RAW 分区镜像需手动选择正确范围和扇区。",
+            "可读取 NTFS、FAT、exFAT 以及干净卸载的 Ext2/3/4 和 Btrfs 镜像。提取到其他磁盘并逐文件核对 SHA-256。RAW 分区镜像需选定正确的范围和扇区大小。",
           )}
         </p>
       </details>

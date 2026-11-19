@@ -97,6 +97,22 @@ pub fn inspect<R: Read + Seek>(
                 }
                 if magic == [0x53, 0xef] {
                     crate::ext_allocation::inspect(&mut audit, cancel)?
+                } else if disk_core::btrfs::has_magic(&mut audit, range.size())? {
+                    use disk_core::btrfs::{allocation_for_copy, CopyAllocation};
+                    let mut map = Allocation::new("Btrfs", range.size());
+                    match allocation_for_copy(&mut audit, || stop(cancel))? {
+                        CopyAllocation::SingleDevice(free) => {
+                            for span in free {
+                                map.free(span.start, span.end - span.start)?;
+                            }
+                            map.note =
+                                "已核对单设备 Btrfs 分配记录，完整保留元数据和系统块组。".into();
+                        }
+                        CopyAllocation::MultiDevice => {
+                            map.note = "多设备 Btrfs 成员完整逐扇区保留。".into();
+                        }
+                    }
+                    map
                 } else {
                     let mut map = Allocation::new("未识别", range.size());
                     map.note = "未确认空闲范围，该分区完整逐扇区保留。".into();

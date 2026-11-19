@@ -24,10 +24,12 @@ import { native } from "./backend";
 import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
+import { ImageLvmDialog, type ImageLvmInfo } from "./ImageLvmDialog";
 import type { ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
+import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
 import { SignatureOptions } from "./SignatureOptions";
 import {
   defaultSignatureSettings,
@@ -76,7 +78,12 @@ type Preview = { name: string; bytes: number[]; truncated: boolean };
 type ScanStatus = {
   id: string;
   sourceName: string;
-  lost: { filesystem: string; size: number; startSector: number } | null;
+  lost: {
+    filesystem: string;
+    size: number;
+    startSector: number;
+    members: number;
+  } | null;
 };
 type Page = "recovery" | "backup" | "files";
 function readablePaths(text: string) {
@@ -130,6 +137,8 @@ export function DataTools({
 }) {
   const { language, t, catalogText } = useLocale();
   const [partition, setPartition] = useState(String(fixedPartition ?? ""));
+  const [memberKeys, setMemberKeys] = useState<string[]>([]);
+  const [allowMissingMembers, setAllowMissingMembers] = useState(false);
   const [mode, setMode] = useState("deleted");
   const [signatureSettings, setSignatureSettings] = useState(
     defaultSignatureSettings,
@@ -158,6 +167,8 @@ export function DataTools({
   const [browsingBackup, setBrowsingBackup] = useState(false);
   const [browsingImage, setBrowsingImage] = useState(false);
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
+  const [imageLvmInfo, setImageLvmInfo] = useState<ImageLvmInfo | null>(null);
+  const [imageLvmOpen, setImageLvmOpen] = useState(false);
   const [imageDraft, setImageDraft] = useState<{
     group: NativeImageGroup;
     options: ImageBrowseOptions;
@@ -169,6 +180,8 @@ export function DataTools({
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
+  const [lvmOpen, setLvmOpen] = useState(false);
+  const [lvmView, setLvmView] = useState<LvmView | null>(null);
   const callbacks = useRef({ onBusy, onRefresh });
   callbacks.current = { onBusy, onRefresh };
   const previousJob = useRef("");
@@ -178,7 +191,7 @@ export function DataTools({
   const resultsScanId =
     page === "backup"
       ? browsingImage
-        ? (imageInfo?.scanId ?? "")
+        ? (imageLvmInfo?.scanId ?? imageInfo?.scanId ?? "")
         : browsingBackup
           ? (backupInfo?.scanId ?? "")
           : ""
@@ -193,6 +206,46 @@ export function DataTools({
     (d) => d.kind === "physical" && d.id !== disk?.id && !d.hardware?.isSystem,
   );
   const selectedPart = parts.find((p) => String(p.number) === partition);
+  const allowMemberSelection =
+    physical &&
+    !!selectedPart &&
+    !selectedPart.system &&
+    (page === "files" || (page === "recovery" && mode !== "signatures"));
+  const memberOptions =
+    allowMemberSelection && selectedPart
+      ? disks.flatMap((other) => {
+          if (
+            other.kind !== "physical" ||
+            !other.hardware?.identity ||
+            !other.hardware.layoutKey
+          )
+            return [];
+          return other.partitions
+            .filter(
+              (p) =>
+                p.number !== undefined &&
+                !p.system &&
+                ["Linux 数据", "数据分区"].includes(p.role ?? "") &&
+                (other.id !== disk.id || p.number !== selectedPart.number),
+            )
+            .map((p) => {
+              const source = selection(other, String(p.number));
+              return {
+                key: JSON.stringify(source),
+                disk: other,
+                partition: p,
+                source,
+              };
+            });
+        })
+      : [];
+  const selectedMembers = memberOptions.filter(({ key }) =>
+    memberKeys.includes(key),
+  );
+  const useMembers =
+    allowMemberSelection && (memberKeys.length > 0 || allowMissingMembers);
+  const staleMembers =
+    useMembers && selectedMembers.length !== memberKeys.length;
   const canHot =
     copyMode === "allSectors" &&
     !!selectedPart &&
@@ -236,6 +289,10 @@ export function DataTools({
     setError("");
   }, [disk?.id, fixedPartition]);
   useEffect(() => {
+    setMemberKeys([]);
+    setAllowMissingMembers(false);
+  }, [disk?.id, partition]);
+  useEffect(() => {
     callbacks.current.onBusy(!!busy || !!imageDraft);
   }, [busy, imageDraft]);
   useEffect(() => () => callbacks.current.onBusy(false), []);
@@ -248,7 +305,7 @@ export function DataTools({
       if (polling) return;
       polling = true;
       try {
-        const [next, backup, liveScan, savedProgress, image] =
+        const [next, backup, liveScan, savedProgress, image, imageLvm] =
           await Promise.all([
             invoke<Job | null>("data_status"),
             invoke<BackupInfo | null>("data_backup_status"),
@@ -259,11 +316,13 @@ export function DataTools({
               : invoke<ScanStatus | null>("data_scan_status"),
             invoke<RecoveryProgress | null>("data_recovery_progress_status"),
             invoke<ImageBrowseInfo | null>("data_image_status"),
+            invoke<ImageLvmInfo | null>("data_image_lvm_status"),
           ]);
         if (!alive) return;
         setJob(next);
         setBackupInfo(backup);
         setImageInfo(image);
+        setImageLvmInfo(imageLvm);
         setScanId(
           typeof liveScan === "string" ? liveScan : (liveScan?.id ?? ""),
         );
@@ -323,15 +382,28 @@ export function DataTools({
   }
   async function startScan() {
     await action(async () => {
+      if (staleMembers)
+        throw Error(t("所选 Btrfs 成员已变化，请清除后重新选择。"));
       setProgressNotice("");
-      const id = await invoke<string>("data_scan", {
-        source: selection(disk, partition),
-        mode: page === "files" ? "existing" : mode,
-        signatures:
-          page !== "files" && mode === "signatures"
-            ? signatureRequest(signatureSettings, sourceSize)
-            : null,
-      });
+      const source = selection(disk, partition);
+      const scanMode = page === "files" ? "existing" : mode;
+      const id = useMembers
+        ? await invoke<string>("data_scan_btrfs_members", {
+            members: [
+              source,
+              ...selectedMembers.map((member) => member.source),
+            ],
+            mode: scanMode,
+            allowMissing: allowMissingMembers,
+          })
+        : await invoke<string>("data_scan", {
+            source,
+            mode: scanMode,
+            signatures:
+              scanMode === "signatures"
+                ? signatureRequest(signatureSettings, sourceSize)
+                : null,
+          });
       setScanId(id);
       setOwnJobId(id);
       setJob(await invoke<Job>("data_status"));
@@ -439,6 +511,7 @@ export function DataTools({
         disabled={busy || !physical}
         onChange={(e) => {
           setPartition(e.target.value);
+          setMemberKeys([]);
           setDestinationPartition("");
         }}
       >
@@ -447,12 +520,73 @@ export function DataTools({
         </option>
         {parts.map((p) => (
           <option key={p.id} value={p.number}>
+            {t("分区 {number}", { number: p.number! })} ·{" "}
             {partitionTitle(p, catalogText)} · {formatSize(p.size)} ·{" "}
             {catalogText(p.fs)}
           </option>
         ))}
       </select>
     </div>
+  );
+  const memberSelector = allowMemberSelection && (
+    <details className="btrfs-member-selector">
+      <summary>
+        {t("其他 Btrfs 成员")}
+        {memberKeys.length > 0 && (
+          <>
+            {" "}
+            · {t("已选中")} {memberKeys.length}
+          </>
+        )}
+        {allowMissingMembers && <> · {t("缺盘读取")}</>}
+      </summary>
+      <p>{t("选择同一 Btrfs 卷的其他可用成员。")}</p>
+      {staleMembers && (
+        <FormError message={t("所选 Btrfs 成员已变化，请清除后重新选择。")} />
+      )}
+      <div className="btrfs-member-options">
+        <label>
+          <input
+            type="checkbox"
+            checked={allowMissingMembers}
+            disabled={busy}
+            onChange={(event) =>
+              setAllowMissingMembers(event.currentTarget.checked)
+            }
+          />
+          <span>{t("允许缺盘读取（仅限可校验的数据）")}</span>
+        </label>
+        {memberOptions.map(({ key, partition: p, disk: memberDisk }) => (
+          <label key={key}>
+            <input
+              type="checkbox"
+              checked={memberKeys.includes(key)}
+              disabled={busy}
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                setMemberKeys((old) =>
+                  checked ? [...old, key] : old.filter((item) => item !== key),
+                );
+              }}
+            />
+            <span>
+              {diskTitle(memberDisk, t)} ·{" "}
+              {t("分区 {number}", { number: p.number! })} ·{" "}
+              {partitionTitle(p, catalogText)} · {formatSize(p.size)}
+            </span>
+          </label>
+        ))}
+      </div>
+      {memberKeys.length > 0 && (
+        <button
+          className="button text-button"
+          disabled={busy}
+          onClick={() => setMemberKeys([])}
+        >
+          {t("清除 Btrfs 成员选择")}
+        </button>
+      )}
+    </details>
   );
   return (
     <div className="data-page">
@@ -548,19 +682,22 @@ export function DataTools({
           <PartitionBrowserPanel
             partition={selectedPart}
             busy={!!busy}
-            available={native && !!physical}
+            available={native && !!physical && !staleMembers}
             loaded={!!resultsScanId}
             onRead={() => void startScan()}
             onBack={() => onBack?.()}
-          />
+          >
+            {memberSelector}
+          </PartitionBrowserPanel>
         ) : page === "recovery" ? (
           <>
             {lostSource && (
               <section className="data-panel" aria-label={t("找到的分区来源")}>
                 <div className="section-heading">
                   <h2>
-                    {t("找到的分区")} · {lostSource.filesystem} ·{" "}
-                    {formatSize(lostSource.size)}
+                    {lostSource.members > 1
+                      ? `${t("联合浏览 Btrfs 成员")} · ${lostSource.members}`
+                      : `${t("找到的分区")} · ${lostSource.filesystem} · ${formatSize(lostSource.size)}`}
                   </h2>
                 </div>
                 <p>{scanStatus?.sourceName}</p>
@@ -581,12 +718,24 @@ export function DataTools({
             {(!lostSource || chooseNewSource) && (
               <>
                 {sourceSelector()}
+                {mode !== "signatures" && memberSelector}
                 <section className="data-panel">
                   <div className="section-heading">
                     <h2>{t("选择扫描方式")}</h2>
                     <span className="section-caption">
                       {t("扫描不会修改源盘")}
                     </span>
+                    <button
+                      className="button"
+                      disabled={busy || !native}
+                      onClick={() => {
+                        setError("");
+                        setLvmView(null);
+                        setLvmOpen(true);
+                      }}
+                    >
+                      {t("浏览 LVM2 逻辑卷")}
+                    </button>
                   </div>
                   <div className="scan-modes">
                     {[
@@ -594,13 +743,15 @@ export function DataTools({
                         id: "deleted",
                         title: t("找回删除文件"),
                         body: t(
-                          "读取 NTFS、FAT、exFAT，查找保留记录的已删除文件",
+                          "从保留记录、Btrfs 只读快照或旧事务查找删除候选。",
                         ),
                       },
                       {
                         id: "allFiles",
                         title: t("扫描全部文件"),
-                        body: t("列出文件与目录；Ext2/3/4 当前仅列出现存文件"),
+                        body: t(
+                          "列出文件和目录，包括干净卸载的 Ext2/3/4 和 Btrfs。",
+                        ),
                       },
                       {
                         id: "signatures",
@@ -643,13 +794,17 @@ export function DataTools({
                           )
                         : mode === "allFiles"
                           ? t(
-                              "NTFS、FAT、exFAT 支持现存/删除候选；Ext2/3/4 支持干净卸载卷的现存文件，不重放日志。",
+                              "NTFS、FAT、exFAT 支持现存文件和删除候选。Btrfs 可从只读快照或保留事务查找删除候选。Ext2/3/4 支持干净卸载卷的现存文件。",
                             )
                           : t(
                               "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。",
+                            ) +
+                            " " +
+                            t(
+                              "Btrfs 删除恢复需要可核对的只读快照或保留事务，且提取时必须通过数据校验。",
                             )}
                     </span>
-                    {
+                    {!useMembers && (
                       <button
                         className="button"
                         disabled={
@@ -663,7 +818,7 @@ export function DataTools({
                         <FolderOpen size={16} />
                         {t("加载进度")}
                       </button>
-                    }
+                    )}
                     {job?.state === "running" &&
                     recoveryProgress?.id === job.id ? (
                       <button
@@ -681,7 +836,11 @@ export function DataTools({
                       <button
                         className="button primary"
                         disabled={
-                          busy || !canScan || !native || !!signatureError
+                          busy ||
+                          !canScan ||
+                          !native ||
+                          !!signatureError ||
+                          staleMembers
                         }
                         onClick={() => void startScan()}
                       >
@@ -699,6 +858,11 @@ export function DataTools({
             info={imageInfo}
             busy={!!busy}
             available={native}
+            lvmName={imageLvmInfo?.name}
+            onLvm={() => {
+              setError("");
+              setImageLvmOpen(true);
+            }}
             onOpen={(options) =>
               void action(async () => {
                 const group = await invoke<NativeImageGroup | null>(
@@ -836,8 +1000,8 @@ export function DataTools({
               {task !== "restore" && copyMode === "usedSpace" && (
                 <p className="copy-mode-note">
                   {t(
-                    "NTFS、FAT、exFAT、Ext2/3/4 会检查分配信息；其他文件系统完整保留。",
-                  )}
+                    "检查 NTFS、FAT、exFAT、Ext2/3/4 和单设备 Btrfs 的分配信息。多设备 Btrfs 和未识别的文件系统完整保留。",
+                  )}{" "}
                   {task === "backup"
                     ? t("备份中的空闲区按零保存，不保留这些区域的已删除内容。")
                     : t("保持源分区布局，目标空闲区不会被清除。")}
@@ -975,6 +1139,7 @@ export function DataTools({
                             )
                             .map((p) => (
                               <option key={p.id} value={p.number}>
+                                {t("分区 {number}", { number: p.number! })} ·{" "}
                                 {partitionTitle(p, catalogText)} ·{" "}
                                 {formatSize(p.size)}
                               </option>
@@ -1219,6 +1384,8 @@ export function DataTools({
                 job.title === "读取分区目录" ||
                 job.title === "读取备份目录" ||
                 job.title === "读取镜像目录" ||
+                job.title === "读取 Btrfs 成员" ||
+                job.title === "读取 LVM2 逻辑卷" ||
                 job.title === "读取找到的分区目录"
                   ? t("找到 {count} 个文件", {
                       count: job.found.toLocaleString(language),
@@ -1250,12 +1417,108 @@ export function DataTools({
             page === "files" ||
             (page === "backup" &&
               browsingImage &&
-              imageInfo?.scanMode === "existing")
+              (imageLvmInfo?.scanId ? imageLvmInfo.scanMode : imageInfo?.scanMode) === "existing")
           }
           onRecover={(ids, layout, folder, options) =>
             void prepare(ids, layout, folder, options)
           }
           onPreview={(c) => void showPreview(c)}
+        />
+      )}
+      {imageLvmOpen && page === "backup" && browsingImage && (
+        <ImageLvmDialog
+          key={imageInfo?.id}
+          image={imageInfo}
+          view={imageLvmInfo}
+          busy={!!busy}
+          error={error}
+          onClose={() => {
+            setError("");
+            setImageLvmOpen(false);
+          }}
+          onInspect={(id, partitions, allowDegradedRaid) =>
+            void action(async () => {
+              setImageLvmInfo(
+                await invoke<ImageLvmInfo>("data_image_lvm_inspect", {
+                  request: { id, partitions, allowDegradedRaid },
+                }),
+              );
+            })
+          }
+          onOpenRaw={(allowDegradedRaid) =>
+            void action(async () => {
+              const next = await invoke<ImageLvmInfo | null>("data_image_lvm_open", { allowDegradedRaid });
+              if (next) setImageLvmInfo(next);
+            })
+          }
+          onCloseGroup={() =>
+            void action(async () => {
+              if (!imageLvmInfo) return;
+              await invoke("data_image_lvm_close", { id: imageLvmInfo.id });
+              setImageLvmInfo(null);
+            })
+          }
+          onBrowse={(id, volume, mode) =>
+            void action(async () => {
+              const jobId = await invoke<string>("data_image_lvm_scan", {
+                request: { id, volume, mode },
+              });
+              setOwnJobId(jobId);
+              const [next, nextJob] = await Promise.all([
+                invoke<ImageLvmInfo | null>("data_image_lvm_status"),
+                invoke<Job>("data_status"),
+              ]);
+              setImageLvmInfo(next);
+              setJob(nextJob);
+              setImageLvmOpen(false);
+            })
+          }
+        />
+      )}
+      {lvmOpen && page === "recovery" && (
+        <LvmBrowserDialog
+          disks={disks}
+          primary={
+            physical &&
+            selectedPart &&
+            !selectedPart.system &&
+            disk.hardware?.identity &&
+            disk.hardware.layoutKey
+              ? selection(disk, partition)
+              : undefined
+          }
+          busy={!!busy}
+          error={error}
+          view={lvmView}
+          onReselect={() => {
+            setError("");
+            setLvmView(null);
+          }}
+          onClose={() => {
+            setError("");
+            setLvmOpen(false);
+          }}
+          onInspect={(members, allowDegradedRaid) =>
+            void action(async () => {
+              setLvmView(
+                await invoke<LvmView>("data_lvm_inspect", {
+                  request: { members, allowDegradedRaid },
+                }),
+              );
+            })
+          }
+          onBrowse={(view, volume, deleted) =>
+            void action(async () => {
+              const id = await invoke<string>("data_lvm_browse", {
+                request: { id: view.id, volume, deleted },
+              });
+              setProgressNotice("");
+              setScanId(id);
+              setOwnJobId(id);
+              setJob(await invoke<Job>("data_status"));
+              setLvmOpen(false);
+            })
+          }
         />
       )}
       {!physical &&

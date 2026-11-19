@@ -481,6 +481,39 @@ fn open_device_flags(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Res
 pub fn reader(r: &Resolved) -> Result<Region<File>, String> {
     Region::new(device(r, false)?, r.offset, r.size).map_err(err)
 }
+
+pub(crate) struct StableRead {
+    source: Selection,
+    bound: Resolved,
+    locks: Locks,
+}
+impl StableRead {
+    pub(crate) fn lock(source: &Selection) -> Result<Self, String> {
+        let bound = resolve(source, true, false)?;
+        if bound.disk.is_read_only.is_none() {
+            return Err("设备状态不完整或为复杂存储，已拒绝访问。".into());
+        }
+        let locks = state_locks(&bound)?;
+        resolve_locked(source, false, &bound, &locks)?;
+        Ok(Self {
+            source: source.clone(),
+            bound,
+            locks,
+        })
+    }
+
+    pub(crate) fn reader(&self) -> Result<Region<File>, String> {
+        reader(&self.resolved()?)
+    }
+
+    pub(crate) fn resolved(&self) -> Result<Resolved, String> {
+        resolve_locked(&self.source, false, &self.bound, &self.locks)
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), String> {
+        self.resolved().map(|_| ())
+    }
+}
 /// Surface reads bypass the Windows cache. Buffers are 4096-aligned; reject
 /// unknown or larger physical alignment rather than silently using cached I/O.
 pub fn surface_device(r: &Resolved) -> Result<File, String> {

@@ -6,6 +6,7 @@ mod backup_encryption;
 #[cfg(windows)]
 mod backup_files;
 mod backup_secrets;
+mod btrfs_recovery;
 mod data_io;
 mod data_tasks;
 #[cfg(windows)]
@@ -39,6 +40,7 @@ mod image_files;
 mod lost_partition_restore;
 mod lost_partition_tasks;
 mod lost_partitions;
+mod lvm_tasks;
 mod maintenance_io;
 mod maintenance_tasks;
 mod native_locale;
@@ -282,12 +284,65 @@ fn data_browse_id(source: data_tasks::Selection) -> Option<String> {
     data_tasks::browse_id(source)
 }
 #[tauri::command]
+async fn data_scan_btrfs_members(
+    members: Vec<data_tasks::Selection>,
+    mode: recovery::ScanMode,
+    allow_missing: bool,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        data_tasks::scan_btrfs_members(members, mode, allow_missing)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_lvm_inspect(request: lvm_tasks::InspectRequest) -> Result<lvm_tasks::View, String> {
+    tauri::async_runtime::spawn_blocking(move || lvm_tasks::inspect(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_lvm_browse(request: lvm_tasks::BrowseRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::scan_lvm(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 fn data_backup_status() -> Option<data_tasks::BackupStatus> {
     data_tasks::backup_status()
 }
 #[tauri::command]
 fn data_image_status() -> Option<data_tasks::image_browse_tasks::Status> {
     data_tasks::image_browse_tasks::status()
+}
+use data_tasks::image_browse_tasks::lvm as image_lvm_tasks;
+#[tauri::command]
+fn data_image_lvm_status() -> Option<image_lvm_tasks::Status> {
+    image_lvm_tasks::status()
+}
+#[tauri::command]
+async fn data_image_lvm_inspect(
+    request: image_lvm_tasks::InspectRequest,
+) -> Result<image_lvm_tasks::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || image_lvm_tasks::inspect(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_image_lvm_open(allow_degraded_raid: Option<bool>) -> Result<Option<image_lvm_tasks::Status>, String> {
+    tauri::async_runtime::spawn_blocking(move || image_lvm_tasks::inspect_raw(allow_degraded_raid.unwrap_or_default()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn data_image_lvm_close(id: String) -> Result<(), String> {
+    image_lvm_tasks::close(id)
+}
+#[tauri::command]
+async fn data_image_lvm_scan(request: image_lvm_tasks::BrowseRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || image_lvm_tasks::scan(request))
+        .await
+        .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn image_source_select() -> Result<Option<image_files::Info>, String> {
@@ -580,14 +635,28 @@ async fn lost_partition_prepare_recovery(
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn lost_partition_status() -> Option<lost_partition_tasks::Snapshot> {
-    lost_partition_tasks::status()
+fn lost_partition_status(target: Option<String>) -> Option<lost_partition_tasks::Snapshot> {
+    lost_partition_tasks::status(target.as_deref())
 }
 #[tauri::command]
 async fn lost_partition_browse(
     request: lost_partition_tasks::BrowseRequest,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::scan_lost(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn lost_partition_btrfs_choices(
+    request: lost_partition_tasks::BrowseRequest,
+) -> Result<Vec<lost_partition_tasks::MemberChoice>, String> {
+    lost_partition_tasks::group_choices(request)
+}
+#[tauri::command]
+async fn lost_partition_browse_btrfs(
+    request: lost_partition_tasks::BrowseGroupRequest,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::scan_lost_group(request))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -712,6 +781,16 @@ async fn sector_copy_start(request: sector_copy::Request) -> Result<Option<Strin
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
+fn sector_copy_report(id: String) -> Option<sector_copy::Report> {
+    sector_copy::report(id)
+}
+#[tauri::command]
+async fn sector_copy_save_report(id: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || sector_copy::save_report(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn sector_prepare_write(
     request: sector_write::Request,
 ) -> Result<sector_write::Plan, String> {
@@ -775,6 +854,8 @@ fn main() {
             sector_status,
             sector_export,
             sector_copy_start,
+            sector_copy_report,
+            sector_copy_save_report,
             sector_prepare_write,
             sector_execute_write,
             sector_discard_write,
@@ -782,6 +863,8 @@ fn main() {
             lost_partition_start,
             lost_partition_status,
             lost_partition_browse,
+            lost_partition_btrfs_choices,
+            lost_partition_browse_btrfs,
             lost_partition_prepare_recovery,
             surface_status,
             surface_export,
@@ -820,6 +903,11 @@ fn main() {
             data_browse_id,
             data_backup_status,
             data_image_status,
+            data_image_lvm_status,
+            data_image_lvm_inspect,
+            data_image_lvm_open,
+            data_image_lvm_close,
+            data_image_lvm_scan,
             image_source_select,
             image_source_add,
             image_source_discard,
@@ -836,6 +924,9 @@ fn main() {
             data_discard_plan,
             data_cancel,
             data_scan,
+            data_scan_btrfs_members,
+            data_lvm_inspect,
+            data_lvm_browse,
             data_results,
             data_folders,
             data_select_results,

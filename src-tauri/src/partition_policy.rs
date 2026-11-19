@@ -315,20 +315,38 @@ pub fn validate(disk: &Disk, partitions: &[Partition], action: &Action) -> Resul
                 formattable(p)
             }
             Action::Delete { .. } => deletable(p),
-            Action::ExtFormat { .. } | Action::ExtResize { .. } => ext_candidate(disk, &parts, p),
+            Action::ExtFormat { .. }
+            | Action::ExtResize { .. }
+            | Action::BtrfsFormat { .. }
+            | Action::BtrfsResize { .. } => ext_candidate(disk, &parts, p),
             _ => false,
         };
         if !allowed {
             return Err("此分区不支持所选操作；运行中的 Windows 卷不能格式化或删除，EFI、保留、隐藏及状态未知的分区受保护。".into());
         }
+        if let Action::BtrfsFormat { label, .. } = action {
+            if label.len() > 255
+                || label
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+            {
+                return Err(
+                    "Btrfs 卷标最多 255 个 UTF-8 字节，不能包含斜杠、反斜杠或控制字符。".into(),
+                );
+            }
+            if p.size < 128 * MIB || p.offset % 4096 != 0 || p.size % 4096 != 0 {
+                return Err("Btrfs 格式化要求分区至少 128 MiB，起点和容量按 4 KiB 对齐。".into());
+            }
+        }
         if let Action::Resize { size, .. }
         | Action::ExtResize { size, .. }
+        | Action::BtrfsResize { size, .. }
         | Action::FatResize { size, .. } = action
         {
-            let minimum = if matches!(action, Action::FatResize { .. }) {
-                MIB
-            } else {
-                MIN_RESIZE_SIZE
+            let minimum = match action {
+                Action::FatResize { .. } => MIB,
+                Action::BtrfsResize { .. } => 128 * MIB,
+                _ => MIN_RESIZE_SIZE,
             };
             if *size < minimum
                 || size % MIB != 0

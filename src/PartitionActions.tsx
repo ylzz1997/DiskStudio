@@ -28,7 +28,10 @@ import type { PartitionOutcome } from "./partitionOutcome";
 import { formatSize, GiB, MiB } from "./types";
 import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
-import { isFatResizeFilesystem } from "./filesystemSupport";
+import {
+  hasBtrfsFormatGeometry,
+  isFatResizeFilesystem,
+} from "./filesystemSupport";
 import {
   defaultFormatOptions,
   effectiveFormatCluster,
@@ -87,8 +90,13 @@ export function PartitionActions({
   const [formatOptions, setFormatOptions] = useState<FormatOptions>({
     ...defaultFormatOptions,
   });
-  const [extFileSystem, setExtFileSystem] = useState<ExtFileSystem>("ext4");
+  const [extFileSystem, setExtFileSystem] = useState<ExtFileSystem | "Btrfs">(
+    "ext4",
+  );
   const [blockSize, setBlockSize] = useState(4096);
+  const [resizeFilesystem, setResizeFilesystem] = useState<"ext" | "Btrfs">(
+    "ext",
+  );
   const [partitionKind, setPartitionKind] = useState<"windows" | "linux">(
     "windows",
   );
@@ -132,6 +140,10 @@ export function PartitionActions({
     available &&
     partition?.number != null &&
     !!target?.extPartitions?.includes(partition.number);
+  const btrfsCandidate =
+    extCandidate && !!partition && hasBtrfsFormatGeometry(disk, partition);
+  const btrfsFormat = extFileSystem === "Btrfs";
+  const btrfsResize = kind === "resize" && resizeFilesystem === "Btrfs";
   const fatResizeCandidate =
     available &&
     partition?.number != null &&
@@ -153,7 +165,8 @@ export function PartitionActions({
   const canResize =
     supports("resize") &&
     (partition?.fs === "NTFS" || extCandidate || fatResizeCandidate);
-  const minimumMiB = kind === "create" || fatResizeCandidate ? 1 : 64;
+  const minimumMiB =
+    kind === "create" || fatResizeCandidate ? 1 : btrfsResize ? 128 : 64;
   const useMiB = kind === "resize" && fatResizeCandidate;
   const capacityUnit = useMiB ? MiB : GiB;
   const canFormat = supports("format");
@@ -214,6 +227,11 @@ export function PartitionActions({
     setFormatOptions({ ...defaultFormatOptions });
     setExtFileSystem("ext4");
     setBlockSize(4096);
+    setResizeFilesystem(
+      btrfsCandidate && partition?.fs.toUpperCase() === "BTRFS"
+        ? "Btrfs"
+        : "ext",
+    );
     setDriveLetter(partition?.driveLetter ?? "");
     setLabel(
       type === "setLabel"
@@ -291,33 +309,46 @@ export function PartitionActions({
               disk.sectorSize,
               formatOptions,
             );
-          action = extCandidate
-            ? {
-                type: "extFormat",
-                partition: partition.number,
-                label: normalizedLabel,
-                fileSystem: extFileSystem,
-                blockSize,
-              }
-            : {
-                type: "format",
-                partition: partition.number,
-                label: normalizedLabel,
-                fileSystem,
-                clusterSize,
-                options: formatOptions,
-              };
-        } else if (kind === "resize")
+          if (extFileSystem === "Btrfs") {
+            if (!btrfsCandidate) throw new Error(t("所选分区不支持此操作。"));
+            action = {
+              type: "btrfsFormat",
+              partition: partition.number,
+              label: normalizedLabel,
+            };
+          } else {
+            action = extCandidate
+              ? {
+                  type: "extFormat",
+                  partition: partition.number,
+                  label: normalizedLabel,
+                  fileSystem: extFileSystem,
+                  blockSize,
+                }
+              : {
+                  type: "format",
+                  partition: partition.number,
+                  label: normalizedLabel,
+                  fileSystem,
+                  clusterSize,
+                  options: formatOptions,
+                };
+          }
+        } else if (kind === "resize") {
+          if (btrfsResize && !btrfsCandidate)
+            throw new Error(t("所选分区不支持此操作。"));
           action = {
-            type: extCandidate
-              ? "extResize"
-              : fatResizeCandidate
-                ? "fatResize"
-                : kind,
+            type: btrfsResize
+              ? "btrfsResize"
+              : extCandidate
+                ? "extResize"
+                : fatResizeCandidate
+                  ? "fatResize"
+                  : kind,
             partition: partition.number,
             size: bytes,
           };
-        else action = { type: kind, partition: partition.number };
+        } else action = { type: kind, partition: partition.number };
       }
       setBusy(true);
       onBusy(true);
@@ -651,7 +682,7 @@ export function PartitionActions({
                     <dt>{extCandidate ? t("块大小") : t("簇大小")}</dt>
                     <dd>
                       {extCandidate
-                        ? formatSize(blockSize)
+                        ? formatSize(btrfsFormat ? 4096 : blockSize)
                         : effectiveFormatCluster(
                               fileSystem,
                               clusterSize,
@@ -774,6 +805,23 @@ export function PartitionActions({
                   </label>
                 </>
               )}
+              {kind === "resize" && btrfsCandidate && (
+                <label>
+                  {t("文件系统")}
+                  <select
+                    aria-label={t("文件系统")}
+                    value={resizeFilesystem}
+                    onChange={(e) =>
+                      setResizeFilesystem(
+                        e.target.value === "Btrfs" ? "Btrfs" : "ext",
+                      )
+                    }
+                  >
+                    <option value="ext">Ext2 / Ext3 / Ext4</option>
+                    <option value="Btrfs">Btrfs</option>
+                  </select>
+                </label>
+              )}
               {(kind === "create" || kind === "resize") && (
                 <label>
                   {t("分区容量")}
@@ -796,17 +844,21 @@ export function PartitionActions({
                   </div>
                   <small>
                     {kind === "resize"
-                      ? extCandidate
+                      ? btrfsResize
                         ? t(
-                            "预览会读取并检查已有 Ext2/3/4，估算缩容下限；仅调整末端，不移动分区。支持干净卸载、1/2/4 KiB 块的常规特性。",
+                            "扩容需要相邻未分配空间。缩容时，预览会检查新边界内能否完整容纳需要搬移的 Btrfs 条带。",
                           )
-                        : fatResizeCandidate
+                        : extCandidate
                           ? t(
-                              "预览检查目录和分配表，并显示预计搬移簇数。扩容需要相邻未分配空间，必要时扩大分配表并搬移数据区。执行后整盘保持脱机。",
+                              "预览会读取并检查已有 Ext2/3/4，估算缩容下限；仅调整末端，不移动分区。支持干净卸载、1/2/4 KiB 块的常规特性。",
                             )
-                          : t(
-                              "Windows 会检查可缩小的下限和相邻未分配空间，不移动其他分区。",
-                            )
+                          : fatResizeCandidate
+                            ? t(
+                                "预览检查目录和分配表，并显示预计搬移簇数。扩容需要相邻未分配空间，必要时扩大分配表并搬移数据区。执行后整盘保持脱机。",
+                              )
+                            : t(
+                                "Windows 会检查可缩小的下限和相邻未分配空间，不移动其他分区。",
+                              )
                       : t("所选空间 {size}", {
                           size: formatSize(selectedRange?.size ?? 0),
                         })}
@@ -822,12 +874,15 @@ export function PartitionActions({
                         aria-label={t("格式化文件系统")}
                         value={extFileSystem}
                         onChange={(e) =>
-                          setExtFileSystem(e.target.value as ExtFileSystem)
+                          setExtFileSystem(
+                            e.target.value as ExtFileSystem | "Btrfs",
+                          )
                         }
                       >
                         <option value="ext4">Ext4</option>
                         <option value="ext3">Ext3</option>
                         <option value="ext2">Ext2</option>
+                        {btrfsCandidate && <option value="Btrfs">Btrfs</option>}
                       </select>
                     ) : (
                       <select
@@ -857,7 +912,12 @@ export function PartitionActions({
                       </select>
                     )}
                   </label>
-                  {extCandidate && (
+                  {extCandidate && btrfsFormat && (
+                    <small>
+                      {t("单设备 Btrfs · 4 KiB 扇区 · 16 KiB 节点 · CRC32C")}
+                    </small>
+                  )}
+                  {extCandidate && !btrfsFormat && (
                     <label>
                       {t("块大小")}
                       <select
@@ -992,9 +1052,15 @@ export function PartitionActions({
                     {t("卷标")}
                     <input
                       aria-label={t("卷标")}
-                      required
+                      required={!btrfsFormat}
                       maxLength={
-                        extCandidate ? 16 : fileSystem === "NTFS" ? 32 : 11
+                        btrfsFormat
+                          ? 255
+                          : extCandidate
+                            ? 16
+                            : fileSystem === "NTFS"
+                              ? 32
+                              : 11
                       }
                       value={label}
                       onChange={(e) => setLabel(e.target.value)}
@@ -1006,7 +1072,14 @@ export function PartitionActions({
                         )}
                       </small>
                     )}
-                    {extCandidate && (
+                    {btrfsFormat && (
+                      <small>
+                        {t(
+                          "Btrfs 卷标最多 255 个 UTF-8 字节，不能包含斜杠、反斜杠或控制字符。",
+                        )}
+                      </small>
+                    )}
+                    {extCandidate && !btrfsFormat && (
                       <small>
                         {t(
                           "最多 16 个 UTF-8 字节，中文通常每字占 3 字节。执行后整块磁盘保持脱机。",

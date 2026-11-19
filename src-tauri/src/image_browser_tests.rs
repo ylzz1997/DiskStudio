@@ -121,6 +121,55 @@ fn partition_images_browse_filter_preview_and_extract_ntfs_without_device_io() {
     assert_eq!(first.seek(SeekFrom::End(0)).unwrap(), NTFS.len() as u64);
     assert_eq!(first.read(&mut magic).unwrap(), 0);
 }
+
+#[test]
+fn partition_group_shares_one_parser_and_keeps_independent_bounds() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Factory {
+        bytes: Arc<[u8]>,
+        opens: AtomicUsize,
+    }
+    impl ReaderFactory for Factory {
+        fn reader(&self) -> Result<Box<dyn Source>, String> {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            Ok(Box::new(Cursor::new(self.bytes.clone())))
+        }
+    }
+    let mut disk = vec![0; 8 * MIB];
+    for index in 0..2 {
+        let entry = 446 + index * 16;
+        disk[entry + 4] = 0x8e;
+        disk[entry + 8..entry + 12]
+            .copy_from_slice(&(((index + 1) * MIB * 2 / 512) as u32).to_le_bytes());
+        disk[entry + 12..entry + 16].copy_from_slice(&((MIB / 512) as u32).to_le_bytes());
+        disk[(index + 1) * MIB * 2..(index + 1) * MIB * 2 + MIB].fill(index as u8 + 1);
+    }
+    disk[510..512].copy_from_slice(&[0x55, 0xaa]);
+    let factory = Arc::new(Factory {
+        bytes: disk.into(),
+        opens: AtomicUsize::new(0),
+    });
+    let browser = Browser::from_factory(
+        factory.clone(),
+        "group.raw".into(),
+        Options { kind: Kind::Disk, sector: 512 },
+        "RAW".into(),
+        vec!["group.raw".into()],
+        String::new(),
+        || Ok(()),
+    ).unwrap();
+    assert!(browser.readers(&[0, 99]).is_err());
+    let mut readers = browser.readers(&[1, 0]).unwrap();
+    let mut byte = [0; 1];
+    readers[0].seek(SeekFrom::End(-1)).unwrap();
+    readers[1].read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [1]);
+    readers[0].read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [2]);
+    assert_eq!(readers[0].read(&mut byte).unwrap(), 0);
+    assert!(readers[1].seek(SeekFrom::End(1)).is_err());
+    assert_eq!(factory.opens.load(Ordering::Relaxed), 2);
+}
 #[test]
 fn mbr_and_logical_partitions_use_independent_bounded_readers() {
     for extended in [false, true] {

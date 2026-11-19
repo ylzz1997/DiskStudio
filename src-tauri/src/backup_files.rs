@@ -191,15 +191,33 @@ pub(crate) fn create_sector_output(
     source: &Target,
     size: u64,
 ) -> Result<(File, Publication), String> {
+    create_sector_file(path, source, size, ".bin", "请选择普通 .bin 文件名。")
+}
+
+pub(crate) fn create_sector_report(
+    path: &Path,
+    source: &Target,
+    size: u64,
+) -> Result<(File, Publication), String> {
+    create_sector_file(path, source, size, ".json", "请选择普通 .json 文件名。")
+}
+
+fn create_sector_file(
+    path: &Path,
+    source: &Target,
+    size: u64,
+    extension: &str,
+    invalid_name: &str,
+) -> Result<(File, Publication), String> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| {
             *name == crate::data_io::safe_name(name)
-                && name.to_ascii_lowercase().ends_with(".bin")
+                && name.to_ascii_lowercase().ends_with(extension)
                 && !crate::recovery_export::reserved(name)
         })
-        .ok_or("请选择普通 .bin 文件名。")?;
+        .ok_or(invalid_name)?;
     create_output(path, name, source, size, "文件已存在，请使用新文件名。")
 }
 

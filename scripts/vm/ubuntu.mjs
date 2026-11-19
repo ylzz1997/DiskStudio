@@ -8,6 +8,9 @@ import { verifyUbuntu } from './ubuntu-qmp.mjs';
 const base = path.join(root, 'ubuntu');
 const uuid = '25c39913-ac45-4445-aa54-bdd0dbca7001';
 const os = path.join(base, 'system.qcow2');
+const btrfsImages = ['btrfs-snapshot-image', 'btrfs-retained-image', 'btrfs-checksum-images', 'btrfs-members-images', 'btrfs-parity-images', 'btrfs-allocation-image'];
+const imageFixtures = [...btrfsImages, 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn'];
+const phases = ['populate', 'verify', 'ext-populate', 'ext-verify', 'btrfs-verify', 'btrfs-move-verify', 'btrfs-sha256-verify', ...imageFixtures];
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 function stopped() {
   for (const file of [path.join(root, 'run.json'), path.join(base, 'run.json')]) {
@@ -46,13 +49,14 @@ async function main() {
     return;
   }
   const command = process.argv[2];
-  if (['seed-populate', 'seed-verify', 'seed-ext-populate', 'seed-ext-verify'].includes(command)) {
+  if (command?.startsWith('seed-') && phases.includes(command.slice(5))) {
     const state = path.join(base,'run.json');
     if (fs.existsSync(state) && alive(JSON.parse(fs.readFileSync(safePath(state),'utf8')).pid)) throw Error('Ubuntu must be stopped before preparing seed media');
     const phase = command.slice(5);
     const stage = safePath(path.join(base, `seed-${phase}`), root, false);
     fs.mkdirSync(stage);
-    const script = fs.readFileSync(path.join(project, phase.startsWith('ext-') ? 'scripts/vm/ubuntu-ext.py' : 'scripts/vm/ubuntu-ext4.py')).toString('base64');
+    const scriptName = phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
+    const script = fs.readFileSync(path.join(project, 'scripts/vm', scriptName)).toString('base64');
     fs.writeFileSync(path.join(stage, 'meta-data'), `instance-id: diskstudio-ext4-${phase}-1\nlocal-hostname: diskstudio-ubuntu\n`);
     fs.writeFileSync(path.join(stage, 'user-data'), `#cloud-config
 users: []
@@ -107,7 +111,8 @@ power_state:
     console.log('Ubuntu OS and immutable offline NoCloud seed prepared');
     return;
   }
-  if (!['probe','populate','verify','ext-populate','ext-verify'].includes(command)) throw Error('Use init, probe, seed-populate, populate, seed-verify, verify, seed-ext-populate, ext-populate, seed-ext-verify, ext-verify or stop');
+  if (command !== 'probe' && !phases.includes(command)) throw Error('Unknown Ubuntu verification phase');
+  const attachesTests = command !== 'probe' && !imageFixtures.includes(command);
   if (checkQcowHeader(os) !== 16 * 1024 ** 3) throw Error('Unexpected Ubuntu OS capacity');
   const log = safePath(path.join(base, `${command}-${Date.now()}.log`), root, false);
   if (fs.existsSync(log)) throw Error('Preserve prior probe log before another run');
@@ -117,11 +122,18 @@ power_state:
     '-serial', `file:${log}`, '-qmp', 'tcp:127.0.0.1:49366,server=on,wait=off',
     '-drive', `file=${safePath(os)},format=qcow2,if=none,id=ubuntu_os`, '-device', 'virtio-blk-pci,drive=ubuntu_os,serial=DS-UBUNTU-OS-0001',
     '-drive', `file=${safePath(path.join(base, command === 'probe' ? 'seed.iso' : `seed-${command}.iso`))},format=raw,media=cdrom,readonly=on`];
-  if (command !== 'probe') {
+  if (attachesTests) {
     for (const [name, serial, id] of [['test-a.qcow2','DS-TEST-A-0001','test_a'],['test-b.qcow2','DS-TEST-B-0001','test_b']]) {
-      const file = safePath(path.join(root, 'windows',name));
+      const fourKn = command.startsWith('btrfs-');
+      const file = safePath(path.join(root, 'windows', fourKn ? name.replace('.qcow2', '-4kn.qcow2') : name));
       if (checkQcowHeader(file) !== 16*1024**3) throw Error('Unexpected test disk capacity');
-      args.push('-blockdev',JSON.stringify({driver:'qcow2','node-name':id,file:{driver:'file',filename:file}}),'-device',`nvme,drive=${id},serial=${serial}`);
+      const geometry = fourKn ? ',logical_block_size=4096,physical_block_size=4096' : '';
+      const options = {driver:'qcow2','node-name':id,file:{driver:'file',filename:file}};
+      if (fourKn) {
+        options['read-only'] = true;
+        options.file['read-only'] = true;
+      }
+      args.push('-blockdev',JSON.stringify(options),'-device',`nvme,drive=${id},serial=${serial}${geometry}`);
     }
   }
   const child = spawn(safePath(path.join(root, 'tools/qemu/qemu-system-x86_64.exe')), args, { detached: true, windowsHide: true, stdio: 'ignore' });
@@ -136,6 +148,6 @@ power_state:
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
-  console.log(`Ubuntu ${command} started (${child.pid}); ${command === 'probe' ? 'only its virtual OS disk' : 'virtual OS and allowlisted test A/B'} attached; log ${log}`);
+  console.log(`Ubuntu ${command} started (${child.pid}); ${attachesTests ? 'virtual OS and allowlisted test A/B' : 'only its virtual OS disk'} attached; log ${log}`);
 }
 main().catch(e => { console.error(e.message); process.exitCode = 1; });

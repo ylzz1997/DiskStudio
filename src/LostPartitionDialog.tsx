@@ -4,21 +4,26 @@ import { Dialog, FormError } from "./components";
 import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { TableRestoreDialog } from "./TableRestoreDialog";
+import { LostBtrfsDialog } from "./LostBtrfsDialog";
 import { formatSize, type Disk } from "./types";
 import { surfaceRange } from "./surfaceModel";
 import {
   candidateRelation,
   freeSearchRanges,
+  type LostBtrfsChoice,
+  type LostCandidate,
   type LostSnapshot,
 } from "./lostPartitionModel";
 export function LostPartitionDialog({
   disk,
+  disks,
   onClose,
   onBusy,
   onBrowse,
   onRefresh,
 }: {
   disk: Disk;
+  disks: Disk[];
   onClose: () => void;
   onBusy: (value: boolean) => void;
   onBrowse: () => void;
@@ -29,6 +34,11 @@ export function LostPartitionDialog({
     [count, setCount] = useState(String(disk.size / disk.sectorSize));
   const [preset, setPreset] = useState("whole");
   const [selected, setSelected] = useState<string[]>([]);
+  const [btrfs, setBtrfs] = useState<{
+    id: string;
+    anchor: LostCandidate;
+    choices: LostBtrfsChoice[];
+  } | null>(null);
   const [recovery, setRecovery] = useState<{
     id: string;
     candidates: string[];
@@ -51,7 +61,12 @@ export function LostPartitionDialog({
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
       try {
-        const next = await invoke<LostSnapshot | null>("lost_partition_status");
+        const next = await invoke<LostSnapshot | null>(
+          "lost_partition_status",
+          {
+            target: disk.hardware?.identity,
+          },
+        );
         if (
           alive &&
           !recovering.current &&
@@ -155,6 +170,36 @@ export function LostPartitionDialog({
         onBack={() => setRecovery(null)}
       />
     );
+  if (btrfs)
+    return (
+      <LostBtrfsDialog
+        disk={disk}
+        disks={disks}
+        group={btrfs}
+        busy={!!busy}
+        error={catalogText(error)}
+        onBack={() => {
+          setBtrfs(null);
+          setError("");
+        }}
+        onRead={(others, allowMissing) =>
+          void action(async () => {
+            await invoke("lost_partition_browse_btrfs", {
+              request: {
+                anchor: { id: btrfs.id, candidate: btrfs.anchor.id },
+                others: others.map((choice) => ({
+                  id: choice.session,
+                  candidate: choice.candidate,
+                })),
+                allowMissing,
+              },
+            });
+            control.current.handedOff = true;
+            onBrowse();
+          })
+        }
+      />
+    );
   return (
     <Dialog
       title={t("搜索丢失分区")}
@@ -219,7 +264,7 @@ export function LostPartitionDialog({
       </div>
       <p className="lost-note">
         {t(
-          "搜索 NTFS、FAT、exFAT 和 Ext 文件系统边界，候选须完整位于所选范围。识别结果可能来自旧格式或嵌入的镜像，请通过文件内容核对；搜索和浏览均不会修改分区表。",
+          "搜索 NTFS、FAT、exFAT、Ext 和 Btrfs 文件系统。候选须完整位于所选范围，请通过文件内容核对。搜索和浏览均为只读。",
         )}
       </p>
       <div className="dialog-actions">
@@ -285,6 +330,7 @@ export function LostPartitionDialog({
                     checked={selected.includes(c.id)}
                     disabled={
                       busy ||
+                      !c.canRestore ||
                       candidateRelation(c, disk.partitions) !== "未登记范围"
                     }
                     onChange={(e) =>
@@ -303,23 +349,49 @@ export function LostPartitionDialog({
                   {t("起始 LBA")}{" "}
                   {(c.offset / disk.sectorSize).toLocaleString(language)} ·{" "}
                   {catalogText(candidateRelation(c, disk.partitions))}
+                  {!c.canBrowse ? (
+                    <> · {t("需联合读取")}</>
+                  ) : (
+                    !c.canRestore && <> · {t("仅浏览与提取")}</>
+                  )}
                 </small>
               </div>
-              <button
-                className="button"
-                disabled={busy}
-                onClick={() =>
-                  void action(async () => {
-                    await invoke("lost_partition_browse", {
-                      request: { id: snapshot.id, candidate: c.id },
-                    });
-                    control.current.handedOff = true;
-                    onBrowse();
-                  })
-                }
-              >
-                {t("浏览文件")}
-              </button>
+              <div className="lost-candidate-actions">
+                {c.canBrowse && (
+                  <button
+                    className="button"
+                    disabled={busy}
+                    onClick={() =>
+                      void action(async () => {
+                        await invoke("lost_partition_browse", {
+                          request: { id: snapshot.id, candidate: c.id },
+                        });
+                        control.current.handedOff = true;
+                        onBrowse();
+                      })
+                    }
+                  >
+                    {t("浏览文件")}
+                  </button>
+                )}
+                {(c.btrfsMemberCount ?? 0) > 1 && (
+                  <button
+                    className="button"
+                    disabled={busy}
+                    onClick={() =>
+                      void action(async () => {
+                        const choices = await invoke<LostBtrfsChoice[]>(
+                          "lost_partition_btrfs_choices",
+                          { request: { id: snapshot.id, candidate: c.id } },
+                        );
+                        setBtrfs({ id: snapshot.id, anchor: c, choices });
+                      })
+                    }
+                  >
+                    {t("联合浏览 Btrfs 成员")}
+                  </button>
+                )}
+              </div>
               <details>
                 <summary>{t("识别依据与限制")}</summary>
                 <p>

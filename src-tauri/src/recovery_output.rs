@@ -162,6 +162,9 @@ mod tests {
             skipped: vec![],
             backup_source: None,
             image_source: None,
+            image_lvm_source: None,
+            physical_lvm_source: None,
+            lvm_degraded_raid: false,
         };
         (parent, destination, plan)
     }

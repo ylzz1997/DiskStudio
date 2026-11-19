@@ -572,6 +572,39 @@ fn allocation_ext_dirty_checksum_unknown_features_and_bad_free_counts_reject() {
     b[1024 + 0xc] ^= 1;
     assert!(analyze(&b).is_err());
 }
+
+#[test]
+fn allocation_btrfs_backup_zeroes_proven_free_data_and_clone_leaves_it_alone() {
+    let mut bytes = crate::btrfs_recovery::fixture::allocation_image(true, 4096);
+    let free = 4 * 1024 * 1024 + 4096;
+    bytes[free..].fill(0x7e);
+    let plan = analyze(&bytes).unwrap();
+    assert_eq!(plan.volumes[0].filesystem, "Btrfs");
+    assert_eq!(plan.skipped, (bytes.len() - free) as u64);
+    let mut backup = Vec::new();
+    plan.masked(Cursor::new(&bytes))
+        .read_to_end(&mut backup)
+        .unwrap();
+    assert!(backup[free..].iter().all(|&byte| byte == 0));
+    let mut target = Cursor::new(vec![0xa1; bytes.len()]);
+    plan.copy_verified(
+        &mut Cursor::new(&bytes),
+        &mut target,
+        Arc::new(AtomicBool::new(false)),
+        |_| Ok(()),
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(target.get_ref()[free..].iter().all(|&byte| byte == 0xa1));
+    for result in [backup, target.into_inner()] {
+        let mut btrfs = disk_core::btrfs::open(Cursor::new(result), || Ok(())).unwrap();
+        let mut data = Vec::new();
+        btrfs
+            .read_file(5, 257, u64::MAX, &mut data, || Ok(()))
+            .unwrap();
+        assert_eq!(data, [&[23; 4096][..], &[0; 7][..]].concat());
+    }
+}
 #[test]
 fn allocation_unknown_filesystems_are_retained_without_claiming_empty_space() {
     let b = vec![17; 8192];

@@ -108,6 +108,19 @@ mod platform {
         })
     }
     impl Group {
+        pub fn raw_readers(&self) -> Result<Vec<crate::data_io::Region<File>>, String> {
+            self.entries
+                .lock()
+                .map_err(|_| "镜像文件状态异常".to_string())?
+                .iter()
+                .map(|entry| {
+                    let file = entry.file.try_clone().map_err(|e| e.to_string())?;
+                    crate::data_io::Region::new(file, 0, entry.info.size)
+                        .map_err(|e| e.to_string())
+                })
+                .collect()
+        }
+
         pub fn info(&self) -> Info {
             Info {
                 id: self.id.clone(),
@@ -202,6 +215,34 @@ mod platform {
         registry.staged = Some(group);
         Ok(Some(info))
     }
+
+    pub fn choose_lvm_members() -> Result<Option<Arc<Group>>, String> {
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title(crate::native_locale::text("选择 LVM2 物理卷的 RAW/IMG 文件"))
+            .add_filter(crate::native_locale::text("RAW/IMG 物理卷镜像"), &["img", "raw"])
+            .pick_files()
+        else {
+            return Ok(None);
+        };
+        if !(1..=disk_core::lvm::MAX_MEMBERS).contains(&paths.len()) {
+            return Err("请选择 1–64 个 LVM2 物理卷来源。".into());
+        }
+        let entries = paths
+            .into_iter()
+            .map(|path| {
+                if !path.extension().and_then(|s| s.to_str()).is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("raw") || ext.eq_ignore_ascii_case("img")
+                }) {
+                    return Err("请选择 RAW/IMG 物理卷镜像。".into());
+                }
+                opened(path)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Some(Arc::new(Group {
+            id: uuid::Uuid::new_v4().to_string(),
+            entries: Mutex::new(entries),
+        })))
+    }
     pub fn add(id: &str) -> Result<Info, String> {
         let group = registry()
             .staged
@@ -268,7 +309,7 @@ mod platform {
     }
 }
 #[cfg(windows)]
-pub use platform::{add, choose, discard, read, take, Group};
+pub use platform::{add, choose, choose_lvm_members, discard, read, take, Group};
 #[cfg(not(windows))]
 pub fn read(_: &str, _: &str, _: u64, _: usize) -> Result<Vec<u8>, String> {
     Err("当前仅支持 Windows 原生文件选择。".into())

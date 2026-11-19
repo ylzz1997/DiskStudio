@@ -395,6 +395,31 @@
 .data-panel .section-heading {
   margin-bottom: 19px;
 }
+.btrfs-member-selector {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  margin: 12px 0 18px;
+  padding: 10px 14px;
+}
+.btrfs-member-selector summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.btrfs-member-selector p {
+  margin: 10px 0;
+}
+.btrfs-member-options {
+  display: grid;
+  gap: 5px;
+  max-height: 13rem;
+  overflow: auto;
+}
+.btrfs-member-options label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}
 .scan-modes,
 .data-task-options {
   display: grid;
@@ -1256,6 +1281,13 @@
 .lost-candidate strong,
 .lost-candidate small {
   display: block;
+}
+.lost-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .lost-candidate small {
   color: var(--muted);

@@ -1,5 +1,6 @@
 //! Bounded, aligned reads and verified streaming copies. No device discovery here.
 use sha2::{Digest, Sha256};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub struct Region<R> {
@@ -66,6 +67,29 @@ impl<R: Read + Seek> Seek for Region<R> {
         }
         self.pos = next as u64;
         Ok(self.pos)
+    }
+}
+
+impl Write for Region<File> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let end = self
+            .pos
+            .checked_add(bytes.len() as u64)
+            .filter(|end| *end <= self.len)
+            .ok_or_else(|| io::Error::other("Write outside selected range"))?;
+        if self.pos % 512 != 0 || end % 512 != 0 {
+            return Err(io::Error::other("Unaligned write in selected range"));
+        }
+        self.cache_start = u64::MAX;
+        self.valid = 0;
+        self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
+        self.inner.write_all(bytes)?;
+        self.pos = end;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.sync_all()
     }
 }
 

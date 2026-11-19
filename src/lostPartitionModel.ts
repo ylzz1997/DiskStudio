@@ -6,6 +6,18 @@ export interface LostCandidate {
   size: number;
   evidence: string;
   warning: string;
+  canRestore: boolean;
+  canBrowse: boolean;
+  btrfsMemberCount: number | null;
+}
+export interface LostBtrfsChoice {
+  session: string;
+  candidate: string;
+  target: string;
+  layoutKey: string;
+  member: string;
+  startSector: number;
+  size: number;
 }
 export interface LostSnapshot {
   id: string;

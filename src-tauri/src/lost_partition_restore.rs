@@ -29,6 +29,9 @@ pub fn extent(
     candidate: &Candidate,
     cancel: &AtomicBool,
 ) -> Result<Extent, String> {
+    if !candidate.can_restore {
+        return Err("该候选仅允许浏览和提取，无法登记分区记录。".into());
+    }
     // Filesystem probes include sub-sector reads (e.g. FAT's 8-byte reserved
     // entries). Bound and align the raw stream before any evidence probe.
     drop(lost_partitions::candidate_reader(
@@ -67,7 +70,7 @@ pub fn extent(
             crate::partitions::policy::BASIC_DATA
         }
         "FAT12" | "FAT16" | "FAT32" | "exFAT" => crate::partitions::policy::BASIC_DATA,
-        "Ext2" | "Ext3" | "Ext4" | "ext2" | "ext3" | "ext4" => {
+        "Ext2" | "Ext3" | "Ext4" | "ext2" | "ext3" | "ext4" | "Btrfs" => {
             crate::partitions::policy::LINUX_DATA
         }
         _ => return Err("尚不支持为该文件系统恢复分区记录。".into()),

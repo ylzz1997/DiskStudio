@@ -322,6 +322,29 @@ fn ext_stamp(b: &[u8], base: usize, extra: usize, end: usize) -> Option<Stamp> {
         unix(low, 0, "1 s")
     }
 }
+pub(crate) fn btrfs(b: &[u8; 160]) -> Metadata {
+    let stamp = |at| {
+        let seconds = u64le(b, at) as i64;
+        let nanos = u32le(b, at + 8);
+        (seconds != 0 || nanos != 0)
+            .then(|| unix(seconds, nanos, "1 ns"))
+            .flatten()
+    };
+    Metadata {
+        source: Some("Btrfs inode".into()),
+        created: stamp(148),
+        modified: stamp(136),
+        accessed: stamp(112),
+        changed: stamp(124),
+        raw_flags: Some(format!("0x{:016X}", u64le(b, 64))),
+        permissions: Some(format!("{:04o}", u32le(b, 52) & 0xfff)),
+        uid: Some(u32le(b, 44)),
+        gid: Some(u32le(b, 48)),
+        links: Some(u32le(b, 40)),
+        ..Metadata::default()
+    }
+}
+
 pub fn ext(b: &[u8], linux_ids: bool) -> Metadata {
     if b.len() < 128 {
         return Metadata::default();

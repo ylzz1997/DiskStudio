@@ -46,6 +46,7 @@ pub struct Extraction {
 }
 #[derive(Clone)]
 pub enum Locator {
+    Btrfs(crate::btrfs_recovery::Location),
     Ext(crate::ext_recovery::Location),
     Fat(crate::fat_recovery::Location),
     Ntfs {
@@ -91,6 +92,9 @@ pub fn scan_filesystem_owned<R: Read + Seek + 'static>(
         if magic == [0x53, 0xef] {
             return crate::ext_recovery::scan(reader, mode, cancel, tick, found, directory);
         }
+        if disk_core::btrfs::has_magic(&mut reader, size)? {
+            return crate::btrfs_recovery::scan(reader, mode, &cancel, tick, found, directory);
+        }
     }
     scan_filesystem_with_directories(&mut reader, mode, tick, found, directory)
 }
@@ -128,6 +132,14 @@ pub fn extract_owned_with_metadata<R: Read + Seek + 'static, W: Write>(
     if let Locator::Ext(location) = &candidate.locator {
         return crate::ext_recovery::extract_with_metadata(
             reader, candidate, location, out, limit, cancel, tick,
+        );
+    }
+    if let Locator::Btrfs(location) = &candidate.locator {
+        if !candidate.supported {
+            return Err(candidate.note.clone());
+        }
+        return crate::btrfs_recovery::extract(
+            reader, candidate, location, out, limit, &cancel, tick,
         );
     }
     extract_with_metadata(&mut reader, candidate, out, limit, tick)
@@ -224,6 +236,17 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
     let mut buffer = vec![0; 1024 * 1024];
     let mut metadata = crate::file_metadata::Metadata::default();
     match &c.locator {
+        Locator::Btrfs(location) => {
+            return crate::btrfs_recovery::extract(
+                reader,
+                c,
+                location,
+                out,
+                limit,
+                &std::sync::atomic::AtomicBool::new(false),
+                tick,
+            );
+        }
         Locator::Ext(_) => return Err("Ext 提取需要使用拥有源读取流的入口。".into()),
         Locator::Fat(location) => {
             return crate::fat_recovery::extract_with_metadata(

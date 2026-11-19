@@ -28,6 +28,119 @@ fn findings(bytes: Vec<u8>, sector: u64) -> Vec<Candidate> {
     .unwrap();
     items
 }
+
+#[test]
+fn btrfs_search_deduplicates_mirrors_and_allows_read_only_recovery_without_primary() {
+    let offset = BLOCK - 64 * 1024;
+    let mut disk = vec![0; offset];
+    let volume = crate::btrfs_recovery::fixture::allocation_image_with_mirror(true, 4096, true);
+    let size = volume.len() as u64;
+    disk.extend(volume);
+    let range = Range {
+        sector: 4096,
+        ..range(disk.len())
+    };
+    let cancel = AtomicBool::new(false);
+    let mut source = Cursor::new(disk);
+    let detect = |source: &mut Cursor<Vec<u8>>, range| {
+        let mut candidates = Vec::new();
+        scan(source, range, &cancel, |_, candidate| {
+            candidates.extend(candidate);
+            Ok(())
+        })
+        .unwrap();
+        candidates
+    };
+    let candidates = detect(&mut source, range);
+    let [healthy] = candidates.as_slice() else {
+        panic!("expected one candidate")
+    };
+    assert_eq!((healthy.offset, healthy.size), (offset as u64, size));
+    assert_eq!(healthy.filesystem, "Btrfs");
+    assert!(healthy.can_restore);
+    assert!(detect(
+        &mut source,
+        Range {
+            size: range.size - 4096,
+            ..range
+        }
+    )
+    .is_empty());
+
+    source.get_mut()[offset + 64 * 1024..][..4096].fill(0);
+    assert!(revalidate(&mut source, range, healthy, &cancel).is_err());
+    let candidates = detect(&mut source, range);
+    let [mirror] = candidates.as_slice() else {
+        panic!("expected one mirror candidate")
+    };
+    assert_eq!((mirror.offset, mirror.size), (offset as u64, size));
+    assert!(!mirror.can_restore);
+    let reader = candidate_reader(
+        &mut source,
+        range.size,
+        range.sector,
+        range,
+        mirror,
+        &cancel,
+    )
+    .unwrap();
+    let mut volume = disk_core::btrfs::open_recovered(reader, || Ok(())).unwrap();
+    let mut output = Vec::new();
+    volume
+        .read_file(5, 257, u64::MAX, &mut output, || Ok(()))
+        .unwrap();
+    assert_eq!(output, [&[23; 4096][..], &[0; 7][..]].concat());
+    assert!(!volume.has_current_primary().unwrap());
+    volume.verify_view(|| Ok(())).unwrap();
+    drop(volume);
+    source.get_mut()[offset + 64 * 1024 * 1024] ^= 1;
+    assert!(detect(&mut source, range).is_empty());
+}
+#[test]
+fn btrfs_member_header_is_retained_for_grouping_when_its_directory_is_unavailable() {
+    use crate::btrfs_recovery::fixture::{allocation_image_with_mirror, set64, sign};
+    let mut bytes = allocation_image_with_mirror(true, 4096, false);
+    let primary = &mut bytes[64 * 1024..68 * 1024];
+    // Keep a valid multi-member superblock while the local mapping tree cannot
+    // establish the second device. This header can only participate in a group.
+    set64(primary, 0x70, 16 * 1024 * 1024);
+    set64(primary, 0x88, 2);
+    sign(primary);
+    let found = findings(bytes.clone(), 4096);
+    let [member] = &found[..] else {
+        panic!("expected one header-only candidate")
+    };
+    assert!(!member.can_browse && !member.can_restore);
+    assert_eq!(member.btrfs_member_count, Some(2));
+    assert_eq!(member.btrfs_member.as_ref().unwrap().id, 1);
+    let range = Range {
+        sector: 4096,
+        ..range(bytes.len())
+    };
+    let cancel = AtomicBool::new(false);
+    let reader = candidate_reader(
+        Cursor::new(bytes.clone()),
+        range.size,
+        range.sector,
+        range,
+        member,
+        &cancel,
+    )
+    .unwrap();
+    assert!(disk_core::btrfs::open_recovered_members(vec![reader], false, || Ok(())).is_err());
+    let primary = &mut bytes[64 * 1024..68 * 1024];
+    set64(primary, 0x48, 11);
+    sign(primary);
+    assert!(candidate_reader(
+        Cursor::new(bytes),
+        range.size,
+        range.sector,
+        range,
+        member,
+        &cancel,
+    )
+    .is_err());
+}
 #[test]
 fn ntfs_without_partition_table_crosses_scan_blocks_and_revalidates_evidence() {
     let offset = BLOCK - 512;

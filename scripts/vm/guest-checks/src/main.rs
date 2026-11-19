@@ -16,6 +16,9 @@ mod backup_files;
 mod backup_protection;
 #[path = "../../../../src-tauri/src/backup_secrets.rs"]
 mod backup_secrets;
+mod btrfs_checks;
+#[path = "../../../../src-tauri/src/btrfs_recovery.rs"]
+mod btrfs_recovery;
 #[path = "../../../../src-tauri/src/data_io.rs"]
 mod data_io;
 #[path = "../../../../src-tauri/src/data_tasks.rs"]
@@ -66,6 +69,8 @@ mod lost_fixture;
 mod lost_partition_tasks;
 #[path = "../../../../src-tauri/src/lost_partitions.rs"]
 mod lost_partitions;
+#[path = "../../../../src-tauri/src/lvm_tasks.rs"]
+mod lvm_tasks;
 #[path = "../../../../src-tauri/src/maintenance_io.rs"]
 mod maintenance_io;
 #[path = "../../../../src-tauri/src/maintenance_tasks.rs"]
@@ -566,7 +571,47 @@ fn main() {
     let is_4kn = matches!(
         mode.as_deref(),
         Some(
-            "Sector-Copy-4Kn-Baseline"
+            "Btrfs-Lab-4Kn-Create"
+                | "Btrfs-Lab-4Kn-Inspect"
+                | "Btrfs-Lab-4Kn-Online"
+                | "Btrfs-Lab-4Kn-Move-Prepare"
+                | "Btrfs-Lab-4Kn-Move-Inspect"
+                | "Btrfs-Lab-4Kn-Move-Reuse"
+                | "Btrfs-Lab-4Kn-Move-Reuse-Inspect"
+                | "Btrfs-Lab-4Kn-Snapshot-Prepare"
+                | "Btrfs-Lab-4Kn-Snapshot-Inspect"
+                | "Btrfs-Lab-4Kn-Retained-Prepare"
+                | "Btrfs-Lab-4Kn-Retained-Inspect"
+                | "Btrfs-Lab-4Kn-Sha256-Prepare"
+                | "Btrfs-Lab-4Kn-Sha256-Inspect"
+                | "Btrfs-Lab-4Kn-Members-Prepare"
+                | "Btrfs-Lab-4Kn-Members-Inspect"
+                | "Btrfs-Lab-4Kn-Parity-Prepare"
+                | "Btrfs-Lab-4Kn-Parity-Inspect"
+                | "Btrfs-Lab-4Kn-Allocation-Prepare"
+                | "Btrfs-Lab-4Kn-Allocation-Archive"
+                | "Btrfs-Lab-4Kn-Allocation-Inspect"
+                | "Btrfs-Lab-4Kn-Lost-Prepare"
+                | "Btrfs-Lab-4Kn-Lost-Inspect"
+                | "Btrfs-Lab-4Kn-Lost-Group-Prepare"
+                | "Btrfs-Lab-4Kn-Lost-Group-Inspect"
+                | "Lvm-Lab-4Kn-Prepare"
+                | "Lvm-Lab-4Kn-Inspect"
+                | "Lvm-Images-4Kn-Prepare"
+                | "Lvm-Images-4Kn-Inspect"
+                | "Lvm-Raid-4Kn-Prepare"
+                | "Lvm-Raid-4Kn-Inspect"
+                | "Lvm-Thin-4Kn-Prepare"
+                | "Lvm-Thin-4Kn-Inspect"
+                | "Lvm-Cow-4Kn-Prepare"
+                | "Lvm-Cow-4Kn-Inspect"
+                | "Lvm-Degraded-4Kn-Prepare"
+                | "Lvm-Degraded-4Kn-Inspect"
+                | "Lvm-Cross-4Kn-Prepare"
+                | "Lvm-Cross-4Kn-Inspect"
+                | "Lvm-Raid10-4Kn-Prepare"
+                | "Lvm-Raid10-4Kn-Inspect"
+                | "Sector-Copy-4Kn-Baseline"
                 | "Sector-Copy-4Kn-Verify"
                 | "Sector-Copy-4Kn-Verify-Report"
                 | "Fat-Sectors-4Kn-Check"
@@ -627,6 +672,55 @@ fn main() {
 
 fn dispatch(mode: Option<&str>) -> Result<String, String> {
     match mode {
+        Some("Btrfs-Lab-4Kn-Create") => btrfs_checks::create(),
+        Some("Btrfs-Lab-4Kn-Inspect") => btrfs_checks::inspect(),
+        Some("Btrfs-Lab-4Kn-Online") => btrfs_checks::online_fixture(),
+        Some("Btrfs-Lab-4Kn-Move-Prepare") => btrfs_checks::prepare_move(false),
+        Some("Btrfs-Lab-4Kn-Move-Reuse") => btrfs_checks::prepare_move(true),
+        Some("Btrfs-Lab-4Kn-Move-Inspect" | "Btrfs-Lab-4Kn-Move-Reuse-Inspect") => {
+            btrfs_checks::inspect_move()
+        }
+        Some("Btrfs-Lab-4Kn-Snapshot-Prepare") => {
+            btrfs_checks::prepare_history(btrfs_checks::SNAPSHOT)
+        }
+        Some("Btrfs-Lab-4Kn-Snapshot-Inspect") => {
+            btrfs_checks::inspect_history(btrfs_checks::SNAPSHOT)
+        }
+        Some("Btrfs-Lab-4Kn-Retained-Prepare") => {
+            btrfs_checks::prepare_history(btrfs_checks::RETAINED)
+        }
+        Some("Btrfs-Lab-4Kn-Retained-Inspect") => {
+            btrfs_checks::inspect_history(btrfs_checks::RETAINED)
+        }
+        Some("Btrfs-Lab-4Kn-Sha256-Prepare") => btrfs_checks::prepare_checksum(),
+        Some("Btrfs-Lab-4Kn-Sha256-Inspect") => btrfs_checks::inspect_checksum(),
+        Some("Btrfs-Lab-4Kn-Members-Prepare") => btrfs_checks::prepare_members(),
+        Some("Btrfs-Lab-4Kn-Members-Inspect") => btrfs_checks::inspect_members(),
+        Some("Btrfs-Lab-4Kn-Parity-Prepare") => btrfs_checks::prepare_parity(),
+        Some("Btrfs-Lab-4Kn-Parity-Inspect") => btrfs_checks::inspect_parity(),
+        Some("Btrfs-Lab-4Kn-Allocation-Prepare") => btrfs_checks::allocation::prepare(),
+        Some("Btrfs-Lab-4Kn-Allocation-Archive") => btrfs_checks::allocation::inspect_archive(),
+        Some("Btrfs-Lab-4Kn-Allocation-Inspect") => btrfs_checks::allocation::inspect_clone(),
+        Some("Btrfs-Lab-4Kn-Lost-Prepare") => btrfs_checks::lost::prepare(),
+        Some("Btrfs-Lab-4Kn-Lost-Inspect") => btrfs_checks::lost::inspect(),
+        Some("Btrfs-Lab-4Kn-Lost-Group-Prepare") => btrfs_checks::lost::prepare_group(),
+        Some("Btrfs-Lab-4Kn-Lost-Group-Inspect") => btrfs_checks::lost::inspect_group(),
+        Some("Lvm-Lab-4Kn-Prepare") => btrfs_checks::lvm::prepare(),
+        Some("Lvm-Lab-4Kn-Inspect") => btrfs_checks::lvm::inspect(),
+        Some("Lvm-Images-4Kn-Prepare") => btrfs_checks::lvm::images::prepare(),
+        Some("Lvm-Images-4Kn-Inspect") => btrfs_checks::lvm::images::inspect(),
+        Some("Lvm-Raid-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID),
+        Some("Lvm-Raid-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID),
+        Some("Lvm-Thin-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::THIN),
+        Some("Lvm-Thin-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::THIN),
+        Some("Lvm-Cow-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::COW),
+        Some("Lvm-Cow-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::COW),
+        Some("Lvm-Degraded-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::DEGRADED),
+        Some("Lvm-Degraded-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::DEGRADED),
+        Some("Lvm-Cross-4Kn-Prepare") => btrfs_checks::lvm::cross::prepare(),
+        Some("Lvm-Cross-4Kn-Inspect") => btrfs_checks::lvm::cross::inspect(),
+        Some("Lvm-Raid10-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID10),
+        Some("Lvm-Raid10-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID10),
         Some("Sector-Copy-4Kn-Baseline") => sector_copy_checks::baseline(),
         Some("Sector-Copy-4Kn-Verify") => sector_copy_checks::verify(),
         Some("Sector-Copy-4Kn-Verify-Report") => {
