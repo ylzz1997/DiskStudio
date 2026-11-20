@@ -75,6 +75,25 @@ test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () 
   assert.throws(() => buildArgs({ fourKn: true, setup: true }), /4Kn/);
   assert.throws(() => buildArgs({ fourKn: true, network: true }), /4Kn/);
 });
+test('clone and restore fixtures use independent NVMe images and start paused', () => {
+  assert.throws(() => buildArgs({ fourKn: true, fixture: '../other' }), /separate 4Kn/);
+  for (const fixture of ['whole-clone', 'btrfs-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore']) {
+    assert.throws(() => buildArgs({ fixture }), /separate 4Kn/);
+    assert.throws(() => buildArgs({ fourKn: true, fixture, sectorFault: true }), /separate 4Kn/);
+    const args = buildArgs({ fourKn: true, fixture });
+    const blocks = args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
+    assert.ok(args.includes('-S'));
+    assert.equal(args[args.indexOf('-nic') + 1], 'none');
+    assert.deepEqual(blocks.filter(b => b.driver === 'qcow2').map(b => b.file.filename),
+      ['system.qcow2', `test-a-${fixture}-4kn.qcow2`, `test-b-${fixture}-4kn.qcow2`].map(file => path.join(root, 'windows', file)));
+    assert.equal(blocks.find(b => b['node-name'] === 'os').discard, undefined);
+    for (const block of blocks.filter(b => ['test_a', 'test_b'].includes(b['node-name']))) {
+      assert.equal(block.file.driver, 'file');
+      assert.equal(block.discard, 'unmap');
+      assert.equal(block['detect-zeroes'], 'unmap');
+    }
+  }
+});
 test('running-test preflight rejects replaced disks, wrong capacities and extra devices', () => {
   const args = buildArgs();
   const blocks = args.flatMap((value, i) => {
@@ -97,6 +116,31 @@ test('running-test preflight rejects replaced disks, wrong capacities and extra 
     change(changed);
     assert.throws(() => validateTestBlocks(changed));
   }
+});
+test('sector-copy fault wraps only the fixed Test A file and starts paused', () => {
+  assert.throws(() => buildArgs({ sectorFault: true }), /4Kn/);
+  assert.throws(() => buildArgs({ fourKn: true, sectorFault: true, accelerator: 'whpx' }), /TCG/);
+  const args = buildArgs({ fourKn: true, sectorFault: true });
+  assert.ok(args.includes('-S'));
+  const backends = args.flatMap((value, index) => value === '-blockdev' ? [JSON.parse(args[index + 1])] : []);
+  const a = backends.find(value => value['node-name'] === 'test_a');
+  assert.equal(a.driver, 'blkdebug');
+  assert.deepEqual(a['inject-error'], [{ event: 'none', iotype: 'read', sector: 2232323 * 8, errno: 5 }]);
+  assert.equal(a.image.driver, 'qcow2');
+  assert.equal(a.image.file.filename, path.join(root, 'windows', 'test-a-4kn.qcow2'));
+  const blocks = backends.map(backend => {
+    const disk = disks.find(candidate => candidate.id === backend['node-name']);
+    const image = { 'virtual-size': disk ? disk.size * 1024 ** 3 : 0 };
+    const file = backend.file?.filename;
+    if (backend === a) image['backing-image'] = { format: 'qcow2', filename: a.image.file.filename };
+    return { removable: !disk, inserted: { drv: backend.driver, file, ro: !disk, image,
+      'node-name': backend['node-name'], backing_file_depth: backend === a ? 1 : 0 } };
+  });
+  assert.doesNotThrow(() => validateTestBlocks(blocks, true, true));
+  assert.throws(() => validateTestBlocks(blocks, true));
+  blocks.find(block => block.inserted['node-name'] === 'test_a').inserted.image['backing-image'].filename =
+    path.join(root, 'windows', 'test-b-4kn.qcow2');
+  assert.throws(() => validateTestBlocks(blocks, true, true));
 });
 test('actual QCOW2 snapshot restores written test sectors', () => {
   const img = path.join(root, 'tools/qemu/qemu-img.exe');

@@ -225,6 +225,11 @@ pub(crate) struct TableReadContext {
     pub fingerprint: String,
     volumes: Vec<(u32, Volume)>,
 }
+impl TableReadContext {
+    pub(crate) fn has_volume(&self, partition: u32) -> bool {
+        self.volumes.iter().any(|(number, _)| *number == partition)
+    }
+}
 pub(crate) struct TableInspectContext {
     pub resolved: crate::data_windows::Resolved,
     pub parts: Vec<Partition>,

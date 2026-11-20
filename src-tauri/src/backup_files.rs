@@ -12,7 +12,7 @@ use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
-    os::windows::fs::MetadataExt,
+    os::windows::{fs::MetadataExt, io::AsRawHandle},
     path::Path,
 };
 use windows_sys::Win32::Storage::FileSystem::*;
@@ -155,11 +155,31 @@ impl Publication {
     pub fn binding(&self) -> FileBinding {
         self.bindings[1].clone()
     }
+    pub(crate) fn file_identity(&self) -> Result<[u64; 2], String> {
+        sector_file_identity(&self.file)
+    }
     /// Caller must have verified the complete output first.
     pub fn publish(self) -> Result<(), String> {
         self.validate()?;
         crate::recovery_output::finish(&self.file, &self.directory, &self.name)
     }
+}
+
+pub(crate) fn sector_file_identity(file: &File) -> Result<[u64; 2], String> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the live file handle and writable result buffer are valid.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(err(io::Error::last_os_error()));
+    }
+    if info.nNumberOfLinks != 1
+        || info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0
+    {
+        return Err("请选择没有链接的普通扇区输出文件。".into());
+    }
+    Ok([
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ])
 }
 pub fn create(
     path: &Path,
@@ -175,8 +195,14 @@ pub fn create(
     {
         return Err("请选择普通 .dsbackup 文件名。".into());
     }
-    let (file, publication) =
-        create_output(path, name, other_disk, required, "目标备份已存在，未覆盖。")?;
+    let (file, publication) = create_output(
+        path,
+        name,
+        other_disk,
+        None,
+        required,
+        "目标备份已存在，未覆盖。",
+    )?;
     let output = match password {
         Some(password) => {
             Output::Encrypted(backup_encryption::Writer::new(file, password).map_err(err)?)
@@ -191,48 +217,117 @@ pub(crate) fn create_sector_output(
     source: &Target,
     size: u64,
 ) -> Result<(File, Publication), String> {
-    create_sector_file(path, source, size, ".bin", "请选择普通 .bin 文件名。")
+    create_sector_output_excluding(path, std::slice::from_ref(source), size)
+}
+
+pub(crate) fn create_sector_output_excluding(
+    path: &Path,
+    sources: &[Target],
+    size: u64,
+) -> Result<(File, Publication), String> {
+    create_sector_file(path, sources, None, size, ".bin", "请选择普通 .bin 文件名。")
+}
+
+pub(crate) fn reopen_sector_output(
+    path: &Path,
+    source: &Target,
+) -> Result<(File, Publication), String> {
+    let name = sector_filename(path, ".bin", "请选择普通 .bin 文件名。")?;
+    open_output(
+        path,
+        name,
+        std::slice::from_ref(source),
+        None,
+        0,
+        "目标文件已经发布。请选择尚未完成的断点。",
+        false,
+    )
 }
 
 pub(crate) fn create_sector_report(
     path: &Path,
-    source: &Target,
+    sources: &[Target],
+    destination: Option<&Target>,
     size: u64,
 ) -> Result<(File, Publication), String> {
-    create_sector_file(path, source, size, ".json", "请选择普通 .json 文件名。")
+    create_sector_file(
+        path,
+        sources,
+        destination,
+        size,
+        ".json",
+        "请选择普通 .json 文件名。",
+    )
 }
 
 fn create_sector_file(
     path: &Path,
-    source: &Target,
+    sources: &[Target],
+    destination: Option<&Target>,
     size: u64,
     extension: &str,
     invalid_name: &str,
 ) -> Result<(File, Publication), String> {
-    let name = path
-        .file_name()
+    let name = sector_filename(path, extension, invalid_name)?;
+    open_output(
+        path,
+        name,
+        sources,
+        destination,
+        size,
+        "文件已存在，请使用新文件名。",
+        true,
+    )
+}
+
+fn sector_filename<'a>(
+    path: &'a Path,
+    extension: &str,
+    invalid_name: &str,
+) -> Result<&'a str, String> {
+    path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| {
             *name == crate::data_io::safe_name(name)
                 && name.to_ascii_lowercase().ends_with(extension)
                 && !crate::recovery_export::reserved(name)
         })
-        .ok_or(invalid_name)?;
-    create_output(path, name, source, size, "文件已存在，请使用新文件名。")
+        .ok_or_else(|| invalid_name.into())
 }
 
 fn create_output(
     path: &Path,
     name: &str,
     other_disk: &Target,
+    destination: Option<&Target>,
     required: u64,
     exists_message: &str,
 ) -> Result<(File, Publication), String> {
-    let parent =
-        platform::destination_folder(path.parent().ok_or("输出目录无效")?, other_disk, required)?;
-    let (parent, disk) = platform::folder_location(&parent)?;
-    if &disk == other_disk {
-        return Err("输出必须位于另一块物理磁盘。".into());
+    open_output(
+        path,
+        name,
+        std::slice::from_ref(other_disk),
+        destination,
+        required,
+        exists_message,
+        true,
+    )
+}
+
+fn open_output(
+    path: &Path,
+    name: &str,
+    sources: &[Target],
+    destination: Option<&Target>,
+    required: u64,
+    exists_message: &str,
+    create: bool,
+) -> Result<(File, Publication), String> {
+    let (parent, disk) = platform::destination_location(
+        path.parent().ok_or("输出目录无效")?, sources, required,
+    )?;
+    if destination == Some(&disk) {
+        return Err("扇区复制报告需保存到源和目标以外的磁盘。".into());
     }
     let directory = Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(err)?;
     let parent_binding =
@@ -245,7 +340,7 @@ fn create_output(
     options
         .read(true)
         .write(true)
-        .create_new(true)
+        .create_new(create)
         .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
         .share_mode(FILE_SHARE_READ)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);

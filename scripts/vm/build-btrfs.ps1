@@ -1,7 +1,7 @@
-param([switch]$Relocation, [switch]$ReuseFixture, [switch]$Snapshot, [switch]$Retained, [switch]$Sha256, [switch]$Members, [switch]$Parity, [switch]$Allocation, [switch]$LostPartition, [switch]$LostMembers)
+param([switch]$Relocation, [switch]$ReuseFixture, [switch]$CapacityClone, [switch]$MixedClone, [switch]$Restore, [switch]$Snapshot, [switch]$Retained, [switch]$Sha256, [switch]$Members, [switch]$Parity, [switch]$Allocation, [switch]$LostPartition, [switch]$LostMembers)
 $ErrorActionPreference = 'Stop'
 if ($ReuseFixture -and !$Relocation) { throw 'Reusing the empty fixture is a relocation acceptance case' }
-$fixtureModes = @($Relocation.IsPresent, $Snapshot.IsPresent, $Retained.IsPresent, $Sha256.IsPresent, $Members.IsPresent, $Parity.IsPresent, $Allocation.IsPresent, $LostPartition.IsPresent, $LostMembers.IsPresent) | Where-Object { $_ }
+$fixtureModes = @($Relocation.IsPresent, $CapacityClone.IsPresent, $MixedClone.IsPresent, $Restore.IsPresent, $Snapshot.IsPresent, $Retained.IsPresent, $Sha256.IsPresent, $Members.IsPresent, $Parity.IsPresent, $Allocation.IsPresent, $LostPartition.IsPresent, $LostMembers.IsPresent) | Where-Object { $_ }
 if (@($fixtureModes).Count -gt 1) { throw 'Choose one Btrfs acceptance case' }
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $previousFlags = $env:RUSTFLAGS
@@ -124,13 +124,14 @@ try {
             $fixturePayload = Join-Path $payload.FullName 'Btrfs-Snapshot-Source.raw'
             $env:DISKSTUDIO_BTRFS_SNAPSHOT_SOURCE_SHA256 = $expected
         }
-    } elseif ($Relocation) {
+    } elseif ($Relocation -or $CapacityClone -or $MixedClone -or $Restore) {
         $sizeMiB = if ($ReuseFixture) { 768 } else { 384 }
         $fixture = Get-Item -LiteralPath ".vm/btrfs-upstream-869058445ace/relocation-$sizeMiB-labelled.raw"
         if ($fixture.PSIsContainer -or ($fixture.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $fixture.Length -ne ($sizeMiB * 1MB)) {
             throw "Expected the prepared $sizeMiB MiB Btrfs relocation image"
         }
-        $fixtureName = if ($ReuseFixture) { 'Btrfs-Move-Reuse.raw' } else { 'Btrfs-Move-Source.raw' }
+        $fixtureName = if ($CapacityClone -or $MixedClone -or $Restore) { 'Btrfs-Clone-Source.raw' }
+            elseif ($ReuseFixture) { 'Btrfs-Move-Reuse.raw' } else { 'Btrfs-Move-Source.raw' }
         $fixturePayload = Join-Path $payload.FullName $fixtureName
         $expected = (Get-FileHash -LiteralPath $fixture.FullName).Hash.ToLowerInvariant()
         $env:DISKSTUDIO_BTRFS_MOVE_SOURCE_SHA256 = $expected
@@ -138,7 +139,9 @@ try {
     if ($fixturePayload -and (Test-Path -LiteralPath $fixturePayload)) {
         throw 'Preserve the existing fixture payload'
     }
-    $names = if ($LostPartition) { @('Lost-Prepare', 'Lost-Inspect') }
+    $names = if ($MixedClone -or $Restore) { @('Prepare', 'Resume', 'Verify') }
+        elseif ($CapacityClone) { @('Clone-Prepare', 'Clone-Resume', 'Clone-Diagnose', 'Clone-Inspect-Shrink', 'Clone-Inspect-Grow') }
+        elseif ($LostPartition) { @('Lost-Prepare', 'Lost-Inspect') }
         elseif ($LostMembers) { @('Lost-Group-Prepare', 'Lost-Group-Inspect') }
         elseif ($Allocation) { @('Allocation-Prepare', 'Allocation-Archive', 'Allocation-Inspect') }
         elseif ($Parity) { @('Parity-Prepare', 'Parity-Inspect') }
@@ -150,7 +153,10 @@ try {
         elseif ($Relocation) { @('Move-Prepare', 'Move-Inspect') }
         else { @('Create', 'Inspect', 'Online') }
     $entries = foreach ($name in $names) {
-        $entry = Join-Path $payload.FullName "Btrfs-Lab-4Kn-$name.exe"
+        $prefix = if ($MixedClone) { 'Mixed-File-Clone-4Kn' }
+            elseif ($Restore) { 'Btrfs-Restore-4Kn' }
+            else { 'Btrfs-Lab-4Kn' }
+        $entry = Join-Path $payload.FullName "$prefix-$name.exe"
         if (Test-Path -LiteralPath $entry) { throw "Preserve existing guest entry: $entry" }
         $entry
     }

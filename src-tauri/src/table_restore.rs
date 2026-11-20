@@ -172,6 +172,134 @@ pub fn archive_layout(archive: &Archive) -> Result<Layout, String> {
     decode_layout(&header.bytes, &table.bytes, archive.sector)
 }
 
+/// Construct both copies of a conventional GPT from validated byte ranges.
+/// The caller supplies newly generated identifiers and appends data separately.
+pub(crate) fn new_gpt(
+    size: u64,
+    sector: u64,
+    source: String,
+    disk: uuid::Uuid,
+    entries: &[Entry],
+) -> Result<Archive, String> {
+    use crate::table_archive::Extent;
+
+    if !matches!(sector, 512 | 4096)
+        || size % sector != 0
+        || !(4 * MIB..=1 << 43).contains(&size)
+        || disk.is_nil()
+        || entries.len() > 128
+    {
+        return Err("新 GPT 的容量、扇区或标识无效。".into());
+    }
+    let last = size / sector - 1;
+    let mut table = vec![0u8; 128 * 128];
+    let table_sectors = table.len() as u64 / sector;
+    let first_usable = 2 + table_sectors;
+    let last_usable = last - table_sectors - 1;
+    let mut slots = std::collections::BTreeSet::new();
+    let mut identities = std::collections::BTreeSet::from([disk]);
+    for entry in entries {
+        let start = entry.offset / sector;
+        let end = entry
+            .offset
+            .checked_add(entry.size)
+            .ok_or("分区结束范围溢出。")?
+            / sector;
+        if !(1..=128).contains(&entry.slot)
+            || !slots.insert(entry.slot)
+            || entry.offset % sector != 0
+            || entry.size % sector != 0
+            || entry.size == 0
+            || start < first_usable
+            || end - 1 > last_usable
+            || entry.name.len() > 36
+        {
+            return Err("新 GPT 的条目范围、槽位或名称无效。".into());
+        }
+        let at = (entry.slot as usize - 1) * 128;
+        let record = &mut table[at..at + 128];
+        for (field, guid) in [(0, &entry.kind), (16, &entry.guid)] {
+            let id = uuid::Uuid::parse_str(guid).map_err(|e| e.to_string())?;
+            if id.is_nil() || (field == 16 && !identities.insert(id)) {
+                return Err("GPT 标识为空或重复。".into());
+            }
+            record[field..field + 16].copy_from_slice(&id.to_bytes_le());
+        }
+        record[32..40].copy_from_slice(&start.to_le_bytes());
+        record[40..48].copy_from_slice(&(end - 1).to_le_bytes());
+        record[48..56].copy_from_slice(&entry.attributes.to_le_bytes());
+        for (field, &unit) in record[56..].chunks_exact_mut(2).zip(&entry.name) {
+            field.copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+    let mut mbr = vec![0u8; sector as usize];
+    mbr[447..450].copy_from_slice(&[0, 2, 0]);
+    mbr[450] = 0xee;
+    mbr[451..454].fill(0xff);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    mbr[458..462].copy_from_slice(&(last.min(u32::MAX as u64) as u32).to_le_bytes());
+    mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+    let table_crc = crc32fast::hash(&table);
+    let header = |at: u64, alternate: u64, array: u64| {
+        let mut data = vec![0u8; sector as usize];
+        data[..8].copy_from_slice(b"EFI PART");
+        data[8..12].copy_from_slice(&0x10000u32.to_le_bytes());
+        data[12..16].copy_from_slice(&92u32.to_le_bytes());
+        data[24..32].copy_from_slice(&at.to_le_bytes());
+        data[32..40].copy_from_slice(&alternate.to_le_bytes());
+        data[40..48].copy_from_slice(&first_usable.to_le_bytes());
+        data[48..56].copy_from_slice(&last_usable.to_le_bytes());
+        data[56..72].copy_from_slice(&disk.to_bytes_le());
+        data[72..80].copy_from_slice(&array.to_le_bytes());
+        data[80..84].copy_from_slice(&128u32.to_le_bytes());
+        data[84..88].copy_from_slice(&128u32.to_le_bytes());
+        data[88..92].copy_from_slice(&table_crc.to_le_bytes());
+        let crc = crc32fast::hash(&data[..92]);
+        data[16..20].copy_from_slice(&crc.to_le_bytes());
+        data
+    };
+    let backup = last - table_sectors;
+    let archive = Archive {
+        version: 1,
+        size,
+        sector,
+        source,
+        includes_boot: false,
+        extents: vec![
+            Extent {
+                kind: Kind::Mbr,
+                offset: 0,
+                bytes: mbr,
+            },
+            Extent {
+                kind: Kind::PrimaryHeader,
+                offset: sector,
+                bytes: header(1, last, 2),
+            },
+            Extent {
+                kind: Kind::PrimaryEntries,
+                offset: 2 * sector,
+                bytes: table.clone(),
+            },
+            Extent {
+                kind: Kind::BackupEntries,
+                offset: backup * sector,
+                bytes: table,
+            },
+            Extent {
+                kind: Kind::BackupHeader,
+                offset: last * sector,
+                bytes: header(last, 1, backup),
+            },
+        ],
+    };
+    let checked = archive.validate()?;
+    if checked.partitions != entries.len() {
+        return Err("新 GPT 独立解码后条目数量不符。".into());
+    }
+    Ok(archive)
+}
+
 /// Update an entry in both copies of a validated GPT archive. Callers compare
 /// the decoded result to their operation-specific expected layout.
 pub(crate) fn edit_gpt_entry(

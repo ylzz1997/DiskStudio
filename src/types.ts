@@ -1,3 +1,11 @@
+export type BitLockerState =
+  | "encrypted"
+  | "encrypting"
+  | "decrypting"
+  | "encryptionPaused"
+  | "decryptionPaused"
+  | "unknown";
+
 export interface Partition {
   id: string;
   name: string;
@@ -16,6 +24,7 @@ export interface Partition {
   volumeLabel?: string | null;
   available?: number | null;
   volumeStatus?: string;
+  encryption?: BitLockerState;
   hidden?: boolean;
 }
 export interface HardwareInfo {
@@ -65,6 +74,15 @@ export interface DiskSnapshot {
   disks: Disk[];
   observedAt: number;
   warnings: string[];
+}
+export interface DataPlan {
+  token: string;
+  title: string;
+  source: string;
+  destination: string;
+  bytes: number;
+  warning: string;
+  destructive: boolean;
 }
 export interface PartitionTarget {
   target: string;

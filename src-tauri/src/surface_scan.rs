@@ -23,7 +23,8 @@ pub struct Options {
     pub start_sector: u64,
     pub sector_count: u64,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Range {
     pub offset: u64,
     pub size: u64,

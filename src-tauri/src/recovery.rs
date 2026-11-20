@@ -4,6 +4,11 @@ use ntfs::{Ntfs, NtfsAttributeFlags, NtfsFileFlags, NtfsReadSeek};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+#[path = "ntfs_reconstruct.rs"]
+pub(crate) mod ntfs_reconstruct;
+#[path = "recovery_view.rs"]
+pub(crate) mod view;
+
 pub const MAX_RESULTS: usize = 100_000;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +86,9 @@ pub fn scan_filesystem_owned<R: Read + Seek + 'static>(
     reader.seek(SeekFrom::Start(0)).map_err(err)?;
     let mut boot = [0; 512];
     reader.read_exact(&mut boot).map_err(err)?;
+    if crate::bitlocker::boot_marker(&boot) {
+        return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+    }
     // FAT/exFAT data or boot-code bytes can coincidentally contain EF53 at
     // offset 1080. Prefer their boot structures; each engine still fully
     // validates its own geometry/checksums before publishing candidates.
@@ -100,7 +108,8 @@ pub fn scan_filesystem_owned<R: Read + Seek + 'static>(
 }
 pub fn fat_boot(boot: &[u8; 512]) -> bool {
     let sector = u16::from_le_bytes([boot[11], boot[12]]);
-    boot[510..] == [0x55, 0xaa]
+    !crate::bitlocker::boot_marker(boot)
+        && boot[510..] == [0x55, 0xaa]
         && (boot[3..11] == *b"EXFAT   "
             || (matches!(sector, 512 | 1024 | 2048 | 4096)
                 && boot[13].is_power_of_two()
@@ -163,12 +172,43 @@ pub fn scan_filesystem_with_directories<R: Read + Seek>(
     reader.seek(SeekFrom::Start(0)).map_err(err)?;
     let mut boot = [0; 512];
     reader.read_exact(&mut boot).map_err(err)?;
+    if crate::bitlocker::boot_marker(&boot) {
+        return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+    }
     reader.seek(SeekFrom::Start(0)).map_err(err)?;
     if &boot[3..11] == b"NTFS    " {
         scan_ntfs_with_directories(reader, mode, tick, found, directory)
     } else {
         crate::fat_recovery::scan_with_directories(reader, mode, tick, found, directory)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn bitlocker_marker_rejects_ciphertext_before_filesystem_fallbacks() {
+    let mut bytes = vec![0; 4096];
+    bytes[3..11].copy_from_slice(b"-FVE-FS-");
+    bytes[11..17].copy_from_slice(&[0, 2, 8, 32, 0, 2]);
+    bytes[510..512].copy_from_slice(&[0x55, 0xaa]);
+    bytes[1080..1082].copy_from_slice(&[0x53, 0xef]);
+    assert!(!fat_boot(bytes[..512].try_into().unwrap()));
+    let mut source = std::io::Cursor::new(bytes);
+    let result = scan_filesystem(
+        &mut source,
+        ScanMode::Existing,
+        |_, _| Ok(()),
+        |_| panic!("encrypted bytes became a file candidate"),
+    );
+    assert_eq!(result.unwrap_err(), crate::bitlocker::CIPHERTEXT_NOTICE);
+    let result = scan_filesystem_owned(
+        source,
+        ScanMode::AllFiles,
+        Default::default(),
+        |_, _| Ok(()),
+        |_| panic!("encrypted bytes became a file candidate"),
+        |_| panic!("encrypted bytes became a directory"),
+    );
+    assert_eq!(result.unwrap_err(), crate::bitlocker::CIPHERTEXT_NOTICE);
 }
 
 #[allow(dead_code)] // Compatibility entry point for the guest acceptance driver.

@@ -62,6 +62,16 @@ pub struct Proof {
     bytes: u64,
 }
 impl Proof {
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        for mark in &self.marks {
+            digest.update(mark.offset.to_le_bytes());
+            digest.update((mark.length as u64).to_le_bytes());
+            digest.update(mark.hash);
+        }
+        digest.finalize().into()
+    }
+
     fn record(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
         if bytes.is_empty() {
             return Ok(());

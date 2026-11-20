@@ -7,13 +7,26 @@ import {
   RefreshCcw,
   ShieldCheck,
 } from "lucide-react";
-import type { Disk, Partition, PartitionTarget } from "./types";
+import type { BitLockerState, Disk, Partition, PartitionTarget } from "./types";
 import { formatSize } from "./types";
 import { DiskIcon, Empty, Hint } from "./components";
 import { PartitionPlatformIcon } from "./PartitionPlatformIcon";
 import { FilesystemSupportPanel } from "./FilesystemSupportPanel";
 import { useLocale } from "./i18n/LanguageProvider";
-import type { Translate } from "./i18n/translate";
+import type { Message, Translate } from "./i18n/translate";
+
+const bitLockerStates: Record<BitLockerState, Message> = {
+  encrypted: "已加密",
+  encrypting: "正在加密",
+  decrypting: "正在解密",
+  encryptionPaused: "加密已暂停",
+  decryptionPaused: "解密已暂停",
+  unknown: "未知",
+};
+
+export function bitLockerState(state: BitLockerState, t: Translate) {
+  return t(bitLockerStates[state]);
+}
 
 export function diskTitle(disk: Disk, t: Translate) {
   return disk.hardware
@@ -497,6 +510,12 @@ export function LocalDetails({
             <dd>{partition.role && catalogText(partition.role)}</dd>
             <dt>{t("文件系统")}</dt>
             <dd>{catalogText(partition.fs)}</dd>
+            {partition.encryption && (
+              <>
+                <dt>BitLocker</dt>
+                <dd>{bitLockerState(partition.encryption, t)}</dd>
+              </>
+            )}
             <dt>{t("分区容量")}</dt>
             <dd>{formatSize(partition.size)}</dd>
             <dt>{t("卷容量")}</dt>

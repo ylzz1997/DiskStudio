@@ -10,8 +10,42 @@ const source = readFileSync(safePath(join(root, "virtual-raid-original.raw")));
 if (source.length !== 48 * offset || source.readUInt16LE(1080) !== 0xef53) {
   throw Error("Expected the 48 MiB Ext4 logical fixture");
 }
-const output = safePath(join(root, "virtual-raid-native"), root, false);
+const mode = process.argv.slice(2);
+if (mode.length > 1 || (mode.length === 1 && mode[0] !== "--devices")) {
+  throw Error("Use --devices for the physical member fixtures");
+}
+const physical = mode[0] === "--devices";
+const output = safePath(join(root, physical ? "virtual-raid-devices" : "virtual-raid-native"), root, false);
 mkdirSync(output);
+const hash = (data) => createHash("sha256").update(data).digest("hex");
+
+function writeFixtures(logical, members, names) {
+  const files = members.map((member, index) => {
+    const name = names[index];
+    writeFileSync(join(output, name), member, { flag: "wx" });
+    return { name, sha256: hash(member) };
+  });
+  const manifest = { logicalSha256: hash(logical), files };
+  writeFileSync(join(output, "manifest.json"), JSON.stringify(manifest, null, 2), { flag: "wx" });
+  console.log(manifest);
+}
+
+if (physical) {
+  const logical = Buffer.alloc(64 * offset);
+  source.copy(logical, 4 * offset);
+  const stripes = [Buffer.alloc(logical.length / 2), Buffer.alloc(logical.length / 2)];
+  for (let row = 0; row < logical.length / (2 * stripe); row++) {
+    for (let lane = 0; lane < 2; lane++) {
+      const start = (2 * row + lane) * stripe;
+      logical.copy(stripes[lane], row * stripe, start, start + stripe);
+    }
+  }
+  writeFixtures(logical, [...stripes, logical], [
+    "Virtual-Raid-Device-1.raw", "Virtual-Raid-Device-2.raw", "Virtual-Raid-Device-Whole.raw",
+  ]);
+  process.exit(0);
+}
+
 const members = Array.from({ length: 3 }, () => Buffer.alloc(offset + source.length / 2));
 for (let row = 0; row < source.length / (stripe * 2); row++) {
   const parity = 2 - (row % 3);
@@ -24,12 +58,4 @@ for (let row = 0; row < source.length / (stripe * 2); row++) {
     members[parity][start + i] = first[i] ^ second[i];
   }
 }
-const hash = (data) => createHash("sha256").update(data).digest("hex");
-const files = members.map((member, index) => {
-  const name = `Virtual-Raid-${index + 1}.raw`;
-  writeFileSync(join(output, name), member, { flag: "wx" });
-  return { name, sha256: hash(member) };
-});
-const manifest = { logicalSha256: hash(source), files };
-writeFileSync(join(output, "manifest.json"), JSON.stringify(manifest, null, 2), { flag: "wx" });
-console.log(manifest);
+writeFixtures(source, members, ["Virtual-Raid-1.raw", "Virtual-Raid-2.raw", "Virtual-Raid-3.raw"]);

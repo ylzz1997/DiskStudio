@@ -151,6 +151,16 @@ fn archive_only_transaction_logs_require_the_exact_reserved_path() {
     assert!(!namespace.names.values().any(|id| *id == container));
     assert_eq!(namespace.children[&log].len(), 1);
 
+    entries.get_mut(&container).unwrap().names = vec![name(log, leaf, 1), name(log, "$TXFLO~1", 2)];
+    let namespace = build_namespace(&entries, ROOT_ID, true, Some(extend), || Ok(())).unwrap();
+    assert!(!namespace.names.values().any(|id| *id == container));
+    assert_eq!(namespace.children[&log].len(), 2);
+    entries.get_mut(&container).unwrap().names[1].parent.1 += 1;
+    assert!(!is_extend_metadata(container, extend, &entries));
+    entries.get_mut(&container).unwrap().names =
+        vec![name(log, leaf, 1), name(log, "invalid short", 2)];
+    assert!(!is_extend_metadata(container, extend, &entries));
+
     entries.get_mut(&container).unwrap().names = vec![name(log, "user.docx", 0)];
     assert!(build_namespace(&entries, ROOT_ID, true, Some(extend), || Ok(())).is_err());
     entries.get_mut(&container).unwrap().names =
@@ -179,6 +189,8 @@ fn catalogue_fixture(shift: u64, security_id: u32) -> Catalogue {
         .into_iter()
         .map(|id| {
             let node = Node {
+                index_compressed: false,
+                link_version_flag: false,
                 directory: id == ROOT_ID,
                 attributes: 0x20,
                 times: [8, 9, 10],
@@ -195,6 +207,7 @@ fn catalogue_fixture(shift: u64, security_id: u32) -> Catalogue {
                         size: 100,
                         sha256: [5; 32],
                         storage_flags: 0,
+                        allocated_ranges: Vec::new(),
                     })
                     .into_iter()
                     .collect(),
@@ -231,6 +244,16 @@ fn independent_copy_checks_bytes_metadata_and_hard_link_topology() {
     target.nodes.get_mut(&copied_file).unwrap().streams[0].storage_flags = 0;
     target.names.insert(path(&["b"]), RecordId(891, 5));
     assert!(source.verify_copy(&target).is_err());
+}
+
+#[test]
+fn separate_short_name_requires_one_long_link_in_its_parent() {
+    let mut source = catalogue_fixture(0, 256);
+    let cancel = AtomicBool::new(false);
+    assert!(metadata::short_name_links(&source, &cancel).is_err());
+    source.names.remove(&path(&["b"]));
+    let aliases = metadata::short_name_links(&source, &cancel).unwrap();
+    assert_eq!(aliases[&path(&["a"])], path(&["A~1"])[0]);
 }
 
 #[test]

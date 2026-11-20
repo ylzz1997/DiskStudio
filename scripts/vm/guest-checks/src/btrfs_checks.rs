@@ -8,6 +8,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 #[path = "btrfs_allocation_checks.rs"]
 pub(super) mod allocation;
+#[path = "btrfs_capacity_clone_checks.rs"]
+pub(super) mod capacity_clone;
+#[path = "btrfs_whole_clone_checks.rs"]
+pub(super) mod whole_clone;
+#[path = "btrfs_backup_restore_checks.rs"]
+pub(super) mod backup_restore;
 #[path = "btrfs_lost_checks.rs"]
 pub(super) mod lost;
 #[path = "lvm_checks.rs"]
@@ -34,7 +40,7 @@ struct Witness {
     os_layout: String,
 }
 
-fn desktop() -> Result<String, String> {
+pub(super) fn desktop() -> Result<String, String> {
     inventory()?;
     let expected = option_env!("DISKSTUDIO_ACCEPTANCE_DESKTOP_SHA256")
         .ok_or("Expected the desktop build SHA-256")?;
@@ -371,7 +377,7 @@ fn seed_linux_fixture(
     serial: &str,
     layout: &Witness,
     size: u64,
-    image: &mut File,
+    image: &mut (impl Read + Seek),
     expected: &str,
     before: impl FnOnce(&mut data_io::Region<File>) -> Result<(), String>,
     after: impl FnOnce(&mut data_io::Region<File>) -> Result<(), String>,

@@ -4,7 +4,7 @@ use crate::{
     backup_archive::{self, Chain},
     data_io,
     partitions::Target,
-    recovery::{self, Candidate, ScanMode},
+    recovery::{self, view, Candidate, ScanMode},
     recovery_export::{self, Layout},
     recovery_tree::{self, Catalog, Filter, FolderPage},
 };
@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 pub mod image_browse_tasks;
 #[path = "recovery_tasks.rs"]
 pub mod recovery_tasks;
+#[cfg(windows)]
+#[path = "retained_restore_windows.rs"]
+mod retained_restore;
+#[cfg(windows)]
+#[path = "resize_clone_windows.rs"]
+mod resize_clone;
 #[path = "virtual_raid_tasks.rs"]
 pub mod virtual_raid_tasks;
 use std::{
@@ -36,6 +42,7 @@ pub struct Selection {
 #[derive(Clone)]
 pub(crate) enum ScanSource {
     Disk(Selection),
+    BitLocker { source: Selection, volume: String },
     Lvm(crate::lvm_tasks::Source),
     BtrfsMembers {
         members: Vec<Selection>,
@@ -56,6 +63,10 @@ pub(crate) enum ScanSource {
     },
     ImageLvm(image_browse_tasks::lvm::Source),
     VirtualRaid(virtual_raid_tasks::Source),
+    Reconstructed {
+        source: Box<ScanSource>,
+        proof: view::Proof,
+    },
 }
 impl From<Selection> for ScanSource {
     fn from(source: Selection) -> Self {
@@ -80,8 +91,15 @@ impl OpenedBackup {
 }
 #[cfg(windows)]
 impl crate::lost_partition_tasks::Source {
-    fn reader(&self, cancel: &AtomicBool) -> Result<Box<dyn backup_archive::Source>, String> {
-        let resolved = platform::resolve(&self.selection, false, false)?;
+    fn reader(
+        &self,
+        locked: Option<&platform::StableRead>,
+        cancel: &AtomicBool,
+    ) -> Result<Box<dyn backup_archive::Source>, String> {
+        let resolved = match locked {
+            Some(lock) => lock.resolved()?,
+            None => platform::resolve(&self.selection, false, false)?,
+        };
         let reader = crate::lost_partitions::candidate_reader(
             platform::device(&resolved, false)?,
             resolved.size,
@@ -105,10 +123,45 @@ impl crate::lost_partition_tasks::Source {
     }
 }
 impl ScanSource {
+    fn original(&self) -> &Self {
+        if let Self::Reconstructed { source, .. } = self {
+            source
+        } else {
+            self
+        }
+    }
+
+    #[cfg(windows)]
+    fn reconstruction(&self) -> Option<&view::Proof> {
+        match self {
+            Self::Reconstructed { proof, .. } => Some(proof),
+            Self::Lost(source) => source.candidate.reconstruction(),
+            Self::VirtualRaid(source) => source.reconstruction(),
+            _ => None,
+        }
+    }
+
     #[cfg(windows)]
     fn lock_sources(&self, needed: bool) -> Result<Vec<platform::StableRead>, String> {
         match self {
+            Self::Reconstructed { source, .. } => source.lock_sources(true),
+            Self::Lost(source) if source.candidate.reconstruction().is_some() => {
+                Ok(vec![platform::StableRead::lock(&source.selection)?])
+            }
             Self::Disk(source) if needed => Ok(vec![platform::StableRead::lock(source)?]),
+            Self::BitLocker { source, volume } => {
+                let r = platform::resolve(source, true, false)?;
+                if !matches!(r.volumes.as_slice(), [id] if id == volume)
+                    || r.disk.is_offline != Some(false)
+                {
+                    return Err("无法唯一核对 BitLocker 分区及其联机卷。".into());
+                }
+                crate::bitlocker::require_unlocked(volume)?;
+                if !r.ntfs_volume {
+                    return Err("当前只读取 Windows 已解锁的 BitLocker NTFS 数据卷。".into());
+                }
+                Ok(vec![platform::StableRead::lock(source)?])
+            }
             Self::BtrfsMembers { members, .. } => {
                 members.iter().map(platform::StableRead::lock).collect()
             }
@@ -117,6 +170,7 @@ impl ScanSource {
                 .iter()
                 .map(platform::StableRead::lock)
                 .collect(),
+            Self::VirtualRaid(source) => source.lock(),
             _ => Ok(Vec::new()),
         }
     }
@@ -127,10 +181,34 @@ impl ScanSource {
         locks: &[platform::StableRead],
         cancel: &AtomicBool,
     ) -> Result<RecoveryReaders, String> {
+        if let Self::Reconstructed { source, proof } = self {
+            let RecoveryReaders::Single(reader) = source.extraction_readers(locks, cancel)? else {
+                return Err("重建视图缺少可核对的单卷来源。".into());
+            };
+            return Ok(RecoveryReaders::from_view(
+                Box::new(proof.reopen(reader, cancel)?),
+                proof,
+            ));
+        }
         if let Self::Lvm(source) = self {
             return Ok(RecoveryReaders::Single(Box::new(
                 source.reader(locks, cancel)?,
             )));
+        }
+        if let Self::VirtualRaid(source) = self {
+            let reader = source.reader(locks, cancel)?;
+            return Ok(if source.found_btrfs() {
+                RecoveryReaders::Btrfs {
+                    readers: vec![reader],
+                    access: BtrfsRead::Recovered {
+                        allow_missing: true,
+                    },
+                }
+            } else if let Some(proof) = source.reconstruction() {
+                RecoveryReaders::from_view(reader, proof)
+            } else {
+                RecoveryReaders::Single(reader)
+            });
         }
         if let Self::BtrfsMembers {
             members,
@@ -161,12 +239,26 @@ impl ScanSource {
             return Ok(RecoveryReaders::Btrfs {
                 readers: members
                     .iter()
-                    .map(|member| member.reader(cancel))
+                    .map(|member| member.reader(None, cancel))
                     .collect::<Result<_, _>>()?,
                 access: BtrfsRead::Recovered {
                     allow_missing: *allow_missing,
                 },
             });
+        }
+        if let Self::Lost(source) = self {
+            if let Some(proof) = source.candidate.reconstruction() {
+                let [lock] = locks else {
+                    return Err("缺少重建候选的源盘读取凭据。".into());
+                };
+                return Ok(RecoveryReaders::from_view(source.reader(Some(lock), cancel)?, proof));
+            }
+        }
+        if let Self::BitLocker { volume, .. } = self {
+            let [lock] = locks else {
+                return Err("无法唯一核对 BitLocker 分区及其卷锁。".into());
+            };
+            return Ok(RecoveryReaders::Single(Box::new(lock.bitlocker_reader(volume)?)));
         }
         if let [lock] = locks {
             return Ok(RecoveryReaders::Single(Box::new(lock.reader()?)));
@@ -186,10 +278,14 @@ impl ScanSource {
     #[cfg(windows)]
     fn reader(&self, cancel: &AtomicBool) -> Result<Box<dyn backup_archive::Source>, String> {
         match self {
-            Self::Lost(source) => source.reader(cancel),
+            Self::Reconstructed { source, proof } => {
+                Ok(Box::new(proof.reopen(source.reader(cancel)?, cancel)?))
+            }
+            Self::Lost(source) => source.reader(None, cancel),
             Self::Disk(source) => Ok(Box::new(platform::reader(&platform::resolve(
                 source, false, false,
             )?)?)),
+            Self::BitLocker { .. } => Err("无法唯一核对 BitLocker 分区及其卷锁。".into()),
             Self::BtrfsMembers { .. } | Self::LostBtrfs { .. } => {
                 Err("Btrfs 须按整组读取成员。".into())
             }
@@ -203,12 +299,13 @@ impl ScanSource {
                 Ok(Box::new(opened.browser.reader(*partition)?))
             }
             Self::ImageLvm(source) => source.reader(cancel),
-            Self::VirtualRaid(source) => source.reader(),
+            Self::VirtualRaid(source) => source.reader(&[], cancel),
         }
     }
     fn forbidden_disks(&self) -> Vec<Target> {
         match self {
-            Self::Disk(s) => vec![s.target.clone()],
+            Self::Reconstructed { source, .. } => source.forbidden_disks(),
+            Self::Disk(s) | Self::BitLocker { source: s, .. } => vec![s.target.clone()],
             Self::Lvm(source) => source.members.iter().map(|s| s.target.clone()).collect(),
             Self::Lost(s) => vec![s.selection.target.clone()],
             Self::LostBtrfs { members, .. } => {
@@ -232,6 +329,7 @@ impl ScanSource {
     #[cfg(windows)]
     fn label(&self) -> Result<String, String> {
         match self {
+            Self::Reconstructed { source, .. } => Ok(recovery_view_label(&source.label()?)),
             Self::Lost(source) => source.label(),
             Self::Lvm(source) => {
                 let labels = source
@@ -247,6 +345,9 @@ impl ScanSource {
                 .collect::<Result<Vec<_>, _>>()?
                 .join(" + ")),
             Self::Disk(s) => Ok(platform::resolve(s, false, false)?.label),
+            Self::BitLocker { source, .. } => {
+                Ok(format!("BitLocker · {}", platform::resolve(source, false, false)?.label))
+            }
             Self::BtrfsMembers { members, .. } => {
                 let labels = members
                     .iter()
@@ -274,6 +375,9 @@ impl ScanSource {
     }
     #[cfg(windows)]
     fn destination(&self, path: &std::path::Path, size: u64) -> Result<PathBuf, String> {
+        if let Self::Reconstructed { source, .. } = self {
+            return source.destination(path, size);
+        }
         if let Self::Backup { opened, .. } = self {
             opened.validate()?;
         }
@@ -300,6 +404,8 @@ impl ScanSource {
 
 enum RecoveryReaders {
     Single(Box<dyn backup_archive::Source>),
+    #[cfg(windows)]
+    ReconstructedNtfs(Box<dyn backup_archive::Source>),
     #[cfg(windows)]
     Btrfs {
         readers: Vec<Box<dyn backup_archive::Source>>,
@@ -331,6 +437,14 @@ fn open_btrfs(
 }
 
 impl RecoveryReaders {
+    #[cfg(windows)]
+    fn from_view(reader: Box<dyn backup_archive::Source>, proof: &view::Proof) -> Self {
+        match proof {
+            view::Proof::Ntfs(_) => Self::ReconstructedNtfs(reader),
+            view::Proof::Fat(_) => Self::Single(reader),
+        }
+    }
+
     fn scan(
         self,
         mode: ScanMode,
@@ -342,6 +456,10 @@ impl RecoveryReaders {
         match self {
             Self::Single(reader) => {
                 recovery::scan_filesystem_owned(reader, mode, cancel, tick, found, directory)
+            }
+            #[cfg(windows)]
+            Self::ReconstructedNtfs(mut reader) => {
+                crate::ntfs_scan::scan_reconstructed(&mut reader, mode, tick, found, directory)
             }
             #[cfg(windows)]
             Self::Btrfs { readers, access } => {
@@ -361,7 +479,7 @@ impl RecoveryReaders {
         tick: impl FnMut(u64) -> Result<(), String>,
     ) -> Result<recovery::Extraction, String> {
         match self {
-            Self::Single(reader) => {
+            Self::Single(reader) | Self::ReconstructedNtfs(reader) => {
                 recovery::extract_owned_with_metadata(reader, candidate, out, limit, cancel, tick)
             }
             Self::Btrfs { readers, access } => {
@@ -386,7 +504,7 @@ impl RecoveryReaders {
         cancel: Arc<AtomicBool>,
     ) -> Result<crate::file_metadata::Metadata, String> {
         match self {
-            Self::Single(reader) => crate::directory_metadata::read(reader, directory, cancel),
+            Self::Single(reader) | Self::ReconstructedNtfs(reader) => crate::directory_metadata::read(reader, directory, cancel),
             Self::Btrfs { readers, access } => {
                 let Some(crate::directory_metadata::Proof::Btrfs(location)) =
                     directory.metadata.directory_proof.as_ref()
@@ -429,8 +547,9 @@ struct State {
     opened_image: Option<image_browse_tasks::Opened>,
     image_lvm: Option<Arc<image_browse_tasks::lvm::Saved>>,
     virtual_raid: Option<Arc<virtual_raid_tasks::Saved>>,
+    raid_search: Option<virtual_raid_tasks::Search>,
     #[cfg(windows)]
-    raid_draft: Option<Arc<crate::image_files::Group>>,
+    raid_draft: Option<Arc<virtual_raid_tasks::Draft>>,
     scan_name: String,
     scan_mode: ScanMode,
     scan_completion: crate::directory_report::Completion,
@@ -449,6 +568,7 @@ impl Default for State {
             opened_image: None,
             image_lvm: None,
             virtual_raid: None,
+            raid_search: None,
             #[cfg(windows)]
             raid_draft: None,
             scan_name: String::new(),
@@ -471,6 +591,11 @@ fn idle(s: &State) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn ensure_idle() -> Result<(), String> {
+    idle(&state())
 }
 pub fn status() -> Option<Job> {
     let mut s = state();
@@ -512,15 +637,22 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
         return None;
     }
     s.scan.as_ref().and_then(|(id, source)| {
-        let lost = match source {
-            ScanSource::Disk(_) | ScanSource::Lvm(_) | ScanSource::BtrfsMembers { .. } => None,
+        let lost = match source.original() {
+            ScanSource::Disk(_)
+            | ScanSource::BitLocker { .. }
+            | ScanSource::Lvm(_)
+            | ScanSource::BtrfsMembers { .. } => None,
             ScanSource::Lost(source) => Some(lost_status(source, 1)),
             ScanSource::LostBtrfs { members, .. } => {
                 Some(lost_status(members.first()?, members.len()))
             }
-            ScanSource::Backup { .. } | ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_) => {
+            ScanSource::Backup { .. }
+            | ScanSource::Image { .. }
+            | ScanSource::ImageLvm(_)
+            | ScanSource::VirtualRaid(_) => {
                 return None;
             }
+            ScanSource::Reconstructed { .. } => return None,
         };
         Some(ScanStatus {
             id: id.clone(),
@@ -544,8 +676,8 @@ fn matching_browse_id(s: &State, source: &Selection) -> Option<String> {
         return None;
     }
     s.scan.as_ref().and_then(|(id, saved)| {
-        let primary = match saved {
-            ScanSource::Disk(saved) => Some(saved),
+        let primary = match saved.original() {
+            ScanSource::Disk(saved) | ScanSource::BitLocker { source: saved, .. } => Some(saved),
             ScanSource::BtrfsMembers { members, .. } => members.first(),
             _ => None,
         };
@@ -566,13 +698,14 @@ pub fn browse_id(source: Selection) -> Option<String> {
 pub struct BackupStatus {
     #[serde(flatten)]
     info: crate::backup_browser::Info,
+    source_disks: Vec<Target>,
     scan_id: Option<String>,
     scan_partition: Option<u32>,
 }
 pub fn backup_status() -> Option<BackupStatus> {
     let s = state();
     let opened = s.opened_backup.as_ref()?;
-    let scan_id = s.scan.as_ref().and_then(|(id, source)| match source {
+    let scan_id = s.scan.as_ref().and_then(|(id, source)| match source.original() {
         ScanSource::Backup { opened: scan, .. }
             if scan.browser.info.id == opened.browser.info.id =>
         {
@@ -582,7 +715,8 @@ pub fn backup_status() -> Option<BackupStatus> {
     });
     Some(BackupStatus {
         info: opened.browser.info.clone(),
-        scan_partition: s.scan.as_ref().and_then(|(_, source)| match source {
+        source_disks: opened.source_disks.clone(),
+        scan_partition: s.scan.as_ref().and_then(|(_, source)| match source.original() {
             ScanSource::Backup {
                 opened: scan,
                 partition,
@@ -605,7 +739,7 @@ pub fn close_backup(id: String) -> Result<(), String> {
         return Err("备份浏览会话已失效".into());
     }
     if s.scan.as_ref().is_some_and(
-        |(_, source)| matches!(source,ScanSource::Backup{opened,..} if opened.browser.info.id==id),
+        |(_, source)| matches!(source.original(),ScanSource::Backup{opened,..} if opened.browser.info.id==id),
     ) {
         s.scan = None;
         s.candidates.clear();
@@ -716,7 +850,11 @@ pub fn open_backup() -> Result<Option<String>, String> {
                     source_bindings,
                 };
                 opened.validate()?;
-                let message = "备份校验通过。请选择备份中的分区并读取目录；没有还原或挂载到磁盘。";
+                let message = if opened.browser.info.partitions.is_empty() {
+                    "备份内容已校验。"
+                } else {
+                    "备份已校验。请选择分区。"
+                };
                 commit_backup(&mut state(), &work_id, None, opened, message)?;
                 Ok((message.into(), None))
             }))
@@ -779,7 +917,11 @@ pub fn select_backup_point(request: BackupPointRequest) -> Result<String, String
             // Replace only after complete verification. A failed/cancelled switch
             // leaves both the previously verified view and its directory intact.
             opened.browser = Arc::new(browser);
-            let message = "还原点校验通过。请重新读取此还原点中的目录。";
+            let message = if opened.browser.info.partitions.is_empty() {
+                "还原点内容已校验。"
+            } else {
+                "还原点校验通过。请重新读取此还原点中的目录。"
+            };
             commit_backup(&mut state(), &work_id, Some(&request.id), opened, message)?;
             Ok((message.into(), None))
         }))
@@ -815,7 +957,7 @@ fn commit_backup(
     }
     if s.scan
         .as_ref()
-        .is_some_and(|(_, source)| matches!(source, ScanSource::Backup { .. }))
+        .is_some_and(|(_, source)| matches!(source.original(), ScanSource::Backup { .. }))
     {
         s.scan = None;
         s.candidates.clear();
@@ -1001,9 +1143,96 @@ pub fn scan_lvm(request: crate::lvm_tasks::BrowseRequest) -> Result<String, Stri
     }
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ReconstructionSource {
+    Partition { selection: Selection },
+    Backup { id: String, partition: u32 },
+    Image { id: String, partition: u32 },
+}
+
+#[cfg(windows)]
+fn recovery_view_label(label: &str) -> String {
+    crate::native_locale::current().format("恢复视图 · {source}", &[("source", label)])
+}
+
+pub fn reconstruct_filesystem(
+    request: ReconstructionSource,
+    mode: ScanMode,
+) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (request, mode);
+        Err("恢复扫描当前仅支持 Windows".into())
+    }
+    #[cfg(windows)]
+    {
+        if mode == ScanMode::Signatures {
+            return Err("重建文件视图需要文件系统读取模式。".into());
+        }
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let (source, sector, label) = match request {
+            ReconstructionSource::Partition { selection } => {
+                if selection.partition.is_none() {
+                    return Err("请为重建文件视图选择一个分区。".into());
+                }
+                let resolved = platform::resolve(&selection, false, false)?;
+                let sector = resolved.disk.logical_sector_size.ok_or("缺少设备扇区大小")?;
+                (ScanSource::Disk(selection), sector, resolved.label)
+            }
+            ReconstructionSource::Image { id, partition } => {
+                let opened = image_browse_tasks::opened(&id)?;
+                let sector = opened.browser.info.options.sector;
+                let label = opened.browser.label(partition)?;
+                (ScanSource::Image { opened, partition }, sector, label)
+            }
+            ReconstructionSource::Backup { id, partition } => {
+                let opened = state()
+                    .opened_backup
+                    .as_ref()
+                    .filter(|opened| opened.browser.info.id == id)
+                    .cloned()
+                    .ok_or("备份浏览会话已失效")?;
+                let sector = opened.browser.info.sector;
+                let label = opened.browser.source_label(partition)?;
+                (ScanSource::Backup { opened, partition }, sector, label)
+            }
+        };
+        scan_source_input(
+            source,
+            ScanInput::Reconstruct(sector),
+            recovery_view_label(&label),
+            "重建文件视图",
+            mode,
+            guard,
+        )
+    }
+}
+
+enum ScanInput {
+    Reader(Box<dyn backup_archive::Source>),
+    Resolve,
+    #[cfg(windows)]
+    Reconstruct(u64),
+}
+
 fn scan_source_mode(
     source: ScanSource,
     reader: Option<Box<dyn backup_archive::Source>>,
+    label: String,
+    title: &str,
+    mode: ScanMode,
+    guard: std::sync::MutexGuard<'_, ()>,
+) -> Result<String, String> {
+    scan_source_input(source, reader.map_or(ScanInput::Resolve, ScanInput::Reader), label, title, mode, guard)
+}
+
+fn scan_source_input(
+    source: ScanSource,
+    input: ScanInput,
     label: String,
     title: &str,
     mode: ScanMode,
@@ -1043,17 +1272,45 @@ fn scan_source_mode(
                 .try_lock()
                 .map_err(|_| "另一项磁盘操作正在运行")?;
             #[cfg(windows)]
-            let locks = if reader.is_none() {
+            let locks = if !matches!(&input, ScanInput::Reader(_)) {
                 source_for_io.lock_sources(true)?
             } else {
                 Vec::new()
             };
-            let readers = match reader {
-                Some(reader) => RecoveryReaders::Single(reader),
+            #[cfg(windows)]
+            let mut reconstruction = source_for_io.reconstruction().cloned();
+            let readers = match input {
+                ScanInput::Reader(reader) => RecoveryReaders::Single(reader),
                 #[cfg(windows)]
-                None => source_for_io.extraction_readers(&locks, &cancel)?,
+                ScanInput::Resolve => source_for_io.extraction_readers(&locks, &cancel)?,
                 #[cfg(not(windows))]
-                None => return Err("恢复扫描当前仅支持 Windows".into()),
+                ScanInput::Resolve => return Err("恢复扫描当前仅支持 Windows".into()),
+                #[cfg(windows)]
+                ScanInput::Reconstruct(sector) => {
+                    progress(&work_id, &cancel, "核对备用文件系统元数据", 0, 0)?;
+                    let RecoveryReaders::Single(raw) =
+                        source_for_io.extraction_readers(&locks, &cancel)?
+                    else {
+                        return Err("重建视图缺少可核对的单卷来源。".into());
+                    };
+                    let (reader, proof) = view::Proof::open(raw, sector, &cancel)?;
+                    {
+                        let mut s = state();
+                        let Some((id, source)) = &mut s.scan else {
+                            return Err("扫描结果已失效。".into());
+                        };
+                        if *id != work_id || cancel.load(Ordering::Relaxed) {
+                            return Err("扫描已取消。".into());
+                        }
+                        *source = ScanSource::Reconstructed {
+                            source: Box::new(source_for_io.clone()),
+                            proof: proof.clone(),
+                        };
+                    }
+                    let readers = RecoveryReaders::from_view(Box::new(reader), &proof);
+                    reconstruction = Some(proof);
+                    readers
+                }
             };
             let message = readers.scan(
                 mode,
@@ -1081,7 +1338,13 @@ fn scan_source_mode(
                 source.validate()?;
             }
             if let Some(source) = virtual_raid {
-                source.validate()?;
+                if !source.physical() {
+                    source.validate()?;
+                }
+            }
+            #[cfg(windows)]
+            if let Some(proof) = reconstruction {
+                return Ok((format!("{} {}", proof.description(), message), None));
             }
             Ok((message, None))
         }))
@@ -1145,9 +1408,9 @@ pub(crate) fn record_progress(id: &str, phase: &str, done: u64, total: u64) {
         }
     }
 }
-/// Cancel and the final no-overwrite rename share the same job-state lock.
+/// Cancellation and publication of a verified result share the job-state lock.
 #[cfg(windows)]
-pub(crate) fn publish_verified_file(
+pub(crate) fn complete_verified(
     id: &str,
     message: String,
     sha256: String,
@@ -1225,6 +1488,39 @@ pub fn scan(
     signatures: Option<crate::signature_scan::Options>,
 ) -> Result<String, String> {
     recovery_tasks::start_scan(source, mode, signatures)
+}
+
+pub fn scan_bitlocker(source: Selection, mode: ScanMode) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (source, mode);
+        Err("恢复扫描当前仅支持 Windows".into())
+    }
+    #[cfg(windows)]
+    {
+        if source.partition.is_none() || mode == ScanMode::Signatures {
+            return Err("请选择 BitLocker 数据分区并使用文件系统扫描。".into());
+        }
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let r = platform::resolve(&source, true, false)?;
+        let [volume] = r.volumes.as_slice() else {
+            return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+        };
+        if r.disk.is_offline != Some(false) {
+            return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+        }
+        scan_source_mode(
+            ScanSource::BitLocker { source, volume: volume.clone() },
+            None,
+            format!("BitLocker · {}", r.label),
+            "读取 BitLocker 文件",
+            mode,
+            guard,
+        )
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1499,8 +1795,53 @@ pub enum Request {
         #[serde(default)]
         mode: crate::used_space::Mode,
     },
+    ResizeClone {
+        source: Selection,
+        destination: Selection,
+    },
+    FileClone {
+        source: Selection,
+        destination: Selection,
+    },
+    #[cfg(windows)]
+    DiskFileClone {
+        source: Selection,
+        destination: Selection,
+        #[serde(default)]
+        partition_sizes: Vec<resize_clone::disk::PartitionSize>,
+    },
+    SectorCopy {
+        copy: crate::sector_copy::Request,
+        destination: Selection,
+        destination_start_sector: u64,
+        #[serde(default)]
+        keep_checkpoint: bool,
+    },
+    ImageSectorCopy {
+        copy: crate::sector_copy::ImageRequest,
+        destination: Selection,
+        destination_start_sector: u64,
+    },
+    SectorCopyResume {
+        source: Selection,
+        #[serde(default)]
+        reread_filled: bool,
+    },
+    SectorCopyRereadReport {
+        source: Selection,
+        destination: Selection,
+        #[serde(default)]
+        keep_checkpoint: bool,
+    },
     Restore {
         destination: Selection,
+    },
+    RestoreBackupPoint {
+        id: String,
+        point: String,
+        partition: Option<u32>,
+        destination: Selection,
+        resize: bool,
     },
     Recover {
         scan_id: String,
@@ -1592,6 +1933,16 @@ pub(crate) enum Work {
         destination: Selection,
         mode: crate::used_space::Mode,
     },
+    #[cfg(windows)]
+    PartitionClone(Box<resize_clone::Clone>),
+    #[cfg(windows)]
+    DiskFileClone(Box<resize_clone::disk::Clone>),
+    #[cfg(windows)]
+    RestoreBackupPoint(Box<retained_restore::Restore>),
+    #[cfg(windows)]
+    SectorCopy(Box<crate::sector_copy::platform::DeviceCopy>),
+    #[cfg(windows)]
+    ImageSectorCopy(Box<crate::sector_copy::image_platform::DeviceCopy>),
     Restore {
         destination: Selection,
         file: File,
@@ -1832,6 +2183,170 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         },
                     )
                 }
+                request @ (Request::ResizeClone { .. } | Request::FileClone { .. }) => {
+                    use resize_clone::Method;
+                    let (source, destination, method) = match request {
+                        Request::ResizeClone { source, destination } => (source, destination, Method::Resize),
+                        Request::FileClone { source, destination } => (source, destination, Method::files()),
+                        _ => unreachable!(),
+                    };
+                    let title = method.title();
+                    let (work, source, destination, bytes, detail) =
+                        resize_clone::Clone::prepare(source, destination, method, &locale)?;
+                    (
+                        title,
+                        source,
+                        destination,
+                        bytes,
+                        detail,
+                        true,
+                        Work::PartitionClone(Box::new(work)),
+                    )
+                }
+                Request::DiskFileClone { source, destination, partition_sizes } => {
+                    let (work, source, destination, bytes, detail) =
+                        resize_clone::disk::Clone::prepare(source, destination, partition_sizes, &locale)?;
+                    (
+                        resize_clone::disk::TITLE,
+                        source,
+                        destination,
+                        bytes,
+                        detail,
+                        true,
+                        Work::DiskFileClone(Box::new(work)),
+                    )
+                }
+                Request::SectorCopy {
+                    copy,
+                    destination,
+                    destination_start_sector,
+                    keep_checkpoint,
+                } => {
+                    let Some((work, source, destination, bytes)) =
+                        crate::sector_copy::platform::prepare_device(
+                            copy,
+                            destination,
+                            destination_start_sector,
+                            keep_checkpoint,
+                        )?
+                    else {
+                        return Ok(None);
+                    };
+                    (
+                        "复制扇区到磁盘",
+                        source,
+                        destination,
+                        bytes,
+                        locale.sentences(&[
+                            OVERWRITE_WARNING,
+                            "只覆盖确认的扇区范围。复制后会完整回读并校验该范围，SHA-256 包含填充字节。",
+                            if keep_checkpoint {
+                                "断点保存在另一块磁盘上，目标盘重启后仍保持脱机。"
+                            } else { "" },
+                        ]),
+                        true,
+                        Work::SectorCopy(Box::new(work)),
+                    )
+                }
+                Request::ImageSectorCopy {
+                    copy,
+                    destination,
+                    destination_start_sector,
+                } => {
+                    let (work, source, destination, bytes) =
+                        crate::sector_copy::image_platform::prepare_device(
+                            copy,
+                            destination,
+                            destination_start_sector,
+                        )?;
+                    (
+                        "复制扇区到磁盘",
+                        source,
+                        destination,
+                        bytes,
+                        locale.sentences(&[
+                            OVERWRITE_WARNING,
+                            "只覆盖确认的扇区范围。写入前校验镜像范围，写入后完整回读目标并校验 SHA-256。",
+                        ]),
+                        true,
+                        Work::ImageSectorCopy(Box::new(work)),
+                    )
+                }
+                Request::SectorCopyResume {
+                    source,
+                    reread_filled,
+                } => {
+                    let Some((work, source, destination, bytes)) =
+                        crate::sector_copy::platform::prepare_device_resume(source, reread_filled)?
+                    else {
+                        return Ok(None);
+                    };
+                    (
+                        if reread_filled { "复读已填充扇区" } else { "继续向磁盘复制扇区" },
+                        source,
+                        destination,
+                        bytes,
+                        locale.text(if reread_filled {
+                            "程序会先核对原副本的 SHA-256 和填充内容，再更新记录中的扇区。完成后完整回读，目标盘保持脱机。"
+                        } else {
+                            "程序会核对脱机目标盘和断点覆盖的已写数据，再继续覆盖确认范围。完成后完整回读，目标盘保持脱机。"
+                        }).to_owned(),
+                        true,
+                        Work::SectorCopy(Box::new(work)),
+                    )
+                }
+                Request::SectorCopyRereadReport {
+                    source,
+                    destination,
+                    keep_checkpoint,
+                } => {
+                    let Some((work, source, destination, bytes)) =
+                        crate::sector_copy::platform::prepare_report_device(
+                            source,
+                            destination,
+                            keep_checkpoint,
+                        )?
+                    else {
+                        return Ok(None);
+                    };
+                    (
+                        "从旧报告复读填充扇区",
+                        source,
+                        destination,
+                        bytes,
+                        locale.text("旧报告不包含硬件身份。请确认原源盘和原目标盘。程序会比对未填充的源字节、原副本的 SHA-256 和填充内容。仅更新报告记录的填充扇区，目标盘保持脱机。").to_owned(),
+                        true,
+                        Work::SectorCopy(Box::new(work)),
+                    )
+                }
+                Request::RestoreBackupPoint {
+                    id,
+                    point,
+                    partition,
+                    destination,
+                    resize,
+                } => {
+                    let opened = state()
+                        .opened_backup
+                        .as_ref()
+                        .filter(|backup| {
+                            backup.browser.info.id == id
+                                && backup.browser.info.selected_point == point
+                        })
+                        .cloned()
+                        .ok_or("备份还原点已变化，请重新选择。")?;
+                    let (work, source, target, bytes, warning) =
+                        retained_restore::Restore::prepare(opened, partition, destination, resize, &locale)?;
+                    (
+                        if resize { "调整容量还原" } else { "还原所选备份还原点" },
+                        source,
+                        target,
+                        bytes,
+                        warning,
+                        true,
+                        Work::RestoreBackupPoint(Box::new(work)),
+                    )
+                }
                 Request::Restore { destination } => {
                     let dst = platform::resolve(&destination, true, true)?;
                     let Some(path) = rfd::FileDialog::new()
@@ -1935,10 +2450,16 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     };
                     let source_label = source.label()?;
                     export.options = options.validate()?;
-                    if let ScanSource::Backup { opened, partition } = &source {
+                    if let Some(proof) = source.reconstruction() {
+                        match proof {
+                            view::Proof::Ntfs(proof) => export.ntfs_reconstruction = Some(proof.clone()),
+                            view::Proof::Fat(proof) => export.fat_reconstruction = Some(proof.clone()),
+                        }
+                    }
+                    if let ScanSource::Backup { opened, partition } = source.original() {
                         export.backup_source = Some(opened.browser.provenance(*partition)?);
                     }
-                    if let ScanSource::Image { opened, partition } = &source {
+                    if let ScanSource::Image { opened, partition } = source.original() {
                         export.image_source = Some(opened.browser.provenance(*partition)?);
                     }
                     if let ScanSource::ImageLvm(source) = &source {
@@ -1968,7 +2489,13 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         export.description(&locale),
                         locale.sentences(&[
                             "输出到新建目录，并保存文件名映射与成功/失败清单；不覆盖已有文件。每个文件在发布前完整回读并核对 SHA-256；不重建权限、链接及扩展属性；文件与目录时间、受支持属性按复制选项保存并记录结果。",
-                            if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_)) {
+                            if source.reconstruction().is_some() {
+                                "将重新核对备用文件系统元数据。只提取能验证的文件，请独立核对内容。"
+                            } else if matches!(&source, ScanSource::BitLocker { .. }) {
+                                "读取期间锁定 Windows 已解锁的 BitLocker 卷。导出文件由目标卷的保护设置决定。"
+                            } else if matches!(&source, ScanSource::VirtualRaid(raid) if raid.physical()) {
+                                "读取虚拟 RAID 时会锁定所选物理成员的卷。已删除内容可能已被覆盖，请独立核对导出文件。"
+                            } else if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_)) {
                                 "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。"
                             } else if browsing {
                                 "源卷未锁定，在线文件可能变化；这不是时间点快照，请核对副本内容。"
@@ -1978,10 +2505,19 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         ]),
                     ];
                     if export.lvm_degraded_raid {
-                        warnings.push(locale.text("此 LVM2 卷使用缺盘读取。请独立核对导出文件内容。").to_owned());
+                        warnings.push(
+                            locale
+                                .text("此 LVM2 卷使用缺盘读取。请独立核对导出文件内容。")
+                                .to_owned(),
+                        );
                     }
-                    if export.virtual_raid_source.is_some() {
-                        warnings.push(locale.text("虚拟 RAID 使用手动参数。请独立核对导出文件内容。").to_owned());
+                    if let Some(raid) = &export.virtual_raid_source {
+                        let message = if raid.md_metadata.is_some() {
+                            "虚拟 RAID 已核对 Linux md 元数据。请独立核对导出文件内容。"
+                        } else {
+                            "虚拟 RAID 使用手动参数。请独立核对导出文件内容。"
+                        };
+                        warnings.push(locale.text(message).to_owned());
                     }
                     let warning = warnings.join(" ");
                     (
@@ -2028,6 +2564,8 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
     }
 }
 const OVERWRITE_WARNING: &str = "目标范围原有的文件系统及数据将被替换，不能撤销。执行前锁定卷并将整个目标磁盘脱机；完成、取消或失败后都保持脱机，避免重复 GPT 标识自动挂载。需在确认副本后由你决定何时联机。";
+#[cfg(windows)]
+const PARTITION_OVERWRITE_WARNING: &str = "目标分区原有文件系统及数据将被永久替换。锁卷后将整个目标磁盘脱机，开始写入后保持脱机。请核对副本后再决定是否联机。";
 fn validate_pair(a: &Selection, b: &Selection) -> Result<(), String> {
     if a.target == b.target {
         return Err("源和目标必须是不同的物理磁盘。".into());
@@ -2417,6 +2955,12 @@ pub(crate) fn run(
             let target = platform::device(&dst, true)?;
             write_device(id, cancel, &mut reader, target, &dst, None)
         }
+        Work::PartitionClone(work) => work.execute(id, cancel),
+        #[cfg(windows)]
+        Work::DiskFileClone(work) => work.execute(id, cancel),
+        Work::RestoreBackupPoint(work) => work.execute(id, cancel),
+        Work::SectorCopy(work) => work.execute(id, cancel),
+        Work::ImageSectorCopy(work) => work.execute(id, cancel),
         Work::Restore {
             destination,
             mut file,
@@ -2474,6 +3018,16 @@ pub(crate) fn run(
                 }
                 // Verify the bound volume-group transaction before creating output.
                 lvm.reader(&locked, cancel)?;
+            }
+            if let ScanSource::VirtualRaid(raid) = &source {
+                // Confirm the selected partition or filesystem evidence under the job's locks.
+                raid.reader(&locked, cancel)?;
+            }
+            if matches!(&source, ScanSource::BitLocker { .. })
+                || (source.reconstruction().is_some() && !matches!(&source, ScanSource::VirtualRaid(_)))
+            {
+                // Revalidate specialized read views before creating any output.
+                source.extraction_readers(&locked, cancel)?;
             }
             progress(id, cancel, "恢复文件", 0, total)?;
             let root = source.destination(&folder, total.saturating_add(32 * 1024 * 1024))?;

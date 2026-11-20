@@ -17,6 +17,7 @@ pub struct Part {
     pub name: String,
     pub start: u64,
     pub size: u64,
+    pub btrfs: bool,
 }
 
 #[cfg(test)]
@@ -27,6 +28,8 @@ mod tests;
 pub struct Point {
     pub id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +45,10 @@ pub struct Info {
     pub selected_point: String,
     pub partitions: Vec<Part>,
     pub warning: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_issue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocation_skipped_bytes: Option<u64>,
 }
 pub struct Browser {
     content: Content,
@@ -127,6 +134,7 @@ impl Browser {
             .enumerate()
             .map(|(i, h)| Point {
                 id: h.id.clone(),
+                ordinal: (i != 0 && h.parent.is_some()).then_some(i),
                 label: if i == 0 {
                     if h.parent.is_some() {
                         "最新增量备份"
@@ -153,6 +161,8 @@ impl Browser {
             selected_point: h.id,
             partitions: vec![],
             warning: String::new(),
+            table_issue: None,
+            allocation_skipped_bytes: None,
         };
         Self::prepare(
             Content::V2 {
@@ -180,10 +190,13 @@ impl Browser {
             points: vec![Point {
                 id: "legacy".into(),
                 label: "完整备份".into(),
+                ordinal: None,
             }],
             selected_point: "legacy".into(),
             partitions: vec![],
             warning: String::new(),
+            table_issue: None,
+            allocation_skipped_bytes: None,
         };
         Self::prepare(
             Content::V1 {
@@ -201,31 +214,14 @@ impl Browser {
     ) -> Result<Self, String> {
         let mut browser = Self { content, info };
         let size = browser.info.size;
-        tick(0, size)?;
-        match &browser.content {
-            Content::V2 { chain, layer } => chain
-                .lock()
-                .map_err(|_| "备份读取状态异常")?
-                .verify_at(*layer, |n| tick(n, size))?,
-            Content::V1 { header, .. } => {
-                let digest =
-                    crate::data_io::hash_exact(&mut browser.content_reader()?, size, |n| {
-                        tick(n, size)
-                    })?;
-                if digest != header.sha256 {
-                    return Err("完整备份 SHA-256 校验失败".into());
-                }
-            }
-        }
+        browser.verify_content(&mut tick)?;
         if let Content::V2 { chain, layer } = &browser.content {
             let locked = chain.lock().map_err(|_| "备份读取状态异常")?;
             let headers = locked.headers();
-            if let Some(policy) = &headers[*layer].allocation {
-                browser.info.warning = format!(
-                    "按已用空间备份：{} B 已确认空闲的区域按零保存，不保留这些区域的已删除内容。",
-                    policy.skipped_bytes
-                );
-            }
+            browser.info.allocation_skipped_bytes = headers[*layer]
+                .allocation
+                .as_ref()
+                .map(|policy| policy.skipped_bytes);
         }
         if browser.info.kind == "partition" {
             browser.info.partitions.push(Part {
@@ -233,92 +229,128 @@ impl Browser {
                 name: "备份分区".into(),
                 start: 0,
                 size,
+                btrfs: false,
             });
         } else {
-            let mut reader = browser.content_reader()?;
-            let count = size.min(disk_core::MIB) as usize;
-            let mut head = vec![0; count];
-            let mut tail = vec![0; count];
-            reader.read_exact(&mut head).map_err(|e| e.to_string())?;
-            reader
-                .seek(SeekFrom::Start(size - count as u64))
-                .map_err(|e| e.to_string())?;
-            reader.read_exact(&mut tail).map_err(|e| e.to_string())?;
-            let mut ebrs = vec![];
-            if head.get(510..512) == Some(&[0x55, 0xaa])
-                && ![512, 4096]
-                    .iter()
-                    .any(|n| head.get(*n..*n + 8) == Some(b"EFI PART"))
-            {
-                while let Some(offset) = disk_core::mbr::next_ebr(&head[..512], size, &ebrs)? {
-                    tick(size, size)?;
-                    let mut bytes = vec![0; 512];
-                    reader
-                        .seek(SeekFrom::Start(offset))
-                        .map_err(|e| e.to_string())?;
-                    reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-                    ebrs.push(disk_core::mbr::EbrSector { offset, bytes });
-                }
+            browser.index_disk(&mut tick)?;
+        }
+        let mut content = browser.content_reader()?;
+        for part in &mut browser.info.partitions {
+            tick(size, size)?;
+            let mut extent =
+                Region::new(&mut content, part.start, part.size).map_err(|e| e.to_string())?;
+            part.btrfs = btrfs_candidate(&mut extent, part.size)?;
+        }
+        tick(size, size)?;
+        Ok(browser)
+    }
+
+    // A bad partition table blocks all partition access. The independently
+    // verified disk byte stream remains available for an explicit disk restore.
+    fn index_disk(
+        &mut self,
+        mut tick: impl FnMut(u64, u64) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let size = self.info.size;
+        let mut reader = self.content_reader()?;
+        let count = size.min(disk_core::MIB) as usize;
+        let mut head = vec![0; count];
+        let mut tail = vec![0; count];
+        reader.read_exact(&mut head).map_err(|e| e.to_string())?;
+        reader
+            .seek(SeekFrom::Start(size - count as u64))
+            .map_err(|e| e.to_string())?;
+        reader.read_exact(&mut tail).map_err(|e| e.to_string())?;
+        let mut ebrs = vec![];
+        if head.get(510..512) == Some(&[0x55, 0xaa])
+            && ![512, 4096]
+                .iter()
+                .any(|n| head.get(*n..*n + 8) == Some(b"EFI PART"))
+        {
+            loop {
+                let offset = match disk_core::mbr::next_ebr(&head[..512], size, &ebrs) {
+                    Ok(Some(offset)) => offset,
+                    Ok(None) => break,
+                    Err(issue) => {
+                        self.info.table_issue = Some(issue);
+                        return Ok(());
+                    }
+                };
+                tick(size, size)?;
+                let mut bytes = vec![0; 512];
+                reader
+                    .seek(SeekFrom::Start(offset))
+                    .map_err(|e| e.to_string())?;
+                reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                ebrs.push(disk_core::mbr::EbrSector { offset, bytes });
             }
-            let inspected = disk_core::table_check::inspect_image_with_ebrs(
-                &head,
-                &tail,
-                size,
-                "backup-content.img",
-                &ebrs,
-            )?;
-            if matches!(
-                inspected.report.state,
-                disk_core::table_check::CheckState::Failed
-                    | disk_core::table_check::CheckState::Unchecked
-            ) {
-                return Err(format!(
-                    "备份内容校验通过，但分区表不完整或存在错误：{}",
-                    inspected
-                        .report
-                        .items
-                        .iter()
-                        .filter(|i| matches!(
-                            i.state,
-                            disk_core::table_check::CheckState::Failed
-                                | disk_core::table_check::CheckState::Unchecked
-                        ))
-                        .map(|i| i.detail.as_str())
-                        .collect::<Vec<_>>()
-                        .join("；")
-                ));
+        }
+        let inspected = match disk_core::table_check::inspect_image_with_ebrs(
+            &head,
+            &tail,
+            size,
+            "backup-content.img",
+            &ebrs,
+        ) {
+            Ok(inspected) => inspected,
+            Err(issue) => {
+                self.info.table_issue = Some(issue);
+                return Ok(());
             }
-            let disk = inspected
-                .disk
-                .ok_or_else(|| inspected.parse_error.unwrap_or("无法读取备份分区表".into()))?;
-            if disk.sector_size != browser.info.sector {
-                return Err("备份记录的扇区大小与分区表不一致".into());
-            }
-            browser.info.warning.push_str(
-                &inspected
+        };
+        if matches!(
+            inspected.report.state,
+            disk_core::table_check::CheckState::Failed
+                | disk_core::table_check::CheckState::Unchecked
+        ) {
+            self.info.table_issue = Some(
+                inspected
                     .report
                     .items
                     .iter()
-                    .filter(|i| i.state == disk_core::table_check::CheckState::Warning)
+                    .filter(|i| matches!(
+                        i.state,
+                        disk_core::table_check::CheckState::Failed
+                            | disk_core::table_check::CheckState::Unchecked
+                    ))
                     .map(|i| i.detail.as_str())
                     .collect::<Vec<_>>()
                     .join("；"),
             );
-            browser.info.partitions = disk
-                .partitions
-                .into_iter()
-                .filter(|p| p.color != "free")
-                .enumerate()
-                .map(|(id, p)| Part {
-                    id: id as u32,
-                    name: p.name,
-                    start: p.start,
-                    size: p.size,
-                })
-                .collect();
+            return Ok(());
         }
-        tick(size, size)?;
-        Ok(browser)
+        let Some(disk) = inspected.disk else {
+            self.info.table_issue = Some(
+                inspected.parse_error.unwrap_or_else(|| "无法读取备份分区表".into()),
+            );
+            return Ok(());
+        };
+        if disk.sector_size != self.info.sector {
+            return Err("备份记录的扇区大小与分区表不一致".into());
+        }
+        self.info.warning =
+            inspected
+                .report
+                .items
+                .iter()
+                .filter(|i| i.state == disk_core::table_check::CheckState::Warning)
+                .map(|i| i.detail.as_str())
+                .collect::<Vec<_>>()
+                .join("；");
+        self.info.partitions = disk
+            .partitions
+            .into_iter()
+            .filter(|p| p.color != "free")
+            .enumerate()
+            .map(|(id, p)| Part {
+                id: id as u32,
+                name: p.name,
+                start: p.start,
+                size: p.size,
+                btrfs: false,
+            })
+            .collect();
+        Ok(())
     }
     fn content_reader(&self) -> Result<Box<dyn Source>, String> {
         match &self.content {
@@ -334,6 +366,52 @@ impl Browser {
                 )
                 .map_err(|e| e.to_string())?,
             )),
+        }
+    }
+    /// Verify the retained point and all of its dependencies again before a
+    /// destructive restore. An older point has its own immutable chain view.
+    pub(crate) fn verify_content(
+        &self,
+        mut tick: impl FnMut(u64, u64) -> Result<(), String>,
+    ) -> Result<String, String> {
+        let size = self.info.size;
+        tick(0, size)?;
+        match &self.content {
+            Content::V2 { chain, layer } => {
+                let mut chain = chain.lock().map_err(|_| "备份读取状态异常")?;
+                chain.verify_at(*layer, |n| tick(n, size))?;
+                Ok(chain.headers()[*layer].sha256.clone())
+            }
+            Content::V1 { header, .. } => {
+                let digest =
+                    crate::data_io::hash_exact(&mut self.content_reader()?, size, |n| tick(n, size))?;
+                if digest != header.sha256 {
+                    return Err("完整备份 SHA-256 校验失败".into());
+                }
+                Ok(digest)
+            }
+        }
+    }
+
+    pub(crate) fn restore_size(&self, part: Option<u32>) -> Result<u64, String> {
+        match part {
+            Some(id) => self
+                .info
+                .partitions
+                .iter()
+                .find(|part| part.id == id)
+                .map(|part| part.size)
+                .ok_or("备份分区选择无效".into()),
+            None if self.info.kind == "disk" => Ok(self.info.size),
+            None => Err("分区备份需要选择分区还原。".into()),
+        }
+    }
+
+    pub(crate) fn restore_reader(&self, part: Option<u32>) -> Result<Box<dyn Source>, String> {
+        self.restore_size(part)?;
+        match part {
+            Some(id) => Ok(Box::new(self.reader(id)?)),
+            None => self.content_reader(),
         }
     }
     /// New immutable view over the retained chain. Readers already handed out
@@ -361,6 +439,7 @@ impl Browser {
         info.version = h.version;
         info.partitions.clear();
         info.warning.clear();
+        info.table_issue = None;
         Self::prepare(
             Content::V2 {
                 chain: chain.clone(),
@@ -386,4 +465,18 @@ impl Browser {
         }
         Region::new(self.content_reader()?, part.start, part.size).map_err(|e| e.to_string())
     }
+}
+
+// Route only on bytes from a verified backup point. A Windows filesystem
+// can retain an older signature well past its current boot sector.
+fn btrfs_candidate(reader: &mut (impl Read + Seek), size: u64) -> Result<bool, String> {
+    if !disk_core::btrfs::has_magic(reader, size)? {
+        return Ok(false);
+    }
+    let mut boot = [0; 512];
+    reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    reader.read_exact(&mut boot).map_err(|e| e.to_string())?;
+    Ok(&boot[3..11] != b"NTFS    "
+        && !crate::bitlocker::boot_marker(&boot)
+        && !crate::recovery::fat_boot(&boot))
 }

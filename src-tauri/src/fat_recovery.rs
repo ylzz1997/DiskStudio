@@ -2,6 +2,8 @@
 //! are not guessed: only contiguous free extents are offered as candidates.
 #[path = "fat_allocation.rs"]
 pub mod allocation;
+#[path = "fat_reconstruct.rs"]
+pub(crate) mod reconstruct;
 #[path = "fat_resize.rs"]
 pub mod resize;
 use crate::recovery::{Candidate, Locator, ScanMode, MAX_RESULTS};

@@ -10,8 +10,9 @@ use policy::{Disk, LegacyIdentity, Partition};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom},
     os::windows::{
-        fs::{MetadataExt, OpenOptionsExt},
+        fs::{FileExt, MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
     },
     path::{Path, PathBuf},
@@ -63,14 +64,20 @@ impl Resolved {
     }
 
     pub(crate) fn partition_filesystem(&self, number: u32) -> Option<&str> {
+        self.partition_volume(number)?.file_system.as_deref()
+    }
+
+    pub(crate) fn has_partition_volume(&self, number: u32) -> bool {
+        self.partition_volume(number).is_some()
+    }
+
+    fn partition_volume(&self, number: u32) -> Option<&Volume> {
         self.data_lock_proof
             .as_ref()?
             .associations
             .iter()
-            .find(|(partition, _)| *partition == number)?
-            .1
-            .file_system
-            .as_deref()
+            .find(|(partition, _)| *partition == number)
+            .map(|(_, volume)| volume)
     }
 }
 #[derive(Clone)]
@@ -506,12 +513,100 @@ impl StableRead {
         reader(&self.resolved()?)
     }
 
+    pub(crate) fn bitlocker_reader(
+        &self,
+        expected_volume: &str,
+    ) -> Result<Region<LockedVolumeInput>, String> {
+        let r = self.resolved()?;
+        let ([volume], [file], Some(partition)) =
+            (r.volumes.as_slice(), self.locks.0.as_slice(), self.source.partition)
+        else {
+            return Err("无法唯一核对 BitLocker 分区及其卷锁。".into());
+        };
+        if volume != expected_volume || r.disk.is_offline != Some(false) || !r.ntfs_volume {
+            return Err("BitLocker 卷关联已变化，或 Windows 未提供已解锁的 NTFS 卷。".into());
+        }
+        let mut number = [0u8; 12];
+        let mut length = [0u8; 8];
+        if control(file, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut number)? != number.len()
+            || number[..4] != 7u32.to_le_bytes()
+            || number[4..8] != r.disk.number.to_le_bytes()
+            || number[8..] != partition.to_le_bytes()
+            || control(file, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length)? != length.len()
+            || u64::from_le_bytes(length) != r.size
+        {
+            return Err("BitLocker 卷的原生设备或容量与分区不一致。".into());
+        }
+        let mut boot = [0u8; 512];
+        Region::for_metadata(device(&r, false)?, r.offset, r.size)
+            .and_then(|mut raw| raw.read_exact(&mut boot))
+            .map_err(err)?;
+        if !crate::bitlocker::boot_marker(&boot) {
+            return Err("分区缺少与 BitLocker 卷对应的加密引导标记。".into());
+        }
+        control(file, FSCTL_ALLOW_EXTENDED_DASD_IO, &[], &mut [])?;
+        let input = LockedVolumeInput {
+            file: file.try_clone().map_err(err)?,
+            position: 0,
+            size: r.size,
+        };
+        let mut volume = Region::new(input, 0, r.size).map_err(err)?;
+        volume.read_exact(&mut boot).map_err(err)?;
+        if &boot[3..11] != b"NTFS    " {
+            return Err("Windows 卷句柄未提供可验证的解密 NTFS 数据。".into());
+        }
+        volume.seek(SeekFrom::Start(0)).map_err(err)?;
+        let ntfs = ntfs::Ntfs::new(&mut volume)
+            .map_err(|_| "Windows 卷句柄未提供可验证的解密 NTFS 数据。")?;
+        if Some(u64::from(ntfs.sector_size())) != r.disk.logical_sector_size
+            || ntfs.size() == 0
+            || ntfs.size() > r.size
+        {
+            return Err("解密 NTFS 的扇区大小或文件系统范围与分区不一致。".into());
+        }
+        volume.seek(SeekFrom::Start(0)).map_err(err)?;
+        Ok(volume)
+    }
+
     pub(crate) fn resolved(&self) -> Result<Resolved, String> {
         resolve_locked(&self.source, false, &self.bound, &self.locks)
     }
 
     pub(crate) fn verify(&self) -> Result<(), String> {
         self.resolved().map(|_| ())
+    }
+}
+
+/// Reads on duplicates of the already locked handle use absolute offsets, so
+/// concurrent export workers never depend on a shared Windows file position.
+pub(crate) struct LockedVolumeInput {
+    file: File,
+    position: u64,
+    size: u64,
+}
+impl Read for LockedVolumeInput {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let len = bytes.len().min((self.size - self.position).try_into().unwrap_or(usize::MAX));
+        if len == 0 {
+            return Ok(0);
+        }
+        let count = self.file.seek_read(&mut bytes[..len], self.position)?;
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+impl Seek for LockedVolumeInput {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
+            SeekFrom::End(n) => i128::from(self.size) + i128::from(n),
+        };
+        if !(0..=i128::from(self.size)).contains(&position) {
+            return Err(io::Error::other("Seek outside locked volume"));
+        }
+        self.position = position as u64;
+        Ok(self.position)
     }
 }
 /// Surface reads bypass the Windows cache. Buffers are 4096-aligned; reject
@@ -676,8 +771,12 @@ fn validate_lock_extent(
 }
 pub(crate) fn verify_offline_device(r: &Resolved) -> Result<(), String> {
     let file = device(r, false)?;
+    verify_offline_handle(r, &file)
+}
+
+pub(crate) fn verify_offline_handle(r: &Resolved, file: &File) -> Result<(), String> {
     let mut bytes = [0; 16];
-    let n = control(&file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)?;
+    let n = control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)?;
     validate_offline_attributes(&r.disk, &bytes[..n.min(bytes.len())])
 }
 fn validate_offline_attributes(disk: &Disk, bytes: &[u8]) -> Result<(), String> {
@@ -697,6 +796,17 @@ pub fn offline(file: &File) -> Result<(), String> {
 
 pub(crate) fn persist_offline(file: &File) -> Result<(), String> {
     set_offline(file, true)
+}
+
+pub(crate) fn confirm_writable_offline(file: &File) -> Result<(), String> {
+    let mut bytes = [0; 16];
+    if control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)? != 16
+        || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != 16
+        || u64::from_le_bytes(bytes[8..].try_into().unwrap()) != 1
+    {
+        return Err("无法确认目标保持可写且脱机。".into());
+    }
+    Ok(())
 }
 
 fn set_offline(file: &File, persist: bool) -> Result<(), String> {
@@ -945,6 +1055,10 @@ pub struct FileBinding {
     location: FileLocation,
 }
 impl FileBinding {
+    pub(crate) fn target(&self) -> &Target {
+        &self.location.target
+    }
+
     pub fn new(file: &File, expected: &Target) -> Result<Self, String> {
         let location = file_location(file)?;
         if &location.target != expected {
@@ -1081,12 +1195,20 @@ mod file_location_tests {
     }
 }
 pub fn destination_folder(path: &Path, source: &Target, required: u64) -> Result<PathBuf, String> {
+    destination_location(path, std::slice::from_ref(source), required).map(|(path, _)| path)
+}
+
+pub(crate) fn destination_location(
+    path: &Path,
+    sources: &[Target],
+    required: u64,
+) -> Result<(PathBuf, Target), String> {
     let (canonical, target) = folder_location(path)?;
-    if &target == source {
+    if sources.contains(&target) {
         return Err("输出必须位于另一块物理磁盘，不能写回恢复/备份源盘。".into());
     }
     if required == 0 {
-        return Ok(canonical);
+        return Ok((canonical, target));
     }
     let mut available = 0;
     let wide: Vec<u16> = canonical.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -1102,7 +1224,7 @@ pub fn destination_folder(path: &Path, source: &Target, required: u64) -> Result
     {
         return Err("输出磁盘可用空间不足。".into());
     }
-    Ok(canonical)
+    Ok((canonical, target))
 }
 use std::os::windows::ffi::OsStrExt;
 pub fn err(e: impl std::fmt::Display) -> String {

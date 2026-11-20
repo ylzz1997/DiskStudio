@@ -18,7 +18,7 @@ pub use allocation::{allocation_for_copy, CopyAllocation};
 pub use file::FileInfo;
 pub use members::MAX_MEMBERS;
 use members::{check_chunk_ranges, chunks_consistent, Chunk, Device, Members};
-pub use resize::{plan_resize, resize, ResizePlan};
+pub use resize::{plan_resize, project_resize, resize, ProjectedResize, ResizePlan};
 
 const SUPER_BYTES: usize = 4096;
 const SUPER_OFFSETS: [u64; 3] = [64 * 1024, 64 * 1024 * 1024, 256 * 1024 * 1024 * 1024];

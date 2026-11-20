@@ -232,7 +232,7 @@ fn merge_streams_include_unnamed_file_data_and_literal_named_data() {
     let ntfs = ntfs::Ntfs::new(&mut reader).unwrap();
     let file = ntfs.file(&mut reader, record).unwrap();
     assert_eq!(enumerate(&mut reader, &file).unwrap().len(), 1);
-    let streams = enumerate_for_merge(&mut reader, &file).unwrap();
+    let streams = enumerate_for_merge(&mut reader, &file, Scope::Merge).unwrap();
     assert_eq!(streams.len(), 2);
     for (stream, expected) in streams.iter().zip([&b"12345"[..], &b"named"[..]]) {
         let mut actual = Vec::new();
@@ -242,6 +242,7 @@ fn merge_streams_include_unnamed_file_data_and_literal_named_data() {
                 &file,
                 &stream.identity,
                 &mut actual,
+                Scope::Merge,
                 |_| Ok(())
             )
             .unwrap(),

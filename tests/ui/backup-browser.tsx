@@ -16,7 +16,7 @@ const backup: BackupInfo = {
   layers: 3,
   points: [
     { id: "latest", label: "最新增量备份" },
-    { id: "middle", label: "此前第 1 层增量备份" },
+    { id: "middle", label: "此前第 1 层增量备份", ordinal: 1 },
     { id: "base", label: "最早完整备份" },
   ],
   selectedPoint: "latest",
@@ -25,6 +25,7 @@ const backup: BackupInfo = {
     { id: 1, name: "照片归档", start: 41 * 1024 ** 3, size: 20 * 1024 ** 3 },
   ],
   warning: "",
+  sourceDisks: [],
   scanId: null,
   scanPartition: null,
 };
@@ -55,6 +56,7 @@ function Harness() {
           setInfo({ ...info!, scanPartition: id, scanId: "memory-scan" });
           setEvent(`读取分区 ${id}：${backup.partitions[id].name}`);
         }}
+        onReconstruct={(id) => setEvent(`重建分区 ${id}`)}
         onPoint={(point) => {
           setInfo({
             ...info!,

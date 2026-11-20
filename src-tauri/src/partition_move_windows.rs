@@ -15,7 +15,6 @@ use std::{
     io,
     os::windows::fs::MetadataExt,
     path::Path,
-    ptr::{null, null_mut},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -23,10 +22,6 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::LocalFree,
-    Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-    },
     Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT},
     System::Ioctl::{IOCTL_DISK_GET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES},
 };
@@ -633,49 +628,8 @@ fn unprotect(input: &[u8]) -> Result<[u8; 32], String> {
 }
 
 fn dpapi(input: &[u8], seal: bool) -> Result<Vec<u8>, String> {
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: input.len() as u32,
-        pbData: input.as_ptr().cast_mut(),
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: null_mut(),
-    };
-    // Both calls consume the input as a read-only blob and allocate the output.
-    let ok = unsafe {
-        if seal {
-            CryptProtectData(
-                &input,
-                null(),
-                null(),
-                null(),
-                null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        } else {
-            CryptUnprotectData(
-                &input,
-                null_mut(),
-                null(),
-                null(),
-                null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    };
-    let result = if ok != 0 && !output.pbData.is_null() && (1..=4096).contains(&output.cbData) {
-        Ok(unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec())
-    } else {
-        Err("无法核对当前 Windows 用户的移动记录来源凭据。".into())
-    };
-    if !output.pbData.is_null() {
-        unsafe {
-            LocalFree(output.pbData.cast());
-        }
-    }
-    result
+    crate::windows_protection::protect(input, seal, None, 4096)
+        .map_err(|_| "无法核对当前 Windows 用户的移动记录来源凭据。".into())
 }
 
 #[cfg(test)]

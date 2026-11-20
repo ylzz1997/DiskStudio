@@ -8,6 +8,10 @@ use std::io::{self, Write};
 mod relocation;
 use relocation::{touches_super_stripe, Relocation};
 
+#[path = "btrfs_resize_projection.rs"]
+mod projection;
+pub use projection::{project_resize, ProjectedResize};
+
 const MIN_SIZE: u64 = 128 * 1024 * 1024;
 const ALLOCATION_LIMIT: usize = 1_000_000;
 
@@ -228,17 +232,32 @@ fn overlaps(ranges: &BTreeMap<u64, u64>, start: u64, end: u64) -> bool {
 /// boundary before calling.
 /// Write::flush on the supplied stream must flush the actual storage.
 pub fn resize(stream: &mut (impl Read + Write + Seek), plan: &ResizePlan) -> Result<(), String> {
+    let current = resize_source(stream, plan)?;
+    plan.relocation.copy_and_verify(stream)?;
+    resize_transaction(stream, plan, current, || Ok(())).map(|_| ())
+}
+
+fn resize_source(stream: &mut (impl Read + Seek), plan: &ResizePlan) -> Result<Super, String> {
     let (_, current) = super_mirror(stream, SUPER_OFFSETS[0], plan.before)?;
     if current.identity != plan.committed.identity
         || stream.seek(SeekFrom::End(0)).map_err(err)? != plan.before.max(plan.after)
     {
         return Err("Btrfs 文件系统或目标范围与预览不同。".into());
     }
+    Ok(current)
+}
+
+fn resize_transaction(
+    stream: &mut (impl Read + Write + Seek),
+    plan: &ResizePlan,
+    current: Super,
+    mut checkpoint: impl FnMut() -> Result<(), String>,
+) -> Result<[u8; 32], String> {
+    checkpoint()?;
     let next = current
         .generation
         .checked_add(1)
         .ok_or("Btrfs 事务代次溢出。")?;
-    plan.relocation.copy_and_verify(stream)?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> io::Result<()> {
         let guarded = CommitIo {
             stream: &mut *stream,
@@ -277,7 +296,7 @@ pub fn resize(stream: &mut (impl Read + Write + Seek), plan: &ResizePlan) -> Res
             publishing: true,
             capacity: plan.after,
         },
-        || Ok(()),
+        &mut checkpoint,
     )?;
     let (raw, sb) = super_mirror(&mut volume.reader.primary, SUPER_OFFSETS[0], plan.after)?;
     if sb.fsid != current.fsid
@@ -296,7 +315,8 @@ pub fn resize(stream: &mut (impl Read + Write + Seek), plan: &ResizePlan) -> Res
     }
     consistent_mirrors(&mut volume.reader.primary, plan.after, sb.identity)?;
     volume.verify_device_extents()?;
-    volume.verify_view(|| Ok(()))
+    volume.verify_view(checkpoint)?;
+    Ok(sb.identity)
 }
 
 struct CommitIo<'a, R> {

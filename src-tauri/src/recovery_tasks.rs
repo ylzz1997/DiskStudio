@@ -236,6 +236,9 @@ fn launch(
                     } else if mode != ScanMode::Signatures {
                         let mut boot = [0; 512];
                         reader.read_exact(&mut boot).map_err(platform::err)?;
+                        if crate::bitlocker::boot_marker(&boot) {
+                            return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+                        }
                         reader.seek(SeekFrom::Start(0)).map_err(platform::err)?;
                         if &boot[3..11] == b"NTFS    " {
                             cursor = Some(Cursor::Ntfs {

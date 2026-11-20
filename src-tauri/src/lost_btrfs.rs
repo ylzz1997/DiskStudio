@@ -1,5 +1,5 @@
 //! Checksummed Btrfs member discovery using a bounded, hashed evidence stream.
-use super::{canceled, Candidate, Probe, Range};
+use super::{canceled, Candidate, Probe, Range, Validation};
 use disk_core::btrfs::{self, RECOVERY_SUPERBLOCK_BYTES};
 use sha2::{Digest, Sha256};
 use std::{
@@ -167,8 +167,10 @@ pub(super) fn probe<R: Read + Seek>(
         can_restore: matches!(checked, Ok((true, _))),
         can_browse: checked.is_ok(),
         btrfs_member_count: Some(member.total_members),
-        fingerprint: format!("{:x}", probe.hash.finalize()),
-        btrfs_anchor: Some(anchor),
+        validation: Validation::Btrfs {
+            anchor,
+            fingerprint: format!("{:x}", probe.hash.finalize()),
+        },
         btrfs_member: Some(member),
     }))
 }

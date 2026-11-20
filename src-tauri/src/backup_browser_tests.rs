@@ -83,6 +83,23 @@ fn legacy(bytes: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn btrfs_restore_hint_follows_the_selected_point_and_respects_windows_boot() {
+    let mut bytes = vec![0; 128 * 1024];
+    let magic = 65536 + 64;
+    bytes[magic..magic + 8].copy_from_slice(b"_BHRfS_M");
+    let previous = chain(archive(&bytes, "partition", 4096, None));
+    let earlier = previous.header().id.clone();
+    bytes[3..11].copy_from_slice(b"NTFS    ");
+    let latest = Archive::from_reader(Cursor::new(archive(&bytes, "partition", 4096, Some(&previous)))).unwrap();
+    let browser = Browser::from_chain(previous.prepend(latest).unwrap(), "test.dsbackup".into(), |_, _| Ok(())).unwrap();
+    assert!(!browser.info.partitions[0].btrfs);
+    let older = browser.select_point(&earlier, |_, _| Ok(())).unwrap();
+    assert!(older.info.partitions[0].btrfs);
+    bytes[3..11].copy_from_slice(b"-FVE-FS-");
+    assert!(!btrfs_candidate(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap());
+}
+
+#[test]
 fn v1_and_v2_partition_backups_browse_and_extract_real_ntfs_records_in_memory() {
     assert_ntfs(&browse(NTFS, "partition", 512), 0);
     let browser = Browser::from_legacy(
@@ -93,6 +110,12 @@ fn v1_and_v2_partition_backups_browse_and_extract_real_ntfs_records_in_memory() 
     .unwrap();
     assert_eq!(browser.info.version, 1);
     assert_ntfs(&browser, 0);
+    assert!(browser.restore_reader(None).is_err());
+    assert_eq!(browser.restore_size(Some(0)).unwrap(), NTFS.len() as u64);
+    let mut restored = Vec::new();
+    browser.restore_reader(Some(0)).unwrap().read_to_end(&mut restored).unwrap();
+    assert_eq!(restored, NTFS);
+    assert_eq!(browser.verify_content(|_, _| Ok(())).unwrap(), format!("{:x}", Sha256::digest(NTFS)));
     let mut a = browser.reader(0).unwrap();
     let mut b = browser.reader(0).unwrap();
     a.seek(SeekFrom::Start(1024)).unwrap();
@@ -197,6 +220,13 @@ fn whole_mbr_and_ebr_backups_expose_only_bounded_data_partitions() {
             );
         }
         let browser = browse(&disk, "disk", 512);
+        assert_eq!(browser.restore_size(None).unwrap(), disk.len() as u64);
+        assert_eq!(browser.restore_size(Some(0)).unwrap(), NTFS.len() as u64);
+        for (part, expected) in [(None, disk.as_slice()), (Some(0), NTFS)] {
+            let mut restored = Vec::new();
+            browser.restore_reader(part).unwrap().read_to_end(&mut restored).unwrap();
+            assert_eq!(restored, expected);
+        }
         assert_eq!(browser.info.partitions.len(), 1);
         assert_eq!(browser.info.partitions[0].start, start as u64);
         assert_ntfs(&browser, 0);
@@ -254,12 +284,18 @@ fn gpt_backup_geometry_is_validated_before_partitions_are_available() {
         assert_ntfs(&browser, 0);
         let mut damaged = disk.clone();
         damaged[sector + 16] ^= 1;
-        assert!(Browser::from_chain(
-            chain(archive(&damaged, "disk", sector as u64, None)),
-            "damaged".into(),
-            |_, _| Ok(())
-        )
-        .is_err());
+        let damaged_browser = browse(&damaged, "disk", sector as u64);
+        assert!(damaged_browser.info.table_issue.is_some());
+        assert!(damaged_browser.info.partitions.is_empty());
+        assert!(damaged_browser.restore_size(Some(0)).is_err());
+        assert!(damaged_browser.reader(0).is_err());
+        let mut restored = Vec::new();
+        damaged_browser
+            .restore_reader(None)
+            .unwrap()
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, damaged);
         if sector == 4096 {
             assert!(Browser::from_chain(
                 chain(archive(&disk, "disk", 512, None)),
@@ -269,6 +305,68 @@ fn gpt_backup_geometry_is_validated_before_partitions_are_available() {
             .is_err());
         }
     }
+}
+
+#[test]
+fn encrypted_disk_points_keep_verified_bytes_when_partition_indexing_fails() {
+    use crate::backup_encryption::{Password, Reader, Writer};
+
+    fn encrypted_disk(mut bytes: &[u8], secret: &str, parent: Option<&Chain>) -> Archive {
+        let password = Password::new(secret.into()).unwrap();
+        let mut encrypted = Writer::new(Cursor::new(Vec::new()), &password).unwrap();
+        let size = bytes.len() as u64;
+        backup_archive::create(
+            &mut bytes,
+            &mut encrypted,
+            "disk",
+            size,
+            4096,
+            true,
+            parent,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let mut encrypted = encrypted.into_inner().unwrap();
+        encrypted.set_position(0);
+        Archive::from_reader(Reader::open(encrypted, &password).unwrap()).unwrap()
+    }
+
+    let disk = gpt(4096);
+    let parent = Chain::new(encrypted_disk(&disk, "Synthetic base password", None));
+    let base_id = parent.header().id.clone();
+    let mut damaged = disk.clone();
+    damaged[4096 + 16] ^= 1;
+    let child = encrypted_disk(&damaged, "Synthetic delta password", Some(&parent));
+    let latest_id = child.header.id.clone();
+    let latest =
+        Browser::from_chain(parent.prepend(child).unwrap(), "encrypted".into(), |_, _| Ok(()))
+            .unwrap();
+    assert!(latest.info.table_issue.is_some());
+    assert!(latest.restore_reader(Some(0)).is_err());
+    assert_eq!(
+        latest.verify_content(|_, _| Ok(())).unwrap(),
+        format!("{:x}", Sha256::digest(&damaged)),
+    );
+
+    let base = latest.select_point(&base_id, |_, _| Ok(())).unwrap();
+    assert!(base.info.table_issue.is_none());
+    let mut restored = Vec::new();
+    base.restore_reader(Some(0))
+        .unwrap()
+        .read_to_end(&mut restored)
+        .unwrap();
+    assert_eq!(restored, NTFS);
+
+    let latest = base.select_point(&latest_id, |_, _| Ok(())).unwrap();
+    assert!(latest.info.partitions.is_empty());
+    assert!(latest.info.table_issue.is_some());
+    restored.clear();
+    latest
+        .restore_reader(None)
+        .unwrap()
+        .read_to_end(&mut restored)
+        .unwrap();
+    assert_eq!(restored, damaged);
 }
 
 #[test]
@@ -295,6 +393,14 @@ fn corruption_cancellation_and_unknown_ipc_fields_never_publish_a_browser() {
         )
         .is_err()
     );
+    let mut restore = serde_json::json!({
+        "type": "restoreBackupPoint", "id": "session", "point": "point",
+        "partition": 0, "destination": { "target": "a".repeat(64), "layoutKey": "bound", "partition": 1 },
+        "resize": false
+    });
+    serde_json::from_value::<crate::data_tasks::Request>(restore.clone()).unwrap();
+    restore["path"] = serde_json::json!("ignored");
+    assert!(serde_json::from_value::<crate::data_tasks::Request>(restore).is_err());
 }
 
 #[test]
@@ -361,6 +467,15 @@ fn three_points_keep_independent_readers_and_validate_each_logical_version() {
         assert_eq!(source.archive_name, "three");
         assert!(view.source_label(0).unwrap().contains(label));
         assert!(view.provenance(99).is_err());
+        let digest = view.verify_content(|_, _| Ok(())).unwrap();
+        assert_eq!(
+            digest,
+            crate::data_io::hash_exact(
+                &mut view.restore_reader(Some(0)).unwrap(),
+                view.restore_size(Some(0)).unwrap(),
+                |_| Ok(()),
+            ).unwrap()
+        );
     }
     for (reader, expected) in [
         (&mut newest_reader, (8, 9)),
@@ -408,6 +523,46 @@ fn opening_new_point_rejects_corrupt_superseded_parent_data() {
         .add_parent(Archive::from_reader(Cursor::new(corrupt_base)).unwrap())
         .unwrap();
     assert!(Browser::from_chain(layers, "corrupt-old".into(), |_, _| Ok(())).is_err());
+}
+
+#[path = "../../tests/fixtures/fat_view.rs"]
+mod fat_fixture;
+
+#[test]
+fn encrypted_partition_backup_can_be_reverified_and_resized_for_restore() {
+    use crate::backup_encryption::{Password, Reader, Writer};
+    let source = fat_fixture::exfat(512);
+    let size = source.len() as u64;
+    let password = Password::new("Synthetic restore fixture".to_owned()).unwrap();
+    let mut encrypted = Writer::new(Cursor::new(Vec::new()), &password).unwrap();
+    backup_archive::create(
+        &mut source.as_slice(), &mut encrypted, "partition", size, 512, true, None, |_| Ok(()),
+    ).unwrap();
+    let mut encrypted = encrypted.into_inner().unwrap();
+    encrypted.set_position(0);
+    let archive = Archive::from_reader(Reader::open(encrypted, &password).unwrap()).unwrap();
+    let browser = Browser::from_chain(Chain::new(archive), "encrypted".into(), |_, _| Ok(())).unwrap();
+    assert_eq!(browser.verify_content(|_, _| Ok(())).unwrap(), format!("{:x}", Sha256::digest(&source)));
+    let mut reader = browser.restore_reader(Some(0)).unwrap();
+    let grown = size + MIB as u64;
+    let offset = 16 * MIB as u64;
+    let plan = crate::fat_recovery::resize::clone::prepare(&mut reader, 512, grown, offset).unwrap();
+    let mut view = crate::fat_recovery::resize::clone::Reader::new(&plan, reader).unwrap();
+    let cancel = AtomicBool::new(false);
+    let allocation = crate::used_space::inspect(&mut view, grown, 512, None, &cancel).unwrap();
+    let mut restored = Vec::new();
+    allocation.masked(view).read_to_end(&mut restored).unwrap();
+    assert_eq!(restored.len(), grown as usize);
+    assert_eq!(u64::from_le_bytes(restored[64..72].try_into().unwrap()), offset / 512);
+    plan.verify(&mut Cursor::new(&restored)).unwrap();
+    let candidates = crate::recovery::ScanMode::Existing;
+    let mut found = Vec::new();
+    let mut output = Cursor::new(restored);
+    recovery::scan_filesystem(&mut output, candidates, |_, _| Ok(()), |entry| found.push(entry)).unwrap();
+    let entry = found.iter().find(|entry| entry.name == "exfat-view.txt").unwrap();
+    let mut content = Vec::new();
+    recovery::extract(&mut output, entry, &mut content, entry.size, |_| Ok(())).unwrap();
+    assert_eq!(content, fat_fixture::EXFAT_CONTENT);
 }
 
 #[test]

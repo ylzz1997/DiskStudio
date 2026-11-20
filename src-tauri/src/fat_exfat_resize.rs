@@ -11,17 +11,21 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
-fn update_boot(boot: &mut [u8], sector: usize, size: u64, count: u32, used: u32) {
+pub(super) fn update_boot(boot: &mut [u8], sector: usize, size: u64, count: u32, used: u32) {
     boot[72..80].copy_from_slice(&(size / sector as u64).to_le_bytes());
     boot[92..96].copy_from_slice(&count.to_le_bytes());
     boot[112] = (u64::from(used) * 100 / u64::from(count)) as u8;
+    write_boot_checksum(boot, sector);
+}
+
+pub(super) fn write_boot_checksum(boot: &mut [u8], sector: usize) {
     let sum = exfat_boot_checksum(&boot[..sector * 11]);
     for word in boot[sector * 11..].chunks_exact_mut(4) {
         word.copy_from_slice(&sum.to_le_bytes());
     }
 }
 
-fn update_entry_checksum(bytes: &mut [u8]) {
+pub(super) fn update_entry_checksum(bytes: &mut [u8]) {
     let sum = bytes
         .iter()
         .enumerate()
@@ -616,6 +620,7 @@ mod tests {
         bytes.copy_within(..12 * SECTOR, 12 * SECTOR);
         let plan = prepare_exfat(&mut disk, SECTOR as u64, NEW_SIZE as u64).unwrap();
         assert_eq!(plan.moved_clusters(), 5);
+        super::super::clone::assert_materializes(disk.get_ref(), SECTOR as u64, NEW_SIZE as u64);
         plan.apply(&mut disk).unwrap();
         disk.get_mut().truncate(NEW_SIZE);
         plan.verify(&mut disk).unwrap();
@@ -667,6 +672,7 @@ mod tests {
             let old = Fs::load(&mut disk).unwrap();
             let grow = prepare_exfat(&mut disk, SECTOR as u64, size as u64).unwrap();
             assert_eq!(grow.moved_clusters(), if use_padding { 0 } else { 4 });
+            super::super::clone::assert_materializes(disk.get_ref(), SECTOR as u64, size as u64);
             disk.get_mut().resize(size, 0xba);
             grow.apply(&mut disk).unwrap();
             grow.verify(&mut disk).unwrap();

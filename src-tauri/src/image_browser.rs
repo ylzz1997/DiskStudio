@@ -30,7 +30,7 @@ impl Options {
         Ok(())
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
     pub id: u32,
@@ -243,22 +243,19 @@ impl Browser {
             .find(|p| p.id == id)
             .ok_or("镜像分区选择已失效。".into())
     }
+    pub(crate) fn logical_reader(&self) -> Result<Box<dyn Source>, String> {
+        if let Some(factory) = &self.factory {
+            return factory.reader();
+        }
+        Ok(Box::new(SharedReader {
+            source: self.source.as_ref().ok_or("镜像读取来源已失效")?.clone(),
+            pos: 0,
+            size: self.info.size,
+        }))
+    }
     pub fn reader(&self, id: u32) -> Result<Region<Box<dyn Source>>, String> {
         let part = self.part(id)?;
-        if let Some(factory) = &self.factory {
-            return Region::new(factory.reader()?, part.start, part.size)
-                .map_err(|e| e.to_string());
-        }
-        Region::new(
-            Box::new(SharedReader {
-                source: self.source.as_ref().ok_or("镜像读取来源已失效")?.clone(),
-                pos: 0,
-                size: self.info.size,
-            }) as Box<dyn Source>,
-            part.start,
-            part.size,
-        )
-        .map_err(|e| e.to_string())
+        Region::new(self.logical_reader()?, part.start, part.size).map_err(|e| e.to_string())
     }
     pub fn readers(&self, ids: &[u32]) -> Result<Vec<Region<Box<dyn Source>>>, String> {
         let parts = ids

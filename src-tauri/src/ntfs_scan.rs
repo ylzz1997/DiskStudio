@@ -178,6 +178,21 @@ impl Checkpoint {
         Ok(())
     }
 }
+pub(crate) fn scan_reconstructed<R: Read + Seek>(
+    reader: &mut R,
+    mode: ScanMode,
+    tick: impl FnMut(u64, u64) -> Result<(), String>,
+    found: impl FnMut(Candidate),
+    directory: impl FnMut(Directory) -> Result<(), String>,
+) -> Result<String, String> {
+    let fs = Ntfs::new(reader).map_err(err)?;
+    let (identity, total) = identity(reader, &fs)?;
+    // Records 0–15 describe system metadata. The recovery view can contain
+    // substituted bytes there, so these do not become export candidates.
+    let mut checkpoint = Checkpoint { identity: Some(identity), next: 16, total, ..Checkpoint::default() };
+    continue_scan(reader, mode, &mut checkpoint, tick, found, directory)
+}
+
 pub fn continue_scan<R: Read + Seek>(
     reader: &mut R,
     mode: ScanMode,

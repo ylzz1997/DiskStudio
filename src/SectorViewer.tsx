@@ -24,12 +24,14 @@ import { surfaceRange } from "./surfaceModel";
 
 export function SectorViewer({
   disk,
+  disks,
   initialPartition,
   onClose,
   onBusy,
   onRefresh,
 }: {
   disk: Disk;
+  disks: Disk[];
   initialPartition?: number;
   onClose: () => void;
   onBusy: (busy: boolean) => void;
@@ -695,12 +697,14 @@ export function SectorViewer({
       ) : tab === "copy" ? (
         <SectorCopyPanel
           key={partition}
-          selectSource={selection}
+          source={{ kind: "disk", diskId: disk.id, select: selection }}
+          disks={disks}
           size={size}
           sectorSize={disk.sectorSize}
           offset={partition ? (selected?.start ?? 0) : 0}
           initialSector={page?.sector ?? 0}
           onBusy={setBusy}
+          onRefresh={onRefresh}
         />
       ) : (
         <>

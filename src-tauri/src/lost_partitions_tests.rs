@@ -1,5 +1,7 @@
 use super::*;
 use std::io::Cursor;
+#[path = "../../tests/fixtures/fat_view.rs"]
+mod fat_view;
 const NTFS: &[u8] = include_bytes!("../../tests/fixtures/ntfs-testfs1.img");
 fn range(size: usize) -> Range {
     Range {
@@ -27,6 +29,120 @@ fn findings(bytes: Vec<u8>, sector: u64) -> Vec<Candidate> {
     )
     .unwrap();
     items
+}
+
+#[test]
+fn backup_boot_search_finds_bounded_ntfs_fat32_and_exfat_views() {
+    let mut ntfs = NTFS.to_vec();
+    ntfs[..512].fill(0);
+    ntfs[16384..16384 + 2048].fill(0);
+    let mut fat32 = fat_view::fat32(512);
+    fat32[..512].fill(0);
+    let mut exfat = fat_view::exfat(4096);
+    exfat[..12 * 4096].fill(0);
+    for (image, filesystem, sector, name, content) in [
+        (ntfs, "NTFS", 512, "file-with-12345", &b"12345"[..]),
+        (fat32, "FAT32", 512, "FATVIEW.TXT", fat_view::FAT_CONTENT),
+        (
+            exfat,
+            "exFAT",
+            4096,
+            "exfat-view.txt",
+            fat_view::EXFAT_CONTENT,
+        ),
+    ] {
+        let start = BLOCK + sector;
+        let mut bytes = vec![0; start];
+        bytes.extend_from_slice(&image);
+        bytes.resize(bytes.len() + BLOCK, 0);
+        let mut source = Region::new(Cursor::new(&bytes), 0, bytes.len() as u64).unwrap();
+        let range = Range {
+            offset: sector as u64,
+            size: (bytes.len() - sector) as u64,
+            sector: sector as u64,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut found = vec![];
+        scan(&mut source, range, &cancel, |_, item| {
+            found.extend(item);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(found.len(), 1, "{filesystem}");
+        let item = &found[0];
+        assert_eq!(
+            (&*item.filesystem, item.offset, item.size),
+            (filesystem, start as u64, image.len() as u64)
+        );
+        assert!(item.can_browse && !item.can_restore && item.reconstruction().is_some());
+        assert!(crate::lost_partition_restore::extent(&mut source, range, item, &cancel).is_err());
+        let mut view = candidate_reader(
+            &mut source,
+            bytes.len() as u64,
+            sector as u64,
+            range,
+            item,
+            &cancel,
+        )
+        .unwrap();
+        let mut files = Vec::new();
+        crate::recovery::scan_filesystem_with_directories(
+            &mut view,
+            crate::recovery::ScanMode::Existing,
+            |_, _| Ok(()),
+            |file| files.push(file),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let file = files.iter().find(|file| file.name == name).unwrap();
+        let mut extracted = Vec::new();
+        crate::recovery::extract(&mut view, file, &mut extracted, u64::MAX, |_| Ok(())).unwrap();
+        assert_eq!(extracted, content);
+        assert!(view.seek(SeekFrom::End(1)).is_err());
+        drop(view);
+        let mut changed = bytes.clone();
+        changed[start + 77] ^= 1;
+        assert!(candidate_reader(
+            Cursor::new(changed),
+            bytes.len() as u64,
+            sector as u64,
+            range,
+            item,
+            &cancel
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn backup_boot_search_ignores_duplicate_conflicting_and_truncated_copies() {
+    let sector = 512;
+    // The extra tail would fit a wrongly interpreted copy with a shifted start.
+    let healthy = fat_view::exfat(sector);
+    let mut disk = vec![0; 4096];
+    disk.extend_from_slice(&healthy);
+    disk.resize(disk.len() + 64 * sector, 0);
+    let candidates = findings(disk.clone(), sector as u64);
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].can_restore && candidates[0].reconstruction().is_none());
+    disk[4096 + 100] ^= 1;
+    assert!(findings(disk, sector as u64).is_empty());
+    let mut damaged = healthy;
+    damaged[..12 * sector].fill(0);
+    let range = range(damaged.len());
+    let anchor = backup_boot::hint(&damaged[12 * sector..], 12 * sector as u64, range).unwrap();
+    let cancel = AtomicBool::new(false);
+    let error = backup_boot::probe(
+        &mut Cursor::new(&damaged),
+        sector as u64,
+        anchor,
+        &cancel,
+        &mut 0,
+    )
+    .unwrap_err();
+    assert!(error.contains("搜索预算"));
+    damaged.truncate(damaged.len() - sector);
+    assert!(findings(damaged, sector as u64).is_empty());
 }
 
 #[test]

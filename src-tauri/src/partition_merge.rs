@@ -11,6 +11,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[path = "partition_merge_indexes.rs"]
+mod indexes;
+#[path = "partition_merge_metadata.rs"]
+pub(crate) mod metadata;
 #[cfg(windows)]
 #[path = "partition_merge_output_windows.rs"]
 pub(crate) mod output;
@@ -52,6 +56,8 @@ pub(crate) struct Catalogue {
 #[derive(Debug)]
 pub(crate) struct Node {
     pub directory: bool,
+    pub index_compressed: bool,
+    pub link_version_flag: bool,
     pub attributes: u32,
     /// Creation, modified, and accessed FILETIME values.
     pub times: [u64; 3],
@@ -83,6 +89,7 @@ pub(crate) struct Stream {
     pub size: u64,
     pub sha256: [u8; 32],
     pub storage_flags: u16,
+    pub allocated_ranges: Vec<std::ops::Range<u64>>,
 }
 
 impl Catalogue {
@@ -138,12 +145,22 @@ impl Catalogue {
             return Err("复制时源文件记录或安全标识已变化。".into());
         }
         let mut sink = DigestWriter::new(output);
-        let done =
-            ntfs_streams::extract_for_merge(reader, &file, &stream.locator, &mut sink, |_| {
-                check(cancel)
-            })?;
+        let done = ntfs_streams::extract_for_merge(
+            reader,
+            &file,
+            &stream.locator,
+            &mut sink,
+            if stream.storage_flags == ntfs_streams::ENCRYPTED {
+                ntfs_streams::Scope::CloneEncrypted
+            } else if source.metadata.contains_key(&metadata::REPARSE) {
+                ntfs_streams::Scope::CloneReparse
+            } else {
+                ntfs_streams::Scope::Merge
+            },
+            |_| check(cancel),
+        )?;
         let digest: [u8; 32] = sink.digest.finalize().into();
-        if done != stream.size || digest != stream.sha256 {
+        if done != stream.payload_size() || digest != stream.sha256 {
             return Err("复制时源数据流 SHA-256 或字节数与合并清单不同。".into());
         }
         sink.output.flush().map_err(err)?;
@@ -162,6 +179,7 @@ impl Catalogue {
         if self.nodes.iter().any(|(id, node)| {
             current.nodes.get(id).is_none_or(|fresh| {
                 node.checkpoint != fresh.checkpoint
+                    || node.index_compressed != fresh.index_compressed
                     || node.root_txf_data != fresh.root_txf_data
                     || node.security.id() != fresh.security.id()
                     || !node
@@ -179,6 +197,14 @@ impl Catalogue {
     /// Compare an independently reread copy. File record numbers and security
     /// table IDs legitimately change across NTFS volumes.
     pub(crate) fn verify_copy(&self, copy: &Self) -> Result<(), String> {
+        self.verify_contents(copy, false)
+    }
+
+    pub(crate) fn verify_file_clone(&self, copy: &Self) -> Result<(), String> {
+        self.verify_contents(copy, true)
+    }
+
+    fn verify_contents(&self, copy: &Self, preserve_storage: bool) -> Result<(), String> {
         let mut identity = BTreeMap::new();
         let mut used = BTreeSet::new();
         if self.names.len() != copy.names.len() || self.short_names.len() != copy.short_names.len()
@@ -204,6 +230,7 @@ impl Catalogue {
             if source.directory != target.directory
                 || source.attributes != target.attributes
                 || source.times != target.times
+                || source.link_version_flag != target.link_version_flag
                 || source.metadata != target.metadata
                 || !source_security.agrees(target_security)
                 || !source
@@ -213,6 +240,16 @@ impl Catalogue {
                     .eq(target.streams.iter().map(Stream::content))
             {
                 return Err("目标文件的数据流、属性、时间或安全描述符与源不同。".into());
+            }
+            if preserve_storage
+                && (source.index_compressed != target.index_compressed
+                    || !source
+                        .streams
+                        .iter()
+                        .map(|s| &s.allocated_ranges)
+                        .eq(target.streams.iter().map(|s| &s.allocated_ranges)))
+            {
+                return Err("目标 NTFS 的目录压缩标志或稀疏分配范围与源不同。".into());
             }
         }
         if self
@@ -227,6 +264,10 @@ impl Catalogue {
 }
 
 impl Stream {
+    pub(crate) fn payload_size(&self) -> u64 {
+        ntfs_streams::payload_size(self.size, self.storage_flags)
+    }
+
     fn content(&self) -> (&[u8], u64, u16, &[u8; 32]) {
         (
             &self.locator.name,
@@ -240,6 +281,7 @@ impl Stream {
 struct DigestWriter<W> {
     output: W,
     digest: Sha256,
+    wof: Option<metadata::WofOffsets>,
 }
 
 impl<W> DigestWriter<W> {
@@ -247,6 +289,7 @@ impl<W> DigestWriter<W> {
         Self {
             output,
             digest: Sha256::new(),
+            wof: None,
         }
     }
 }
@@ -254,6 +297,9 @@ impl<W> DigestWriter<W> {
 impl<W: Write> Write for DigestWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let written = self.output.write(bytes)?;
+        if let Some(table) = &mut self.wof {
+            table.consume(&bytes[..written])?;
+        }
         self.digest.update(&bytes[..written]);
         Ok(written)
     }
@@ -284,6 +330,22 @@ struct Record {
 pub(crate) fn catalogue<R: Read + Seek>(
     reader: &mut R,
     subtree: Option<(RecordId, &[u16])>,
+    cancel: &AtomicBool,
+) -> Result<Catalogue, String> {
+    inspect_catalogue(reader, subtree, false, cancel)
+}
+
+pub(crate) fn catalogue_file_clone<R: Read + Seek>(
+    reader: &mut R,
+    cancel: &AtomicBool,
+) -> Result<Catalogue, String> {
+    inspect_catalogue(reader, None, true, cancel)
+}
+
+fn inspect_catalogue<R: Read + Seek>(
+    reader: &mut R,
+    subtree: Option<(RecordId, &[u16])>,
+    file_clone: bool,
     cancel: &AtomicBool,
 ) -> Result<Catalogue, String> {
     crate::ntfs_allocation::inspect(reader, cancel)?;
@@ -336,9 +398,21 @@ pub(crate) fn catalogue<R: Read + Seek>(
         if file.is_directory() {
             verify_index(&mut reader, &file, &namespace, subtree.is_none(), cancel)?;
         }
-        let node = inspect_node(&mut reader, &file, &mut budget, cancel)
+        let node = inspect_node(&mut reader, &file, &mut budget, file_clone, cancel)
             .map_err(|error| format!("NTFS 文件记录 {}：{error}", id.0))?;
+        if node.metadata.contains_key(&metadata::REPARSE)
+            && (id == root_id
+                || namespace
+                    .children
+                    .get(&id)
+                    .is_some_and(|entries| !entries.is_empty()))
+        {
+            return Err("NTFS 重解析点位于卷根或具有实际子项。".into());
+        }
         nodes.insert(id, node);
+    }
+    if file_clone {
+        indexes::verify(&mut reader, &extend, &records, &mut nodes, cancel)?;
     }
     let ids = nodes
         .values()
@@ -772,7 +846,7 @@ fn reserved_root_object(number: u64, name: &[u16]) -> bool {
     name.iter().copied().eq(expected.encode_utf16())
 }
 
-fn validate_component(name: &[u16]) -> Result<(), String> {
+pub(crate) fn validate_component(name: &[u16]) -> Result<(), String> {
     if name.is_empty()
         || name.len() > 255
         || name.last().is_some_and(|ch| matches!(ch, 0x20 | 0x2e))
@@ -812,6 +886,20 @@ fn is_extend_metadata(
         let Some(item) = records.get(&id) else {
             return false;
         };
+        if !item.attributes.contains(NtfsFileAttributeFlags::SYSTEM) {
+            // Windows also formats the TxF base log and CLFS log containers
+            // with ARCHIVE alone. Bind their exact names below both reserved
+            // directories, whose indexes are verified like other directories.
+            let Some(name) = txf_log_primary_name(&item.names) else {
+                return false;
+            };
+            let parent = RecordId(name.parent.0, name.parent.1);
+            return !item.directory
+                && item.attributes == NtfsFileAttributeFlags::ARCHIVE
+                && system_directory_parent(parent, "$TxfLog", records)
+                    .and_then(|id| system_directory_parent(id, "$RmMetadata", records))
+                    == Some(extend);
+        }
         let [name] = item.names.as_slice() else {
             return false;
         };
@@ -819,17 +907,6 @@ fn is_extend_metadata(
             return false;
         }
         let parent = RecordId(name.parent.0, name.parent.1);
-        if !item.attributes.contains(NtfsFileAttributeFlags::SYSTEM) {
-            // Windows also formats the TxF base log and CLFS log containers
-            // with ARCHIVE alone. Bind their exact names below both reserved
-            // directories, whose indexes are verified like other directories.
-            return !item.directory
-                && item.attributes == NtfsFileAttributeFlags::ARCHIVE
-                && txf_log_name(&name.display())
-                && system_directory_parent(parent, "$TxfLog", records)
-                    .and_then(|id| system_directory_parent(id, "$RmMetadata", records))
-                    == Some(extend);
-        }
         if parent == extend {
             return matches!(
                 name.display().as_str(),
@@ -839,6 +916,28 @@ fn is_extend_metadata(
         id = parent;
     }
     false
+}
+
+pub(crate) fn txf_log_primary_name(names: &[ntfs_names::Name]) -> Option<&ntfs_names::Name> {
+    let mut normal = names.iter().filter(|name| name.namespace != 2);
+    let name = normal.next()?;
+    if normal.next().is_some() || !txf_log_name(&name.display()) {
+        return None;
+    }
+    if names.len() == 1 {
+        return Some(name);
+    }
+    let alias = names.iter().find(|entry| entry.namespace == 2)?;
+    if names.len() != 2 || name.namespace != 1 || alias.parent != name.parent {
+        return None;
+    }
+    let alias_units = alias
+        .raw
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    metadata::validate_short_name(&alias_units).ok()?;
+    Some(name)
 }
 
 fn txf_log_name(name: &str) -> bool {
@@ -870,13 +969,16 @@ fn inspect_node<R: Read + Seek>(
     reader: &mut R,
     file: &NtfsFile<'_>,
     budget: &mut u64,
+    file_clone: bool,
     cancel: &AtomicBool,
 ) -> Result<Node, String> {
     let info = file.info().map_err(err)?;
     let mut attributes = None;
     let mut inline_security = None;
     let mut root_txf_data = None;
-    if crate::ntfs_compression::is_reparse(reader, file)? {
+    let mut index_compressed = false;
+    let mut version = 0;
+    if !file_clone && crate::ntfs_compression::is_reparse(reader, file)? {
         return Err("合并无法迁移重解析点、离线文件或 EFS 加密文件。".into());
     }
     let mut metadata = BTreeMap::new();
@@ -905,7 +1007,13 @@ fn inspect_node<R: Read + Seek>(
                     .read_exact(reader, &mut raw[..length])
                     .map_err(err)?;
                 attributes = Some(u32::from_le_bytes(raw[32..36].try_into().unwrap()));
-                if raw[36..length.min(52)].iter().any(|byte| *byte != 0) {
+                version = u32::from_le_bytes(raw[40..44].try_into().unwrap());
+                if raw[36..40]
+                    .iter()
+                    .chain(&raw[44..length.min(52)])
+                    .any(|byte| *byte != 0)
+                    || version != 0 && (!file_clone || version != 0x20)
+                {
                     return Err("文件使用了暂未迁移的 NTFS 版本、类或配额标识。".into());
                 }
             }
@@ -937,6 +1045,27 @@ fn inspect_node<R: Read + Seek>(
                     .map_err(err)?;
                 root_txf_data = Some(payload);
             }
+            NtfsAttributeType::LoggedUtilityStream
+                if file_clone
+                    && ntfs_streams::attribute_name(attr.record_bytes())? == metadata::EFS_NAME =>
+            {
+                let size = attr.value_length();
+                if !(85..=metadata::EFS_LIMIT).contains(&size)
+                    || !attr.flags().is_empty()
+                    || size > *budget
+                    || metadata.contains_key(&metadata::EFS)
+                {
+                    return Err("NTFS $EFS 元数据重复或范围无效。".into());
+                }
+                let mut payload = vec![0; size as usize];
+                attr.value(reader)
+                    .map_err(err)?
+                    .read_exact(reader, &mut payload)
+                    .map_err(err)?;
+                metadata::validate_efs(&payload)?;
+                metadata.insert(metadata::EFS, payload);
+                *budget -= size;
+            }
             NtfsAttributeType::SecurityDescriptor => {
                 let size = attr.value_length();
                 if attr.name_length() != 0
@@ -960,15 +1089,32 @@ fn inspect_node<R: Read + Seek>(
             | NtfsAttributeType::Bitmap
                 if file.is_directory()
                     && ntfs_streams::attribute_name(attr.record_bytes())?
-                        == [b'$', 0, b'I', 0, b'3', 0, b'0', 0] => {}
+                        == [b'$', 0, b'I', 0, b'3', 0, b'0', 0] =>
+            {
+                if ty == NtfsAttributeType::IndexRoot {
+                    index_compressed = attr.flags().bits() & ntfs_streams::LZNT1 != 0;
+                }
+            }
             NtfsAttributeType::ObjectId
             | NtfsAttributeType::EAInformation
-            | NtfsAttributeType::EA => {
+            | NtfsAttributeType::EA
+            | NtfsAttributeType::ReparsePoint
+                if ty != NtfsAttributeType::ReparsePoint || file_clone =>
+            {
                 let len = attr.value_length();
+                let charge = if ty == NtfsAttributeType::ObjectId && file_clone {
+                    64
+                } else {
+                    len
+                };
                 if attr.name_length() != 0
                     || !attr.flags().is_empty()
                     || len > 65536
-                    || len > *budget
+                    || charge > *budget
+                    || ty == NtfsAttributeType::ObjectId
+                        && file_clone
+                        && (!attr.is_resident() || !matches!(len, 16 | 64))
+                    || ty == NtfsAttributeType::ReparsePoint && len > metadata::REPARSE_LIMIT
                 {
                     return Err("要迁移的 NTFS 扩展元数据范围无效。".into());
                 }
@@ -980,7 +1126,7 @@ fn inspect_node<R: Read + Seek>(
                 if metadata.insert(ty as u32, contents).is_some() {
                     return Err("NTFS 扩展元数据属性重复。".into());
                 }
-                *budget -= len;
+                *budget -= charge;
             }
             _ => return Err(format!("合并无法完整核对 NTFS 文件属性 {ty}。")),
         }
@@ -989,35 +1135,108 @@ fn inspect_node<R: Read + Seek>(
         return Err("NTFS 文件标准属性缺失或重复。".into());
     }
     let attributes = attributes.ok_or("缺少 NTFS 文件属性标志。")?;
-    if attributes & 0x5400 != 0 {
+    let reparse = metadata.get(&metadata::REPARSE);
+    let encrypted = attributes & metadata::ENCRYPTED_ATTRIBUTE != 0;
+    let has_efs = metadata.contains_key(&metadata::EFS);
+    if attributes & 0x1000 != 0
+        || (attributes & metadata::REPARSE_ATTRIBUTE != 0) != reparse.is_some()
+        || has_efs && !encrypted
+        || encrypted
+            && (!file_clone
+                || reparse.is_some()
+                || index_compressed
+                || attributes & 0x0a00 != 0
+                || !file.is_directory() && !has_efs)
+    {
         return Err("合并无法迁移重解析点、离线文件或 EFS 加密文件。".into());
     }
+    let tag = reparse
+        .map(|data| metadata::reparse_tag(data, file.is_directory()))
+        .transpose()?;
+    let wof = tag == Some(metadata::WOF_TAG);
+    if version != 0 && (tag.is_none() || wof) {
+        return Err("NTFS 非链接记录的标准信息版本字段非零。".into());
+    }
+    let stream_scope = if encrypted && !file.is_directory() {
+        ntfs_streams::Scope::CloneEncrypted
+    } else if tag.is_some() {
+        ntfs_streams::Scope::CloneReparse
+    } else {
+        ntfs_streams::Scope::Merge
+    };
+    let entries = ntfs_streams::enumerate_for_merge(reader, file, stream_scope)?;
+    let invalid_wof = "NTFS WOF 缺少完整的卷内压缩数据流或稀疏占位数据流。";
+    let wof_size = if wof {
+        Some(
+            entries
+                .iter()
+                .find(|stream| stream.identity.name.is_empty())
+                .filter(|stream| {
+                    stream.storage_flags == ntfs_streams::SPARSE
+                        && stream.initialized == stream.size
+                        && stream.size != 0
+                })
+                .ok_or(invalid_wof)?
+                .size,
+        )
+    } else {
+        None
+    };
+    let mut found_wof = false;
     let mut streams = Vec::new();
-    for stream in ntfs_streams::enumerate_for_merge(reader, file)? {
+    for stream in entries {
         check(cancel)?;
         if let Some(reason) = stream.reason {
             return Err(reason);
         }
         let mut hash = DigestWriter::new(io::sink());
-        let len =
-            ntfs_streams::extract_for_merge(reader, file, &stream.identity, &mut hash, |_| {
-                check(cancel)
-            })?;
-        if len != stream.size {
+        if let Some(size) = wof_size.filter(|_| stream.identity.name == metadata::WOF_STREAM) {
+            if stream.storage_flags != 0 || stream.initialized != stream.size {
+                return Err(invalid_wof.into());
+            }
+            let chunk = metadata::wof_chunk_size(reparse.ok_or(invalid_wof)?)?;
+            hash.wof = Some(metadata::WofOffsets::new(size, stream.size, chunk)?);
+            found_wof = true;
+        }
+        let (len, allocated_ranges) = ntfs_streams::inspect_for_merge(
+            reader,
+            file,
+            &stream.identity,
+            &mut hash,
+            stream_scope,
+            |_| check(cancel),
+        )?;
+        if len != ntfs_streams::payload_size(stream.size, stream.storage_flags) {
             return Err("NTFS 数据流实际字节数与清单不一致。".into());
         }
+        if wof && stream.identity.name.is_empty() && !allocated_ranges.is_empty() {
+            return Err(invalid_wof.into());
+        }
+        if let Some(table) = hash.wof {
+            table.finish()?;
+        }
+        *budget = budget
+            .checked_sub((allocated_ranges.len() * size_of::<std::ops::Range<u64>>()) as u64)
+            .ok_or("NTFS 稀疏数据流分配范围超出清单容量。")?;
         streams.push(Stream {
             locator: stream.identity,
             size: stream.size,
             sha256: hash.digest.finalize().into(),
             storage_flags: stream.storage_flags,
+            allocated_ranges,
         });
+    }
+    if wof && !found_wof {
+        return Err(invalid_wof.into());
     }
     if !file.is_directory() && !streams.iter().any(|stream| stream.locator.name.is_empty()) {
         return Err("普通 NTFS 文件的未命名数据流缺失。".into());
     }
     Ok(Node {
         directory: file.is_directory(),
+        index_compressed,
+        // Windows stores 0x20 in this word for some standard reparse links.
+        link_version_flag: version == 0x20,
         attributes,
         times: [
             info.creation_time().nt_timestamp(),

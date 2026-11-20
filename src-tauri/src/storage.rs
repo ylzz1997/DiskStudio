@@ -9,7 +9,7 @@ const DISK_QUERY: &str = "SELECT Number,SerialNumber,UniqueId,FriendlyName,Size,
 #[cfg(windows)]
 const PARTITION_QUERY: &str = "SELECT __PATH,DiskNumber,PartitionNumber,DriveLetter,Offset,Size,Guid,GptType,MbrType,IsSystem,IsBoot,IsHidden FROM MSFT_Partition";
 #[cfg(windows)]
-const VOLUME_QUERY: &str = "SELECT __PATH,DriveLetter,FileSystemLabel,FileSystem,Size,SizeRemaining,HealthStatus FROM MSFT_Volume";
+const VOLUME_QUERY: &str = "SELECT __PATH,UniqueId,DriveLetter,FileSystemLabel,FileSystem,Size,SizeRemaining,HealthStatus FROM MSFT_Volume";
 #[cfg(windows)]
 const ASSOCIATION_QUERY: &str = "SELECT Partition,Volume FROM MSFT_PartitionToVolume";
 
@@ -53,6 +53,7 @@ struct RawPartition {
 struct RawVolume {
     #[serde(rename = "__PATH")]
     object_path: Option<String>,
+    unique_id: Option<String>,
     drive_letter: Option<String>,
     file_system_label: Option<String>,
     file_system: Option<String>,
@@ -116,6 +117,8 @@ pub struct LocalPartition {
     pub volume_label: Option<String>,
     pub available: Option<u64>,
     pub volume_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) encryption: Option<crate::bitlocker::State>,
     pub hidden: bool,
 }
 
@@ -151,7 +154,15 @@ pub fn read_snapshot() -> Result<Snapshot, String> {
             None
         }
     };
-    normalize_associated(disks, partitions, volumes, warnings, associations)
+    let encryption = crate::bitlocker::query().ok().map(|(_, rows)| rows);
+    normalize_associated(
+        disks,
+        partitions,
+        volumes,
+        warnings,
+        associations,
+        encryption.as_deref().unwrap_or_default(),
+    )
 }
 #[cfg(not(windows))]
 pub fn read_snapshot() -> Result<Snapshot, String> {
@@ -243,7 +254,7 @@ fn normalize(
     volumes: Vec<RawVolume>,
     warnings: Vec<String>,
 ) -> Result<Snapshot, String> {
-    normalize_associated(disks, partitions, volumes, warnings, None)
+    normalize_associated(disks, partitions, volumes, warnings, None, &[])
 }
 
 fn same_reference(a: &str, b: &str) -> bool {
@@ -346,6 +357,7 @@ fn normalize_associated(
     volumes: Vec<RawVolume>,
     mut warnings: Vec<String>,
     associations: Option<Vec<RawAssociation>>,
+    encryption: &[crate::bitlocker::Volume],
 ) -> Result<Snapshot, String> {
     if disks.len() > 256 || partitions.as_ref().is_some_and(|p| p.len() > 4096) {
         return Err("Windows 返回的存储对象数量超出显示范围。".into());
@@ -397,6 +409,22 @@ fn normalize_associated(
                     &volumes,
                     associations.as_deref(),
                 );
+                let encryption = associations
+                    .as_ref()
+                    .and(volume)
+                    .and_then(|v| v.unique_id.as_deref())
+                    .and_then(|key| {
+                        let id = crate::bitlocker::volume_id(key)?;
+                        let unique = volumes.iter().filter(|v| {
+                            v.unique_id.as_deref().and_then(crate::bitlocker::volume_id) == Some(id)
+                        }).count() == 1;
+                        if unique {
+                            crate::bitlocker::associated(encryption, key)
+                        } else {
+                            None
+                        }
+                    })
+                    .and_then(crate::bitlocker::Volume::state);
                 let space = volume
                     .and_then(|v| v.size.zip(v.size_remaining))
                     .filter(|(size, remaining)| *size > 0 && *size <= p.size && remaining <= size);
@@ -446,6 +474,7 @@ fn normalize_associated(
                         Some(2 | 3) => "需修复",
                         _ => "未提供",
                     },
+                    encryption,
                     hidden: p.is_hidden.unwrap_or(false),
                 });
             }
@@ -519,6 +548,48 @@ fn normalize_associated(
 mod tests {
     use super::*;
     const M: u64 = 1024 * 1024;
+
+    #[test]
+    fn bitlocker_display_requires_unique_identity_and_storage_associations() {
+        let id = r"\\?\Volume{bb824775-90ae-4db9-9754-59243b252bc5}";
+        let encryption = [serde_json::from_value(serde_json::json!({
+            "DeviceID": id, "ConversionStatus": 1, "__PATH": "providerBitLockerPath"
+        })).unwrap()];
+        for (linked, duplicate) in [(true, false), (true, true), (false, false)] {
+            let part = RawPartition {
+                object_path: Some("p1".into()),
+                drive_letter: Some("T".into()),
+                ..partition()
+            };
+            let mut volumes = vec![RawVolume {
+                object_path: Some("v1".into()),
+                unique_id: Some(id.into()),
+                drive_letter: Some("T".into()),
+                ..Default::default()
+            }];
+            if duplicate {
+                volumes.push(RawVolume {
+                    object_path: Some("v2".into()),
+                    unique_id: Some(id.to_ascii_uppercase()),
+                    ..Default::default()
+                });
+            }
+            let snapshot = normalize_associated(
+                vec![disk()],
+                Some(vec![part]),
+                volumes,
+                vec![],
+                linked.then(|| vec![RawAssociation { partition: "p1".into(), volume: "v1".into() }]),
+                &encryption,
+            ).unwrap();
+            let part = &snapshot.disks[0].partitions[0];
+            assert_eq!(part.base.fs, "未知");
+            assert_eq!(
+                part.encryption,
+                (linked && !duplicate).then_some(crate::bitlocker::State::Encrypted),
+            );
+        }
+    }
     #[test]
     fn local_wmi_reference_alias_preserves_namespace_class_and_key() {
         assert!(same_reference(
@@ -560,6 +631,7 @@ mod tests {
             vec![v],
             vec![],
             Some(vec![link]),
+            &[],
         )
         .unwrap();
         let p = &s.disks[0].partitions[0];

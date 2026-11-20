@@ -193,13 +193,29 @@ pub fn linux(p: &Partition) -> bool {
 }
 // A Linux GPT type is only eligibility for explicit inspection, not proof of an Ext filesystem.
 pub fn ext_candidate(d: &Disk, all: &[&Partition], p: &Partition) -> bool {
+    linux_data_candidate(d, all, p) && online_linux_partition(p)
+}
+
+// Eligibility only. The clone must corroborate disk offline state and GPT
+// protection metadata on the opened device before using the partition.
+pub(crate) fn linux_clone_candidate(d: &Disk, all: &[&Partition], p: &Partition) -> bool {
+    d.partition_style == Some(2)
+        && linux_data_candidate(d, all, p)
+        && match d.is_offline {
+            Some(true) => true,
+            Some(false) => online_linux_partition(p),
+            None => false,
+        }
+}
+
+fn linux_data_candidate(d: &Disk, all: &[&Partition], p: &Partition) -> bool {
     d.is_boot == Some(false)
         && d.is_system == Some(false)
         && all
             .iter()
             .all(|p| p.is_boot == Some(false) && p.is_system == Some(false))
         && p.gpt_type.as_deref().map(guid).as_deref() == Some(LINUX_DATA)
-        && deletable(p)
+        && unprotected_linux_partition(p)
         && p.drive_letter
             .as_deref()
             .is_none_or(|s| clean(s).is_empty())
@@ -231,19 +247,23 @@ pub fn sector_writable(d: &Disk, parts: &[&Partition], selected: &Partition) -> 
 }
 pub fn deletable(p: &Partition) -> bool {
     if linux(p) {
-        // Non-Windows GPT types are hidden from Mount Manager. Windows reports
-        // the basic-data-only read-only/shadow-copy attributes as NULL for these
-        // types. Permit that specific representation, never an explicit true.
-        // Disk-level read-only/offline checks and identity/layout checks still apply.
-        return p.is_boot == Some(false)
-            && p.is_system == Some(false)
-            && p.is_offline == Some(false)
-            && p.is_hidden.is_some()
-            && p.is_read_only != Some(true)
-            && p.is_shadow_copy != Some(true)
-            && p.guid.as_deref().is_some_and(|s| !clean(s).is_empty());
+        return unprotected_linux_partition(p) && online_linux_partition(p);
     }
     formattable(p)
+}
+
+fn online_linux_partition(p: &Partition) -> bool {
+    p.is_hidden.is_some() && p.is_offline == Some(false)
+}
+
+fn unprotected_linux_partition(p: &Partition) -> bool {
+    // Windows can return NULL for the Windows-volume-only flags on a Linux
+    // GPT entry. Any explicit protection flag still rejects the operation.
+    p.is_boot == Some(false)
+        && p.is_system == Some(false)
+        && p.is_read_only != Some(true)
+        && p.is_shadow_copy != Some(true)
+        && p.guid.as_deref().is_some_and(|s| !clean(s).is_empty())
 }
 pub fn free_ranges(disk: &Disk, parts: &[&Partition]) -> Vec<Extent> {
     if disk.partition_style != Some(2) || disk.size > (1u64 << 53) - 1 {
@@ -416,6 +436,45 @@ pub fn validate(disk: &Disk, partitions: &[Partition], action: &Action) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn btrfs_clone_accepts_a_verified_offline_linux_data_partition() {
+        let mut disk = disks()[1].clone();
+        disk.partition_style = Some(2);
+        let mut partition = part();
+        partition.gpt_type = Some(LINUX_DATA.into());
+        partition.is_hidden = Some(true);
+        partition.is_read_only = None;
+        partition.is_shadow_copy = None;
+        partition.is_offline = Some(true);
+        let eligible = |disk: &Disk, part: &Partition| linux_clone_candidate(disk, &[part], part);
+        assert!(!eligible(&disk, &partition));
+        disk.is_offline = Some(true);
+        assert!(eligible(&disk, &partition));
+        assert!(!ext_candidate(&disk, &[&partition], &partition));
+        partition.is_offline = None;
+        partition.is_hidden = None;
+        assert!(eligible(&disk, &partition));
+        assert!(!ext_candidate(&disk, &[&partition], &partition));
+        assert!(!deletable(&partition));
+        disk.is_offline = Some(false);
+        assert!(!eligible(&disk, &partition));
+        disk.is_offline = None;
+        assert!(!eligible(&disk, &partition));
+        disk.is_offline = Some(true);
+        partition.is_boot = None;
+        assert!(!eligible(&disk, &partition));
+        partition.is_boot = Some(false);
+        partition.is_read_only = Some(true);
+        assert!(!eligible(&disk, &partition));
+        partition.is_read_only = None;
+        partition.is_shadow_copy = Some(true);
+        assert!(!eligible(&disk, &partition));
+        partition.is_shadow_copy = None;
+        partition.gpt_type = Some(LINUX_SWAP.into());
+        assert!(!eligible(&disk, &partition));
+    }
+
     #[test]
     fn ext_format_validates_each_generation_and_sector_geometry() {
         use super::super::ExtFileSystem;

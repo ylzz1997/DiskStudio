@@ -6,11 +6,23 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Seek, SeekFrom, Write},
+    ops::Range,
 };
 
 const MAX_ATTRIBUTES: usize = 4096;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RUNS: usize = 262144;
+pub(crate) const LZNT1: u16 = 0x0001;
+pub(crate) const ENCRYPTED: u16 = 0x4000;
+pub(crate) const SPARSE: u16 = 0x8000;
+
+pub(crate) fn payload_size(size: u64, flags: u16) -> u64 {
+    if flags == ENCRYPTED {
+        size.next_multiple_of(512)
+    } else {
+        size
+    }
+}
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -80,9 +92,11 @@ pub fn attribute_name(b: &[u8]) -> Result<&[u8], String> {
 type Record = ((u64, u16, u16), Vec<u8>);
 type Reference = (u64, u16, u16, u64, Vec<u8>);
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Scope {
+pub(crate) enum Scope {
     Recovery,
     Merge,
+    CloneReparse,
+    CloneEncrypted,
 }
 
 impl Scope {
@@ -93,7 +107,9 @@ impl Scope {
     ) -> Result<u64, String> {
         match self {
             Self::Recovery => crate::ntfs_names::base_reference(reader, file),
-            Self::Merge => crate::ntfs_names::merge_base_reference(reader, file),
+            Self::Merge | Self::CloneReparse | Self::CloneEncrypted => {
+                crate::ntfs_names::merge_base_reference(reader, file)
+            }
         }
     }
 }
@@ -118,13 +134,13 @@ fn references(b: &[u8], scope: Scope) -> Result<Vec<Reference>, String> {
         {
             return Err("数据流属性列表边界无效".into());
         }
-        if e[..4] == 0x80u32.to_le_bytes() && (n > 0 || scope == Scope::Merge) {
+        if e[..4] == 0x80u32.to_le_bytes() && (n > 0 || scope != Scope::Recovery) {
             let name = if n == 0 {
                 Vec::new()
             } else {
                 e[start..start + n].to_vec()
             };
-            validate_name(&name, scope == Scope::Merge)?;
+            validate_name(&name, scope != Scope::Recovery)?;
             let id = u64le(e, 16);
             let r = (
                 id & 0x0000_ffff_ffff_ffff,
@@ -161,7 +177,7 @@ fn records<R: Read + Seek>(
         }
         let a = a.map_err(err)?;
         match a.ty().map_err(err)? {
-            NtfsAttributeType::Data if a.name_length() != 0 || scope == Scope::Merge => {
+            NtfsAttributeType::Data if a.name_length() != 0 || scope != Scope::Recovery => {
                 attribute_name(a.record_bytes())?;
                 let id = (
                     file.file_record_number(),
@@ -257,6 +273,7 @@ pub struct Stream {
     pub size: u64,
     pub reason: Option<String>,
     pub(crate) storage_flags: u16,
+    pub(crate) initialized: u64,
 }
 pub fn enumerate<R: Read + Seek>(
     reader: &mut R,
@@ -268,8 +285,9 @@ pub fn enumerate<R: Read + Seek>(
 pub(crate) fn enumerate_for_merge<R: Read + Seek>(
     reader: &mut R,
     file: &NtfsFile<'_>,
+    scope: Scope,
 ) -> Result<Vec<Stream>, String> {
-    enumerate_scoped(reader, file, Scope::Merge)
+    enumerate_scoped(reader, file, scope)
 }
 
 fn enumerate_scoped<R: Read + Seek>(
@@ -290,7 +308,8 @@ fn enumerate_scoped<R: Read + Seek>(
     if groups.is_empty() {
         return Ok(vec![]);
     }
-    let reparse = crate::ntfs_compression::is_reparse(reader, file)?;
+    let reparse =
+        scope != Scope::CloneReparse && crate::ntfs_compression::is_reparse(reader, file)?;
     let mut result = vec![];
     for (name, records) in groups {
         let first = records
@@ -313,6 +332,11 @@ fn enumerate_scoped<R: Read + Seek>(
             size,
             reason,
             storage_flags: u16le(&first.1, 12),
+            initialized: if first.1[8] == 0 {
+                size
+            } else {
+                u64le(&first.1, 56)
+            },
         });
     }
     Ok(result)
@@ -374,7 +398,10 @@ fn plan<R: Read + Seek>(
     sorted.sort_by_key(|(_, b)| if b[8] == 0 { 0 } else { u64le(b, 16) });
     let b = &sorted[0].1;
     let flags = u16le(b, 12);
-    if flags & !0x8001 != 0 {
+    let encrypted = scope == Scope::CloneEncrypted;
+    if encrypted && (flags != ENCRYPTED || b[8] != 1)
+        || !encrypted && flags & !(SPARSE | LZNT1) != 0
+    {
         return Err("EFS 或未知压缩方法的数据流暂不支持".into());
     }
     if b[8] == 0 {
@@ -386,7 +413,7 @@ fn plan<R: Read + Seek>(
             usize::from(u16le(b, 10)) + name.len()
         };
         if sorted.len() != 1
-            || flags != 0
+            || flags & !LZNT1 != 0
             || start < name_end
             || start > b.len()
             || size > b.len().saturating_sub(start)
@@ -429,9 +456,46 @@ fn plan<R: Read + Seek>(
     } else {
         None
     };
-    if size > 1 << 43 || initialized > size {
+    if size > 1 << 43 || initialized > size || encrypted && initialized != size {
         return Err("数据流容量无效".into());
     }
+    if encrypted && size == 0 {
+        let end_of_name = if name.is_empty() {
+            64
+        } else {
+            usize::from(u16le(b, 10)) + name.len()
+        };
+        let offset = usize::from(u16le(b, 32));
+        if sorted.len() != 1
+            || allocated != 0
+            || u64le(b, 16) != 0
+            || u64le(b, 24) != u64::MAX
+            || offset < end_of_name
+            || offset % 8 != 0
+            || b.get(offset) != Some(&0)
+        {
+            return Err("空 EFS 数据流的映射无效".into());
+        }
+        return Ok(Plan {
+            size: 0,
+            initialized: 0,
+            runs: vec![],
+            content: Content::Plain,
+        });
+    }
+    let logical_clusters = size.div_ceil(cluster);
+    let plain_coverage = if flags & SPARSE != 0 && unit == 4 {
+        logical_clusters.div_ceil(16) * 16
+    } else {
+        logical_clusters
+    };
+    // A sparse stream can describe more virtual clusters than fit on disk.
+    // Its actual allocated clusters still have to fit inside this volume.
+    let virtual_limit = if flags == SPARSE {
+        plain_coverage
+    } else {
+        volume / cluster
+    };
     let mut runs = vec![];
     let mut vcn = 0u64;
     for (_, b) in sorted {
@@ -476,8 +540,8 @@ fn plan<R: Read + Seek>(
             at += length;
             let count = u64::from_le_bytes(len);
             if count == 0
-                || count > volume / cluster
-                || vcn.checked_add(count).is_none_or(|v| v > volume / cluster)
+                || count > virtual_limit
+                || vcn.checked_add(count).is_none_or(|v| v > virtual_limit)
             {
                 return Err("数据流虚拟簇范围无效".into());
             }
@@ -511,14 +575,8 @@ fn plan<R: Read + Seek>(
             return Err("数据流运行列表范围不完整".into());
         }
     }
-    let logical_clusters = size.div_ceil(cluster);
-    let plain_coverage = if flags & 0x8000 != 0 && unit == 4 {
-        logical_clusters.div_ceil(16) * 16
-    } else {
-        logical_clusters
-    };
-    let ordinary_preallocation = scope == Scope::Merge && flags == 0;
-    let unpadded_sparse = scope == Scope::Merge && flags == 0x8000 && vcn == logical_clusters;
+    let ordinary_preallocation = scope != Scope::Recovery && (flags == 0 || encrypted);
+    let unpadded_sparse = scope != Scope::Recovery && flags == SPARSE && vcn == logical_clusters;
     if vcn < logical_clusters
         || flags & 1 == 0 && vcn != plain_coverage && !ordinary_preallocation && !unpadded_sparse
         || allocated != vcn * cluster
@@ -543,9 +601,10 @@ fn plan<R: Read + Seek>(
     } else {
         Content::Plain
     };
+    let size = payload_size(size, flags);
     Ok(Plan {
         size,
-        initialized,
+        initialized: if encrypted { size } else { initialized },
         runs,
         content,
     })
@@ -603,7 +662,16 @@ pub fn extract<R: Read + Seek, W: Write>(
     limit: u64,
     tick: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<u64, String> {
-    extract_scoped(reader, file, identity, out, limit, tick, Scope::Recovery)
+    extract_scoped(
+        reader,
+        file,
+        identity,
+        out,
+        limit,
+        tick,
+        Scope::Recovery,
+        None,
+    )
 }
 
 pub(crate) fn extract_for_merge<R: Read + Seek, W: Write>(
@@ -611,11 +679,35 @@ pub(crate) fn extract_for_merge<R: Read + Seek, W: Write>(
     file: &NtfsFile<'_>,
     identity: &Identity,
     out: &mut W,
+    scope: Scope,
     tick: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<u64, String> {
-    extract_scoped(reader, file, identity, out, u64::MAX, tick, Scope::Merge)
+    extract_scoped(reader, file, identity, out, u64::MAX, tick, scope, None)
 }
 
+pub(crate) fn inspect_for_merge<R: Read + Seek, W: Write>(
+    reader: &mut R,
+    file: &NtfsFile<'_>,
+    identity: &Identity,
+    out: &mut W,
+    scope: Scope,
+    tick: impl FnMut(u64) -> Result<(), String>,
+) -> Result<(u64, Vec<Range<u64>>), String> {
+    let mut allocated = Vec::new();
+    let size = extract_scoped(
+        reader,
+        file,
+        identity,
+        out,
+        u64::MAX,
+        tick,
+        scope,
+        Some(&mut allocated),
+    )?;
+    Ok((size, allocated))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn extract_scoped<R: Read + Seek, W: Write>(
     reader: &mut R,
     file: &NtfsFile<'_>,
@@ -624,9 +716,10 @@ fn extract_scoped<R: Read + Seek, W: Write>(
     limit: u64,
     mut tick: impl FnMut(u64) -> Result<(), String>,
     scope: Scope,
+    allocated: Option<&mut Vec<Range<u64>>>,
 ) -> Result<u64, String> {
-    validate_name(&identity.name, scope == Scope::Merge)?;
-    if crate::ntfs_compression::is_reparse(reader, file)? {
+    validate_name(&identity.name, scope != Scope::Recovery)?;
+    if scope != Scope::CloneReparse && crate::ntfs_compression::is_reparse(reader, file)? {
         return Err("重解析文件数据流暂不支持".into());
     }
     let records = records_for_identity(reader, file, identity, scope)?;
@@ -688,6 +781,19 @@ fn extract_scoped<R: Read + Seek, W: Write>(
         return Err("读取期间数据流记录或卷身份已变化".into());
     }
     tick(done)?;
+    if let Some(allocated) = allocated.filter(|_| u16le(&records[0].1, 12) == SPARSE) {
+        for run in &p.runs {
+            if run.physical.is_none() || run.start >= p.size {
+                continue;
+            }
+            let end = (run.start + run.bytes).min(p.size);
+            if let Some(previous) = allocated.last_mut().filter(|range| range.end == run.start) {
+                previous.end = end;
+            } else {
+                allocated.push(run.start..end);
+            }
+        }
+    }
     Ok(done)
 }
 fn records_for_identity<R: Read + Seek>(

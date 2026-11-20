@@ -205,6 +205,11 @@ where
         LittleEndian::read_u16(&self.slice[start..])
     }
 
+    /// Returns the complete on-disk entry, including optional child VCN.
+    pub fn record_bytes(&self) -> &'s [u8] {
+        self.slice
+    }
+
     /// Returns the structured value of the key of this Index Entry,
     /// or `None` if this Index Entry has no key.
     ///

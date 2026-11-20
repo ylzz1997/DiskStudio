@@ -72,9 +72,29 @@ RAID10 far 和 offset 验收使用 Ubuntu 的 `seed-lvm-raid10-layouts-4kn` 和 
 
 `build-sector-copy.ps1` 绑定已完成的桌面构建，只编译 4Kn 客体核对工具。将 `Sector-Copy-4Kn-Baseline.exe`、`Sector-Copy-4Kn-Verify.exe` 和 `Sector-Copy-4Kn-Verify-Report.exe` 与同一份 `DiskStudio.exe` 放入只读工具光盘。验证 payload SHA-256，运行 `node scripts/vm/lab.mjs preflight`，再在 DiskStudio-Test 中启动基线工具。
 
+镜像扇区复制使用 `build-sector-copy.ps1 -Image` 和 `start --4kn`。如 A 的 DSGLEFTKEEP 卷还没有盘符，先核对 A 的序列号和该 NTFS 卷身份，再在来宾中分配空闲盘符。Prepare 核对来宾身份和布局，在该卷建立 4Kn GPT 镜像，并核对 B/7 的测试范围全零。在「备份与克隆 → 浏览镜像」打开 Prepare 报告的文件，选择 4096 B 整盘镜像。打开「复制镜像扇区」，选择镜像中的分区，从相对 LBA 4 反向复制 8 个扇区到 B 的新文件。File 检查原镜像和导出字节。将同一来源范围复制至 B/7 相对 LBA 4608，核对预览后确认。Device 检查目标字节、脱机状态以及 GPT、客体系统盘布局和目标区外数据。三个工具报出的目标区外 SHA-256 应一致。
+
+损坏 NTFS 验收使用 `build-guest-checks.ps1 -NtfsReconstruction` 和默认的 512 字节 `start` 配置。把 `Ntfs-Reconstruct-Prepare.exe`、`Ntfs-Reconstruct-Inspect.exe`、`Ntfs-Reconstruct-Seed.exe`、`Ntfs-Reconstruct-Verify.exe` 与同一正式构建放入只读光盘，校验 SHA-256 后进行预检。Prepare 仅在 B 的固定全零空闲范围建立一次性 2 MiB 夹具，使主引导和 MFT 记录 0、1 损坏，并让 B 保持脱机。它在 A/2 建立 `DS-NTFS-Reconstruction` 目录和同内容镜像。若 Prepare 在创建分区后、写入夹具前停下，先运行只读的 Inspect 核对两盘 GPT、原生布局和目标范围是否全零。仅在 Inspect 全部通过后才使用 Seed 填充这个已创建的分区。
+
+使用「文件恢复 → 重建文件视图」选择工具报告的 B 分区，预览 `file-with-12345`，以平面布局导出到 A 的夹具目录。Verify 核对文件、清单中的重建依据、全部源字节、相邻扇区、两盘 GPT 和客体系统盘布局。镜像入口以 512 字节扇区的分区镜像打开 `damaged-ntfs.img`。备份入口从该 B 分区在 A 的同一目录创建并验证完整备份，再浏览备份。两个入口均用「重建文件视图」核对同名文件的预览字节 `31 32 33 34 35`。
+
+FAT32 和 exFAT 备用引导验收使用 `build-guest-checks.ps1 -FatReconstruction` 和默认 512 字节配置。只读工具光盘包含匹配的正式程序、`Fat-Reconstruct-Prepare.exe` 和 `Fat-Reconstruct-Verify.exe`。Prepare 在已验证的 A/2 卷上新建 `DS-FAT-Reconstruction` 和三个普通镜像文件。以 512 字节分区镜像分别打开 `damaged-fat32.img` 和 `damaged-exfat.img`，在「重建文件视图」预览 `FATVIEW.TXT` 和 `exfat-view.txt` 并核对文件字节。打开 `conflicting-exfat.img` 验证主备身份冲突会停止重建。Verify 独立比较三个完整源文件、两盘 GPT、客体系统盘布局及 B 的在线和只读状态。
+
+丢失分区的备用引导验收使用 `build-guest-checks.ps1 -LostBackupBoot` 和默认 512 字节配置。只读光盘包含同一正式程序、`Lost-Backup-Boot-Prepare.exe` 和 `Lost-Backup-Boot-Verify.exe`。Prepare 核对两盘 GPT、B 的原生布局和准确的全零空闲区，再锁定卷和脱机 B。仅在 13.5 GiB 起点的专用 48 MiB 范围写入三个未登记的损坏卷，A/2 上的 `DS-LostBackupBoot` 保存基线和导出文件。在正式程序中选 B，按 Prepare 报告的 LBA 和数量搜索。分别打开 NTFS、FAT32 和 exFAT 候选，并核对「仅浏览与提取」及预览。将 `FATVIEW.TXT` 和 `exfat-view.txt` 各导出一次至 A 的夹具目录。Verify 比较两个文件的字节、SHA-256 和备用引导清单，并复核 B 的完整夹具、填充区、相邻扇区、脱机状态、两盘 GPT 及来宾系统盘布局。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。
+
+读取故障验收用 `build-sector-copy.ps1 -Fault`，将 `Sector-Copy-Fault-4Kn-Prepare.exe` 和 `Sector-Copy-Fault-4Kn-Verify.exe` 与匹配的正式程序放入只读光盘。`node scripts/vm/lab.mjs start --4kn --sector-copy-fault` 先暂停来宾并核对 Test A 的完整块设备链，再启动。在 A 的 LBA 2232323 注入单个读取故障。Prepare 核对来宾身份与布局，将 A 脱机，并独立读取故障及相邻扇区。用原生界面从整盘 LBA 2232320 复制八个扇区。默认停止应保留 `ds-sector-strict.bin.partial`，正向填零且额外跳过数为 0 时保存 `ds-sector-forward.bin`，反向选 `LOSS` 和额外跳过两个扇区时保存 `ds-sector-reverse.bin`。在 B 的同一报告指定卷上保存反向 JSON 为 `ds-sector-reverse.json`。Verify 逐字节核对两个导出、严格模式的未完成状态、独立故障地址、报告和 GPT。
+
+文件续作和已填充复读用 `build-sector-copy.ps1 -Continuation`。在 4Kn 故障配置运行 `Sector-Continuation-4Kn-Prepare.exe`。以默认停止策略从 A 的整盘 LBA 2228227 正向导出 4104 扇区至 B 的 `ds-sector-resume.bin`。Interrupted 检查持久断点、16 MiB 未完成文件和故障。在同一故障启动下，从 A 的 LBA 2232320 反向导出 8 个扇区至 `ds-sector-recopy-base.bin`，配置 LOSS 和额外跳过 2 个扇区。选择「复读已填充扇区」，打开该文件的 `.dscopy`，保存 `ds-sector-recopy-result.bin` 和 `ds-sector-recopy-result.json`。Reread 核对原文件、新文件和报告。正常关闭来宾后使用 `start --4kn` 启动同一来宾，重新通过预检。在 A 的整盘范围打开 `ds-sector-resume.bin.dscopy`，完成后运行 Finish，核对完整文件与前缀。所有导出和断点均写入 B。直接写盘的持久断点需要源盘和目标盘之外的物理磁盘，本夹具覆盖文件续作和文件复读。
+
+旧报告导入用 `build-sector-copy.ps1 -Legacy`，继续用 4Kn 故障配置。Prepare 核对旧版 `ds-sector-reverse.json`、原 `.bin` 和 B/7 相对 LBA 4096 的空白目标区，独立生成 v2 报告。文件模式选择「用旧 JSON 报告复读」，选原报告和 `ds-sector-reverse.bin`，保存 `ds-sector-legacy-file.bin`。File 独立比对新旧文件。磁盘模式先从 A 整盘 LBA 2232320 向 B/7 相对 LBA 4096 反向复制 8 扇区，配置 LOSS、额外跳过 2，关闭同次延后重读与断点保存。Rearm 核对脱机 B 的旧输出和保护布局之后才为第二次确认联机 B。在同一个源和目标下导入 `ds-sector-legacy-device.json`，复核绝对目标 LBA 3477760，再确认。Device 读取整个测试分区、相邻扇区及两盘 GPT，并核对 A/B 仍脱机。Prepare、Rearm、Device 报出的目标区外综合摘要须一致。
+
+直写目标盘验收使用同一故障启动参数及 `build-sector-copy.ps1 -Device`，将 `Sector-Copy-Device-4Kn-Prepare.exe`、`Sector-Copy-Device-4Kn-Continue.exe`、`Sector-Copy-Device-4Kn-Verify.exe` 与同 SHA-256 的正式程序放入只读光盘。Prepare 在 B 的已校验全零空闲范围内创建一个 32 MiB 测试分区，并报告分区号、绝对起始位置和两次复制的参数。原生界面先检查 B 的整盘 LBA 0 预览被拒绝，再按 Prepare 报告复制 A 的八个健康扇区到 B 指定整盘位置。B 保持脱机时，Windows 可能不提供隐藏等保护属性，此时下一次预览必须拒绝。Continue 独立核对第一次复制后的完整 32 MiB、邻接扇区、两盘 GPT 和来宾系统盘布局，再将测试盘 B 联机以准备第二个用例。刷新软件的磁盘列表，把八个含故障的扇区反向复制到 B 的测试分区相对 LBA 40，填充文本 `LOSS`，额外跳过两个扇区。Verify 逐字节检查整个 32 MiB 和边界两侧，复核两盘保持脱机、GPT 和来宾系统盘布局一致。
+
+延后重读用 `build-sector-copy.ps1 -Reread`，与同 SHA-256 的正式程序一起放入只读光盘，使用同一 4Kn 故障启动参数。Prepare 复用已验证的 B/7 测试分区，核对目标区全零和两个 GPT 后才为测试联机 B。先从 A 的 LBA 2232320 反向复制 8 扇区到 B 的普通文件 `ds-sector-reread-checked.bin`。选择 `LOSS`、额外跳过 2 扇区并启用重读，保存 `ds-sector-reread-checked.json`，运行 Verify-File。再从 A 的 LBA 2232064 正向复制 1024 扇区到 B/7 相对 LBA 2048，选择跳过大段后重读及 `LOSS`。预期 384 扇区延后，383 扇区在重读时恢复。Verify-Device 检查整个测试分区、相邻扇区、两盘 GPT、来宾系统盘布局及脱机状态。
 
 ## FAT 与 exFAT 保留数据缩放
 
@@ -430,8 +450,126 @@ A/B 两个 2 GiB ext4 的创建、Ubuntu 基线写入、2 GiB → 512 MiB → 3 
 
 `DiskStudio-Metadata-Checks.exe` 只在隔离 Windows VM 中启动；先校验 UUID、精确三盘身份和容量，在 A/B 各新建三个 64 MiB NTFS/exFAT/FAT32 分区。对每个分区执行修改卷标、清除卷标、恢复卷标、更换盘符、移除盘符、恢复盘符，共 36 次元数据变更。每步核对卷 GUID、文件系统、盘符/卷标和 64 KiB 文件内容，检查全部旧分区及 OS 布局不变；另要求被 OS 占用的 C 盘符在预览阶段即被拒绝。无盘符时通过已验证的新测试卷 GUID 路径核对文件，不访问客体 OS 数据。单次执行标记和逐步日志位于客体 `C:\ProgramData\DiskStudio-metadata-checks.txt`，失败后禁止自动重跑。测试增加每盘 192 MiB 占用，与原生 FAT 和新 Ext2/3 夹具合计仍应预先核对剩余空间。该程序目前只构建，未执行，结果不得视为已验收。
 
+### 从所选备份还原点还原
+
+以相同桌面摘要运行 `scripts/vm/build-guest-checks.ps1 -RetainedRestore`，选入 `Retained-Restore-Prepare.exe`、`Retained-Restore-After-Exact.exe` 和 `Retained-Restore-Verify.exe` 制作只读工具光盘。通过默认 512 字节来宾预检后运行 Prepare。它读取 A/20 和 A/21 的已知 FAT12 与 exFAT 夹具，只在核对过的 A/2 创建备份文件。打开 B 上两个经过全零核验的范围作为专用接收分区。
+
+首轮准备因 GPT 条目槽位核对停止。该次现场可用 `Retained-Restore-Assess.exe` 复查。它在内存中排除已知测试条目，复现上轮记录的完整 GPT 摘要，再核对原始源、已准备的测试文件、目标范围和相邻扇区。只有通过这些核对才在 A/2 保存供还原测试使用的基线。
+
+在「备份与克隆 → 浏览备份」打开 `Exact.dsbackup`，从当前点选择分区，按原尺寸还原到报告中的 1 MiB 接收分区。After-Exact 独立核对源、备份、两盘 GPT、还原输出和第二个目标的完整摘要，然后联机 B。打开 `Latest.dsbackup`，按提示选 `Earlier.dsbackup` 作为依赖。切换到最早完整备份，选择分区并调整容量还原到 64 MiB 目标。Verify 用原始引导卷序列号区分两个还原点，验证独立提取的样本、整个目标摘要、源分区、备份文件、邻接扇区和两盘 GPT。B 最终仍脱机。
+
+### FAT 按文件克隆验收
+
+用 `scripts/vm/build-guest-checks.ps1 -FileClone` 和同一正式程序生成包含 `File-Clone-Prepare.exe`、`File-Clone-Verify.exe` 的只读工具光盘。通过 512 字节来宾预检后执行 Prepare，读取 A 上 128 MiB `DSFAT16` 的原始文件树和已知样本，在核对过的 B 空白范围创建 2 MiB 接收分区。记录完整源摘要、两盘 GPT、目标相邻扇区和客体系统盘布局。
+
+在正式程序中选报告里的源和目标，使用「按文件克隆」。确认摘要中的 FAT16 到 FAT12、文件数、目录数和目标串号。完成后 Verify 对照每个活动文件的 SHA-256、文件树名称和元数据，并核对整个目标摘要、FAT12 几何、源数据、相邻扇区、两盘 GPT 和客体系统盘布局。B 保持脱机。
+
+exFAT 用例使用 `-FileCloneExfat` 生成 `File-Clone-Exfat-Prepare.exe` 与 `File-Clone-Exfat-Verify.exe`。源为 A/21 的 96 MiB `DSCAPEX`。目标为 B 上在空白范围准备的新 16 MiB `EXCLONE` 分区，使用常规 FAT16 格式化准备。原生预览应明确 exFAT 到 exFAT，验收另核对主备引导区域和校验、目标起始 LBA、容量与卷标。两个用例使用不同的目标和验收基线。
+
+原始准备在 16 MiB exFAT 格式化预览停下。该次现场使用 `File-Clone-Exfat-Continue.exe`。在内存中核对上轮完整 GPT 摘要，验证此次新增分区的唯一性和全部内容仍为空，再仅在这个分区执行 FAT16 准备。继续使用哈希相同的桌面构建。
+
+NTFS 用例使用 `-FileCloneNtfs`。Prepare 在核对两盘布局和专用空白范围后，用 Windows 格式化 A 上的 96 MiB `DSNTCOPY`，写入中文目录、空目录、命名数据流和硬链接，再准备 B 上 48 MiB 的 `NTDEST`。已有完整源样本且 B 仍无目标时，可用 `File-Clone-Ntfs-Assess.exe`。它复核之前的 GPT 和来宾系统盘布局，锁定源卷并核对样本，然后准备 B。已有这两个夹具且基线尚未生成时，可用 `File-Clone-Ntfs-Confirm-Prepared.exe`。它检查两项分区新增之外的原有布局，核对 B 的 FAT16 目录，重新核对源文件清单并记录克隆前基线。正式程序应显示 NTFS 到 NTFS。Verify 复核整个目标摘要、主备引导区、文件和数据流、硬链接、时间、属性和安全描述符，也核对源摘要、两盘 GPT、相邻扇区和客体系统盘布局。B 保持脱机。
+
+`File-Clone-Ntfs-Source-Lock.exe` 用于定位源分区的整区摘要差异。它从同一个克隆见证核对 A/B 夹具和布局，两次读取源分区作对照，然后分别读取锁定中和解锁后的内容。报告按 NTFS 元数据数据段和 MFT 记录列出发生变化的扇区。源目录清单、保护范围以及脱机 B 盘的整区摘要均在实验后复核。
+
+4Kn 用例使用独立的 4096 字节 A/B 测试盘。`File-Clone-Ntfs-4Kn-Prepare.exe` 在确认空白范围后准备 `DSNT4KCOPY` 和 `NT4KDEST`。`File-Clone-Ntfs-4Kn-Baseline.exe` 核对稳定的两次源读取，在 A 的既有测试数据卷保存压缩基线及全分区摘要。然后从正式界面执行一次按文件克隆。`File-Clone-Ntfs-4Kn-Verify.exe` 逐字节对照源分区。差异须落在两次读取共同确认的 NTFS 或 TxF 日志范围，或通过 MFT 与目录索引记录的跨扇区写入保护序列检查。验证每个序列值、恢复所保护的字节并去除日志序列号后，逐字节核对记录。`$Extend/$RmMetadata/$TxfLog` 常驻或非常驻目录索引中，仅已核验的日志文件长名和 DOS 短名条目允许修改时间及 MFT 更改时间前移。名称、引用、创建时间、访问时间和其余字节必须一致。后验还复核源文件清单、目标全分区 SHA-256、GPT、相邻扇区和客体系统盘布局。B 保持脱机。
+
+当 4Kn 作业在目标写入前因源卷状态变化停止时，`File-Clone-Ntfs-4Kn-Inspect-Source.exe` 可逐项对照源记录。`File-Clone-Ntfs-4Kn-Settled-Baseline.exe` 核对原始基线和目标内容，在只操作源卷锁的前提下检查文件清单及锁定中和解锁后的字节，另外保存一份新的基线。然后在正式程序中重新预览。若启动新作业，用 `File-Clone-Ntfs-4Kn-Verify-Settled.exe` 校验它对应的基线。
+
+短名和扩展属性用例使用 `-FileCloneNtfsMetadata`。`File-Clone-Ntfs-4Kn-Metadata-Prepare.exe` 只用新空白范围准备 `DSNT4KMETA` 和 `NT4KMETA`。源 NTFS 格式化开启短名，用 Windows 创建长文件名并保存 4199 字节的扩展属性。`File-Clone-Ntfs-4Kn-Metadata-Baseline.exe` 在锁卷前后独立确认范围及文件清单，要求 Windows 生成独立短名并核对属性名和值，再保存全源分区字节基线。正式界面执行克隆后，`File-Clone-Ntfs-4Kn-Metadata-Verify.exe` 用原基线独立核对短名、硬链接、扩展属性、文件内容、目标完整 SHA-256、GPT 和源分区字节。夹具通过新目录的一次性记录保护原有验收盘内容。[Windows 扩展属性记录格式](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_full_ea_information)
+
+首轮在源卷格式化后遇到 R: 已被占用，B 的写入计数保持为零。`-FileCloneNtfsMetadataContinue` 绑定已核对的正式程序并打包续验入口。来宾先核对既有 A 分区、原 GPT 和边缘、源卷文件清单及 B 的原空白范围。修正程序识别了事务日志的 DOS 短名后，续验发现来宾盘符已经用完。此后的工具用卷 GUID 打开源卷根目录，核对保留句柄与原分区身份，再从既有 A 分区填样并首次建立 B 的目标。卷 GUID 路径和填样操作仅用于来宾夹具。现场结果见 `.vm/ntfs-clone-metadata-status.json`。 [Windows 卷 GUID 路径](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume)
+
+稀疏与压缩流用例使用 `-FileCloneNtfsStorage`。将三个 `File-Clone-Ntfs-4Kn-Storage` 入口和匹配的正式程序放入同一只读光盘。Prepare 核对隔离范围，在新建的 `DSNT4KSTOR` 上通过 Windows 生成并回读稀疏文件、LZNT1 文件与命名流，在 B 创建 `NT4KSTOR`。Baseline 核对源簇分配与摘要，并保存源分区和布局基线。正式界面执行 96 MiB 到 48 MiB 的按文件克隆。Verify 核对普通文件与命名流、稀疏分配、目录压缩标志、两盘 GPT 和目标整区 SHA-256，逐扇区审核源变化。结果需确认 B 保持脱机。
+
+4Kn 复验使用 `-FileCloneNtfsStorageAudit`，光盘保留同一桌面程序，仅选择 `File-Clone-Ntfs-4Kn-Storage-Audit.exe` 复查已有范围。对已核验日志条目，只有缓存长度由零更新为同一文件未命名数据流的实际长度并通过分配核对时，源审计才允许该字段发生变化。A/60 到 B/10 的目标摘要一致，23 个源盘变化扇区均完成归因，两轮独立审核期间 A 和 B 无新增写入。结果见 `.vm/ntfs-clone-storage-status.json`。
+
+对象 ID 和链接用例使用 `-FileCloneNtfsLinks`。在只读光盘选择三个 `File-Clone-Ntfs-4Kn-Links-*.exe`，绑定同一桌面程序。Prepare 在新建的 `DSNT4KLINK` 生成文件和目录对象 ID，原生回读全部 64 字节，并创建相对符号链接及指向测试卷内目录的联接。Baseline 保存源分区字节和两盘布局。正式界面从 `DSNT4KLINK` 向 `NT4KLINK` 执行按文件克隆。Verify 读取 B 的脱机范围，按活动文件记录核对对象和重解析索引，比较扩展字段、原始链接数据、硬链接身份和完整分区摘要。
+
+`-FileCloneNtfsLinksInspect` 绑定首轮构建，只读核对 A/61 的原生目录联接记录。`-FileCloneNtfsLinksContinue` 绑定修正版，核对已准备的 A/61 和 B/11 后才保存基线。原生克隆一次完成。用 `-FileCloneNtfsLinksAudit` 复验同一目标和源基线，根目录索引的两个时间缓存须与同一活动记录的实际时间相符，其余字节逐一比较。复验完成全部 23 个差异扇区归因。记录见 `.vm/ntfs-clone-links-status.json`。
+
+卷内 WOF 可在来宾通过 `-FileCloneNtfsWof` 用 Windows 创建。来宾无法生成 WOF 文件时，将通过独立解压验证的 `Ntfs-Wof-Source.raw` 放入 `.vm/payload`，用 `-FileCloneNtfsWofImage` 生成三个 `File-Clone-Ntfs-4Kn-Wof-Image-*.exe`，再将三个入口放入同一只读光盘。Prepare 校验光盘摘要，并在锁定、脱机和二次确认目标为零后写入 A 的新数据分区。该分区的 NTFS 卷名为 `DISKCLONE`，B 的 48 MiB 目标卷名为 `NT4KWOFIMG`。Baseline 核对四种压缩流、普通 ADS、稳定源字节和布局。用正式界面执行按文件克隆后，Verify 从脱机 B 校验四种压缩数据、重解析记录、源清单、GPT 和完整目标 SHA-256。
+
+初次准备在镜像写入前停止时，`-FileCloneNtfsWofImageContinue` 仅在原 A 分区及 B 计划范围仍全零、布局和相邻扇区完整时继续。镜像写入并读回完成、Windows 报告联机成功而卷关联尚未通过时，`-FileCloneNtfsWofImageAfterOnline` 重新核对 A 的当前卷身份、四种压缩流及 B 的空白范围，随后准备 B，对应的两个 Settled 入口保存基线和执行后验。
+
+EFS 用例使用 `-FileCloneNtfsEfs`。Prepare 在新建的 `DSNT4KEFS` 上调用 Windows EFS API 加密测试文件和目录，在同一账户下核对逻辑内容，再准备 B 上的 48 MiB `NT4KEFS`。Baseline 核对加密标志、命名流、密文和 `$EFS` 元数据，记录稳定源分区及布局。使用正式界面执行按文件克隆。Verify 通过脱机读回比较完整密文、元数据、目标分区摘要和布局。
+
+### FAT 与 exFAT 不同容量克隆验收
+
+用匹配的正式程序运行 `scripts/vm/build-guest-checks.ps1 -ResizeClone`，工具光盘选择 `Resize-Clone-Prepare.exe`、`Resize-Clone-After-Growth.exe` 和 `Resize-Clone-Verify.exe`。通过默认 512 字节来宾预检后，Prepare 核对 A/20 和 A/21 的已有夹具，对 B 的两个指定空闲范围逐字节确认无数据，再创建专用 GPT 目标。准备结束时报告目标分区编号。
+
+首轮夹具的 exFAT 卷标在格式化预览被拒绝。对应续验使用 `-ResizeCloneContinue`，绑定同一桌面摘要，用原有准备标记、两个目标几何、首个 FAT12 卷标及第二目标全零内容核对现场，只格式化第二目标，然后记录完整基线。
+
+在原生界面先将 A/20 FAT12 由 1 MiB 克隆至 2 MiB 目标。After-Growth 在 B 脱机时核验引导字段、样本内容和目标 SHA-256，确认另一个目标未改动，再联机 B。刷新后将 A/21 exFAT 由 96 MiB 克隆至 64 MiB 目标。最终 Verify 核对两个目标的起始 LBA、卷容量、样本内容和完整 SHA-256，并复查两个完整源分区、两盘 GPT、目标外邻接扇区和来宾系统盘布局。结束时 B 应保持脱机。
+
+### Btrfs 变容量克隆验收
+
+用匹配的正式程序运行 `scripts/vm/build-btrfs.ps1 -CapacityClone`。以 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Btrfs-Lab-4Kn-Clone-Prepare.exe`、`Btrfs-Lab-4Kn-Clone-Inspect-Shrink.exe` 和 `Btrfs-Lab-4Kn-Clone-Inspect-Grow.exe`。运行 `node scripts/vm/lab.mjs start --4kn --btrfs-clone` 和 `preflight`，核对独立 A/B 镜像和两块控制器。
+
+Prepare 只接受两块空 RAW 盘和匹配 SHA-256 的来宾载荷。它在 A 建立 384 MiB 的 Linux GPT 分区并写入已知镜像，在 B 准备 192 MiB、448 MiB 两个 Linux GPT 目标。A 保持脱机。正式界面选择 A 分区，用「调整容量克隆」先写入 192 MiB 的 B 分区。预览应报告 80 MiB 条带搬移。通过 Inspect-Shrink 后，选择 B 上的 448 MiB 分区验收扩容，B 全程保持脱机。后验独立核对两次目标 SHA-256、51 个文件、卷 UUID、完整源分区以及两盘 GPT 和来宾系统盘布局。
+
+夹具写入后可用 `Btrfs-Lab-4Kn-Clone-Resume.exe` 只读复核 A 的源镜像、B 的两个空白目标及两盘布局，为匹配的桌面载荷建立基线。预览遇到保护状态拦截时，`Btrfs-Lab-4Kn-Clone-Diagnose.exe` 从该基线定位分区，报告来宾的磁盘脱机状态、分区保护字段、卷关联和策略判断。
+
+### Btrfs 备份还原验收
+
+用 `node scripts/vm/lab.mjs start --4kn --btrfs-restore` 启动独立 A/B 测试盘。以匹配的正式程序运行 `build-btrfs.ps1 -Restore`，用 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Btrfs-Restore-4Kn-Prepare.exe`、`Btrfs-Restore-4Kn-Resume.exe` 和 `Btrfs-Restore-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。A/B 为空 RAW 时，Prepare 在 A 的 NTFS 卷创建按已用空间保存的 Btrfs 完整备份和增量备份，在 B 准备 384、192、448 MiB 三个 Linux 数据分区。用「浏览备份」打开 `Latest.dsbackup`，按提示选择 `Earlier.dsbackup`。从旧点依次原尺寸还原到 384 MiB 并缩容到 192 MiB，从最新点扩容到 448 MiB。B 在第一次还原后保持脱机。Verify 独立核对三个目标完整摘要、51 个文件、卷 UUID、版本标记、相邻扇区、备份文件、两盘 GPT 和来宾系统盘布局。已完整准备的夹具可用匹配载荷的 Resume，只在三个目标均为空白时重建基线。
+
+### 加密整盘备份还原验收
+
+用 `node scripts/vm/lab.mjs start --4kn --archive-restore` 启动独立 A/B 测试盘。正式构建完成后运行 `build-guest-checks.ps1 -ArchiveRestore`。用 `make-tools-iso.ps1 -Live` 选择 `Archive-Restore-4Kn-Prepare.exe`、`Archive-Restore-4Kn-Verify-Partition.exe` 和 `Archive-Restore-4Kn-Verify-Disk.exe`。通过预检后运行 Prepare。入口复核来宾身份、A/B 的完整序列号、物理和逻辑扇区以及桌面程序摘要，只在两盘均为空 RAW 时开始。它在 A 的 NTFS 数据卷准备两层加密整盘归档，在 B 创建 8 MiB 普通数据目标。增量点的主 GPT 校验和故意损坏。
+
+在「浏览备份」打开 `Latest.dsbackup` 及其 `Earlier.dsbackup` 依赖，使用准备驱动中定义的两个测试密码。最新点应显示分区表校验提示，并禁用目录读取及分区还原。切换到最早完整点，选择备份内的 8 MiB 分区并原尺寸还原到 B 的测试分区。先运行 Verify-Partition 核对目标、相邻扇区和原有布局。再选择最新点，确认整盘还原警告及 B 的完整序列号，执行整盘还原。Verify-Disk 核对 B 的全盘 SHA-256、原样保留的分区表与分区内容，并核对两份归档、A 的 GPT、来宾系统盘布局和 B 的脱机状态。
+
+首轮准备因合成 GPT 的来源指纹格式错误而停止，B 的 QMP 写入计数为零。该情况使用只读光盘上的 `Archive-Restore-4Kn-Continue.exe`。它要求 B 仍为空 RAW，A 上的预期 GPT 和 NTFS 卷仍完整，且此前目录只包含零字节的 `Earlier.dsbackup`。它保留该文件并把成功归档写入新的 `ArchiveSet` 子目录，A 的分区准备无需再执行。
+
+构建 `6fe9c432…` 的隔离验收通过。旧点的 8 MiB 分区和最新点的 16 GiB 整盘均完成独立 SHA-256 回读，B 保持脱机。QMP 记录两次写入各自恰好覆盖所确认的目标容量。首次整盘作业在写入前校验期间遇到来宾关机。重新启动后先用 Verify-Partition 核对 B 仍是上一次单分区写入后的状态，再重新打开归档和确认整盘预览。截图、摘要和 I/O 计数见 `.vm/archive-restore-status.json`。
+
+### 整盘按文件克隆验收
+
+混合克隆使用 `node scripts/vm/lab.mjs start --4kn --mixed-clone` 的独立 A/B 盘。以匹配的正式程序运行 `build-btrfs.ps1 -MixedClone`，再通过 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Mixed-File-Clone-4Kn-Prepare.exe` 和 `Mixed-File-Clone-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。两块盘为空 RAW 时，Prepare 在 A 生成 384 MiB Btrfs、32 MiB 不透明数据和 96 MiB NTFS 分区，保留 A 联机及 B 空白。整盘按文件克隆的原生预览应显示 Btrfs 384→192 MiB 并搬移 80 MiB 条带、32 MiB 分区原位置逐扇区复制及 NTFS 96→48 MiB 按文件重建。独立 Verify 核对两盘布局、Btrfs 的 51 个文件和卷 UUID、NTFS 样本、32 MiB 全范围、清零区和整盘 SHA-256。对已经完整准备且 B 仍为空 RAW 的夹具，可用匹配载荷中的 `Mixed-File-Clone-4Kn-Resume.exe` 复核源内容并建立验收基线。
+
+使用 `node scripts/vm/lab.mjs start --4kn --whole-clone` 启动专用 4Kn A/B 盘，执行 `preflight` 核对来宾身份、控制器和文件后端。将同一份已核对 SHA-256 的桌面程序放在 `.vm/artifacts/DiskStudio.exe`，运行 `scripts/vm/build-guest-checks.ps1 -WholeFileClone`。工具光盘选择 `Whole-File-Clone-4Kn-Prepare.exe` 和 `Whole-File-Clone-4Kn-Verify.exe`。
+
+Prepare 在来宾中重验程序 SHA-256、虚拟机 UUID、完整 NVMe 序列号及扇区大小。两盘均为空 RAW 时才初始化并在 A 建立三个数据分区，写入并回读 NTFS、FAT16、exFAT 样本，核对 B 仍为空 RAW。正式界面选择 A 整盘按文件克隆到 B，分别将三个分区设为 48、64、80 MiB。Verify 保持 B 脱机，核对原始 GPT、Windows 原生布局、新标识、容量、样本和零填充，并独立计算整盘 SHA-256，与正式界面结果比较。核对克隆前后 A/B 的 QMP 读写计数，记录任何变化。
+
+首轮准备在写入前停止。全新盘的 Storage Provider 样式为 RAW，原生接口返回零条目的 48 字节 MBR 头。修正的写入检查要求该 MBR 标识为零，并核对磁盘首尾实际分区表扇区全部为零。
+
+修正后的首次准备在 NTFS 文件写回后未能立即从原始目录读到样本。`Whole-File-Clone-4Kn-Resume.exe` 仅接受 A 上已存在的指定 NTFS 分区及空 RAW B。锁定并核对 NTFS 源卷后先读回文件，再创建 FAT16 和 exFAT 分区。三个源样本均在锁卷下独立读取，保留已写好的 NTFS 文件。
+
+首次原生预览识别出 Windows 创建的 Microsoft 保留分区约为 15.98 MiB。整盘克隆按实际扇区长度重建保留区，并核对数据分区与源盘所有卷关联的数量完全一致。用匹配新构建的 `Whole-File-Clone-4Kn-Rebind.exe` 核对既有三份源样本、GPT、系统盘布局与空 RAW B，保存本次验收基线。
+
+正式构建 `36207dc5…` 在原生界面完成了 A 到空 RAW B 的整盘按文件克隆。独立读回核对 NTFS 96→48 MiB、FAT16 80→64 MiB、exFAT 96→80 MiB、MSR 精确长度、重建的 GPT 标识与双副本，以及未使用范围全零。来宾系统盘布局和 A 的 GPT 与样本一致，B 保持脱机。整盘 SHA-256 与界面一致。QMP 在克隆阶段记录 A 的 36 次写入共 212,992 字节，独立后验阶段 A、B 均无新增写入。构建、截图、后验摘要和 I/O 计数见 `.vm/whole-disk-file-clone-status.json`。
+
+### BitLocker 引导识别验收
+
+用匹配的正式程序运行 `scripts/vm/build-guest-checks.ps1 -BitLockerMarker`，工具光盘选择 `BitLocker-Marker-Prepare.exe` 和 `BitLocker-Marker-Verify.exe`。通过 512 字节 Windows VM 预检后，在来宾中运行 Prepare。该工具验证 A/B 盘身份与正式程序摘要，在已核对的 A/2 数据卷创建带合成 BitLocker 标记的分区镜像，以及一个普通 NTFS 对照镜像。
+
+在正式界面用「备份与克隆 → 浏览镜像」分别以分区镜像打开两份文件。合成标记应提示先在 Windows 解锁，且目录为空。对照镜像应能列出文件并预览 `file-with-12345`。Verify 逐字节复核两个源镜像，并核对 A/B 的 GPT 和客体系统盘的分区元数据。此批验收覆盖引导标记识别和普通 NTFS 回归。真实加密卷需在具备 BitLocker 组件的来宾另行验收。
+
 ### 虚拟 RAID 镜像验收
 
 `node scripts/vm/build-virtual-raid.mjs` 从 `.vm/virtual-raid-original.raw`（独立核对过的 48 MiB Ext4 LVM 逻辑卷）生成三份 25 MiB RAW 成员。虚拟 RAID5 使用左对称布局、64 KiB 条带，成员数据从 1 MiB 偏移开始。生成脚本独立计算校验条带，并生成逻辑内容和三个成员的 SHA-256 清单。
 
 确保存档中的 `DiskStudio.exe` 与当前桌面构建一致。运行 `scripts/vm/build-virtual-raid.ps1`，再用 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-4Kn-Prepare.exe','Virtual-Raid-4Kn-Inspect.exe')` 准备工具光盘。通过 4Kn 来宾预检后，在来宾中启动 Prepare。它核对正式程序与光盘成员的摘要，只在确认身份的 A/B 数据卷上创建源文件和输出目录。通过正式界面选齐成员，按文件名编号顺序组装，选择分区范围和 512 B 逻辑扇区。每个成员从字节 1048576 开始，长度为 25165824 字节。保留 `nested` 目录并跨盘导出。Inspect 独立核对目录、文件摘要、清单中的 RAID 参数、成员文件摘要和原有布局。Prepare 使用单次标记，遇到失败先核对当前目录和磁盘身份。
+
+`node scripts/vm/build-virtual-raid.mjs --devices` 生成一份 64 MiB 逻辑阵列，32 MiB Ext4 文件系统从字节 4194304 开始，分区表为空。脚本独立条带化为两份 32 MiB RAID0 成员，并保留一份完整镜像供 RAID1 单成员测试。匹配桌面构建后运行 `build-virtual-raid.ps1 -Devices`，工具光盘选择 `Virtual-Raid-Device-Fresh-Prepare.exe` 和 `Virtual-Raid-Device-Fresh-Inspect.exe`。Prepare 仅在 4Kn 隔离来宾的 A 盘新建三个 Linux 测试分区，确认范围为空才写入，完成后 A 保持脱机。界面按助手显示的分区编号组装 RAID0，按助手显示的绝对偏移组装只选 A 整盘且显式缺一员的 RAID1。两套阵列都用 4096 B 逻辑扇区，在整盘搜索模式核对 LBA 1024 的 Ext4 候选，分别按提示选择 B 盘已有输出目录。Inspect 独立核对两个导出清单与文件摘要、三个完整源成员、A/B GPT 和系统盘布局。
+
+`node scripts/vm/ubuntu.mjs seed-virtual-raid-md6-4kn` 制作 Linux md RAID6 的只读种子。运行 `node scripts/vm/ubuntu.mjs virtual-raid-md6-4kn` 后，Ubuntu 在 tmpfs 上的五个 4Kn loop 成员生成 14 个布局的 16 行条带，并对左对称布局中的 Ext4 文件做独立回读。该阶段仅连接 Ubuntu 系统虚拟盘和种子光盘。Linux 验证完成后，`node scripts/vm/extract-md6.mjs <日志文件名>` 验证并提取条带、五个成员的数据范围和文件 SHA-256。
+
+用匹配的桌面构建运行 `build-virtual-raid.ps1 -Md6` 并在工具光盘中选择 `Virtual-Raid-Md6-Prepare.exe` 和 `Virtual-Raid-Md6-Inspect.exe`。Prepare 把成员镜像复制到已验证的 A 盘数据卷，并在 B 盘数据卷创建导出目录。在 Windows 原生界面选择编号 0、2、4 的成员，按 0、缺失、2、缺失、4 排列，使用 RAID6 左对称布局、4096 B 逻辑扇区和 4 KiB 条带。选择分区镜像，每个成员偏移 0，长度 12582912 字节。保留 `nested` 目录并跨盘导出，Inspect 核对文件摘要、成员顺序和范围、源文件与磁盘布局。
+
+Linux md 元数据验收以 `seed-virtual-raid-md-metadata-4kn` 和 `virtual-raid-md-metadata-4kn` 运行隔离 Ubuntu。该阶段在 tmpfs 生成带完整超级块的 1.0 RAID5、1.1 RAID1 和 1.2 RAID0、RAID4、RAID6、near RAID10。Linux 复核每个阵列的原生容量与逻辑读回，并对 RAID6 内的 Ext4 文件做独立回读。`node scripts/vm/extract-md6.mjs <日志文件名>` 校验并提取所有成员文件及逻辑容量。
+
+用 `build-virtual-raid.ps1 -MdMetadata` 和 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-Md-Metadata-Prepare.exe','Virtual-Raid-Md-Metadata-Inspect.exe')` 准备 4Kn Windows 来宾。Prepare 核对匹配载荷后，只在已验证的 A/B 数据卷上准备成员和导出目录。在虚拟 RAID 选择 4、0、2 号完整成员文件，选用 4096 B 逻辑扇区，再识别 Linux md 参数。检查填入的布局、偏移、成员顺序和缺失槽位，选择分区镜像并读目录，把 `nested` 跨盘导出。Inspect 独立核对导出文件、超级块身份和事件代次、导出清单、源成员摘要和受保护布局。
+
+不等长 RAID0 验收使用 `seed-virtual-raid-md-zones-4kn` 和 `virtual-raid-md-zones-4kn`。Ubuntu 的三个 4Kn loop 成员依次为 20、6、13 MiB，分别以 original 和 alternate 写入同一份 36 MiB 逻辑内容。Linux 核对整个阵列的 SHA-256，并从 17 MiB 偏移处的 Ext4 独立读回文件。`extract-md6.mjs` 提取完整成员和两个逻辑摘要。
+
+用 `build-virtual-raid.ps1 -MdZones` 和 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-Md-Zones-Prepare.exe','Virtual-Raid-Md-Zones-Inspect.exe')` 制备 4Kn Windows 来宾光盘。Prepare 在已核对的 A 盘创建三个 Linux 分区。最后一个成员先预读预定的空闲范围，确认空白后才创建分区。写入前在脱机的 A 盘逐字节复核目标为空，完成后 A 保持脱机。选择报告中的三个 A 盘分区和 4096 B 逻辑扇区，识别 Linux md，然后用整盘搜索范围组装。由 LBA 4096 扫描 4352 个扇区，在 LBA 4352 找到 Ext4 并把 `nested` 跨盘导出至报告给出的 B 盘目录。Inspect 核对导出摘要、超级块、物理范围、三个源分区全范围摘要及受保护布局。
+
+Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10-4kn`。Ubuntu 在五个 4Kn loop 成员上分别建立 `n2`、`n3`、`f3` 和 `o2` 阵列，以 64 KiB 条带写入并读回完整逻辑内容。`o2` 的起始位置包含 16 MiB Ext4，Linux 独立读回 `nested/proof.bin`。用 `extract-md6.mjs` 提取原始成员、逻辑容量和 SHA-256。
+
+用 `build-virtual-raid.ps1 -Md10` 和 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-Md10-Stage.exe','Virtual-Raid-Md10-Verify.exe')` 制备匹配桌面构建的光盘。Stage 将五份 `o2` 成员放在 A 盘现有的、空间充足的数据卷，报告给出目录。在虚拟 RAID 中选取成员 0、2、4，使用 4096 B 逻辑扇区识别 Linux md 参数。确认 offset、两个副本和两个缺失槽位，选择分区镜像，读取 Ext4 目录后将 `nested` 导出至 B 盘。Verify 核对文件与 Linux 的 SHA-256、目录、布局和成员清单、源成员 SHA-256 及受保护分区表。
+
+高级 RAID10 验收使用 `seed-virtual-raid-md10-advanced-4kn` 和 `virtual-raid-md10-advanced-4kn`。Ubuntu 在 tmpfs 上创建四套 4Kn RAID10 基线并停用阵列，确认 loop 成员无持有者后设置混合 near/far、混合 offset、旧式分组或固定混合分组的超级块布局和校验和。Linux 内核重新组装这些临时成员，写入并读回完整逻辑内容。混合 offset 样本另用 `e2fsck` 和 `debugfs` 检查 Ext4 和 `nested/proof.bin`。`extract-md6.mjs` 提取成员及 Linux 摘要。
+
+用 `build-virtual-raid.ps1 -Md10Advanced` 和 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-Md10-Advanced-Stage.exe','Virtual-Raid-Md10-Advanced-Verify.exe')` 制备只读来宾光盘。Stage 将六份混合 offset 成员写入它核对过的 A 盘现有数据卷。选择成员 0、2、4，使用 4096 B 逻辑扇区识别 Linux md，确认两个近端副本、两个远端副本、offset 模式、跨全部成员和三个缺失槽位。组装后读取 Ext4 目录，把 `nested` 跨盘导出到 Stage 指定的 B 盘卷。Verify 检查导出目录结构、文件摘要、超级块元数据及导出清单、六份源镜像和受保护分区布局。

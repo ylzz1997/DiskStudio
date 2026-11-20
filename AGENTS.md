@@ -1,5 +1,7 @@
 # DiskStudio working constraints
 
+- Push to GitHub or publish a GitHub release only when the user explicitly asks for that publication.
+
 - User requested on 2026-11-14 and reconfirmed on 2026-11-15 and 2026-11-16: develop related features in substantial batches. Finish the related implementation before consolidated testing. During implementation use only necessary compilation and focused synthetic checks; run the full suite, desktop build, matching-payload verification and consolidated VM acceptance after the batch is assembled. Collect non-blocking UI refinements into the next related batch. Do not rebuild/deploy and perform full native acceptance after every small change. All original host/VM safety boundaries remain in force.
 
 - Rust + Tauri desktop application with a React/TypeScript UI.

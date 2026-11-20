@@ -24,21 +24,24 @@ impl Row {
             (p, None)
         } else {
             let (p, q) = match layout {
-                8 | 9 => {
-                    let p = if layout == 8 {
-                        rotation
-                    } else {
-                        devices - 1 - (rotation + 1) % devices
+                0..=3 | 8 | 9 => {
+                    let p = match layout {
+                        0 | 2 => devices - 1 - rotation,
+                        9 => devices - 1 - (rotation + 1) % devices,
+                        _ => rotation,
                     };
                     (p, (p + 1) % devices)
                 }
+                4 => (0, 1),
+                5 => (devices - 2, devices - 1),
                 10 => {
                     let p = devices - 1 - rotation;
                     (p, (p + devices - 1) % devices)
                 }
                 16 | 18 => (devices - 2 - rotate(devices - 1), devices - 1),
                 17 | 19 => (rotate(devices - 1), devices - 1),
-                _ => (devices - 2, devices - 1),
+                20 => (0, devices - 1),
+                _ => unreachable!("unsupported RAID6 layout"),
             };
             (p, Some(q))
         };
@@ -53,9 +56,10 @@ impl Row {
     pub(crate) fn data_lane(&self, column: usize) -> usize {
         match (self.layout, self.q) {
             (2 | 3, None) | (10, Some(_)) => (self.p + 1 + column) % self.devices,
+            (2 | 3, Some(_)) => (self.p + 2 + column) % self.devices,
             (18 | 19, Some(_)) => (self.p + 1 + column) % (self.devices - 1),
-            (8 | 9, Some(0)) => column + 1,
-            (8 | 9, Some(_)) => column + 2 * usize::from(column >= self.p),
+            (0 | 1 | 8 | 9, Some(0)) => column + 1,
+            (0 | 1 | 4 | 8 | 9, Some(_)) => column + 2 * usize::from(column >= self.p),
             _ => column + usize::from(column >= self.p),
         }
     }
@@ -184,6 +188,63 @@ fn xor(sum: &mut [u8], buffer: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::Row;
+
+    #[test]
+    fn md_raid6_layouts_restore_data_with_any_two_missing_members() {
+        // Each row contains logical data [3, 39, 211], their XOR, and the
+        // Linux md Q syndrome in the physical order for that layout.
+        let vectors = [
+            (0, 0, [38, 3, 39, 211, 247], [1, 2, 3]),
+            (1, 1, [3, 247, 144, 39, 211], [0, 3, 4]),
+            (2, 2, [39, 211, 247, 38, 3], [4, 0, 1]),
+            (3, 4, [38, 3, 39, 211, 247], [1, 2, 3]),
+            (4, 0, [247, 38, 3, 39, 211], [2, 3, 4]),
+            (5, 0, [3, 39, 211, 247, 38], [0, 1, 2]),
+            (16, 1, [3, 39, 247, 211, 38], [0, 1, 3]),
+            (17, 1, [3, 247, 39, 211, 38], [0, 2, 3]),
+            (18, 1, [39, 211, 247, 3, 144], [3, 0, 1]),
+            (19, 1, [211, 247, 3, 39, 73], [2, 3, 0]),
+            (20, 0, [247, 3, 39, 211, 38], [1, 2, 3]),
+        ];
+        for (layout, index, mut members, expected_lanes) in vectors {
+            let row = Row::new(index, members.len(), 6, layout);
+            assert_eq!(
+                [0, 1, 2].map(|column| row.data_lane(column)),
+                expected_lanes,
+                "layout {layout}"
+            );
+            row.verify_sample(1, |lane, out| {
+                out[0] = members[lane];
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("layout {layout}: {error}"));
+            for target in expected_lanes {
+                for second in 0..members.len() {
+                    let windows = [0, 1, 2, 3, 4]
+                        .map(|lane| (lane != target && lane != second).then_some(lane));
+                    let mut out = [0];
+                    row.rebuild(
+                        &mut members,
+                        |readers, &lane, out| {
+                            out[0] = readers[lane];
+                            Ok(())
+                        },
+                        &windows,
+                        target,
+                        &mut out,
+                        &mut Vec::new(),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("layout {layout}, missing {target}/{second}: {error}")
+                    });
+                    assert_eq!(
+                        out[0], members[target],
+                        "layout {layout}, missing {target}/{second}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn independent_syndromes_must_agree_when_one_raid6_data_lane_is_missing() {

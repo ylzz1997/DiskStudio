@@ -133,6 +133,10 @@ impl Relocation {
         self.moves.iter().map(|m| m.len).sum()
     }
 
+    pub(super) fn projected_ranges(&self) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
+        self.moves.iter().map(|m| (m.to, m.from, m.len))
+    }
+
     pub(super) fn bind_moves(&self, hash: &mut Sha256) {
         for m in &self.moves {
             for n in [m.logical, m.from, m.to, m.len] {

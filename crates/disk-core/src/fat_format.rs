@@ -393,6 +393,18 @@ impl Plan {
             );
         }
     }
+
+    /// Materialize just the reserved sectors, tables and initial root. A
+    /// caller building an image can provide the remaining zero-filled area.
+    pub fn initialized_prefix(&self, limit: usize) -> io::Result<Vec<u8>> {
+        let len = usize::try_from(u64::from(self.metadata_sectors()) * u64::from(self.sector))
+            .ok()
+            .filter(|&len| len <= limit)
+            .ok_or_else(|| invalid("FAT 格式化元数据超过内存预算"))?;
+        let mut bytes = vec![0; len];
+        self.fill_range(0, &mut bytes);
+        Ok(bytes)
+    }
     pub fn verify_full<R: Read + Seek>(&self, io: &mut R) -> io::Result<FullFormatVerification> {
         self.verify_full_progress(io, |_| Ok(()))
     }

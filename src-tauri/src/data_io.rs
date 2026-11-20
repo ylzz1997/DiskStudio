@@ -14,6 +14,14 @@ pub struct Region<R> {
 }
 impl<R: Read + Seek> Region<R> {
     pub fn new(inner: R, start: u64, len: u64) -> io::Result<Self> {
+        Self::with_cache(inner, start, len, 1024 * 1024)
+    }
+
+    pub(crate) fn for_metadata(inner: R, start: u64, len: u64) -> io::Result<Self> {
+        Self::with_cache(inner, start, len, 4096)
+    }
+
+    fn with_cache(inner: R, start: u64, len: u64, cache_size: usize) -> io::Result<Self> {
         if start.checked_add(len).is_none() || len == 0 || start % 512 != 0 || len % 512 != 0 {
             return Err(io::Error::other("Invalid aligned source range"));
         }
@@ -23,7 +31,7 @@ impl<R: Read + Seek> Region<R> {
             len,
             pos: 0,
             cache_start: u64::MAX,
-            cache: vec![0; 1024 * 1024],
+            cache: vec![0; cache_size],
             valid: 0,
         })
     }

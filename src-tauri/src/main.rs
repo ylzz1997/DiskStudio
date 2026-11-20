@@ -5,6 +5,7 @@ mod backup_browser;
 mod backup_encryption;
 #[cfg(windows)]
 mod backup_files;
+mod bitlocker;
 mod backup_secrets;
 mod btrfs_recovery;
 mod data_io;
@@ -46,7 +47,11 @@ mod maintenance_tasks;
 mod native_locale;
 mod ntfs_allocation;
 mod ntfs_checkpoint;
+#[cfg(all(test, windows))]
+mod ntfs_clone_engine_test;
 mod ntfs_compression;
+#[cfg(windows)]
+mod ntfs_file_clone;
 mod ntfs_names;
 mod ntfs_scan;
 mod ntfs_streams;
@@ -62,6 +67,8 @@ mod recovery_export;
 mod recovery_output;
 mod recovery_tree;
 mod sector_copy;
+#[cfg(windows)]
+mod windows_protection;
 mod sector_data;
 mod sector_edit;
 mod sector_query;
@@ -284,6 +291,15 @@ fn data_browse_id(source: data_tasks::Selection) -> Option<String> {
     data_tasks::browse_id(source)
 }
 #[tauri::command]
+async fn data_reconstruct_filesystem(
+    request: data_tasks::ReconstructionSource,
+    mode: recovery::ScanMode,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::reconstruct_filesystem(request, mode))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn data_scan_btrfs_members(
     members: Vec<data_tasks::Selection>,
     mode: recovery::ScanMode,
@@ -350,12 +366,24 @@ fn data_virtual_raid_status() -> Option<virtual_raid_tasks::Status> {
     virtual_raid_tasks::status()
 }
 #[tauri::command]
-async fn data_virtual_raid_select() -> Result<Option<image_files::Info>, String> {
+async fn data_virtual_raid_select() -> Result<Option<virtual_raid_tasks::DraftInfo>, String> {
     tauri::async_runtime::spawn_blocking(virtual_raid_tasks::select).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_virtual_raid_select_devices(request: virtual_raid_tasks::PhysicalRequest) -> Result<virtual_raid_tasks::DraftInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::select_physical(request)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_virtual_raid_detect_md(request: virtual_raid_tasks::DetectRequest) -> Result<virtual_raid_tasks::Detection, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::detect_md(request)).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn data_virtual_raid_open(request: virtual_raid_tasks::OpenRequest) -> Result<virtual_raid_tasks::Status, String> {
     tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::open(request)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn data_virtual_raid_configuration(id: String) -> Result<virtual_raid_tasks::Edit, String> {
+    virtual_raid_tasks::configuration(id)
 }
 #[tauri::command]
 fn data_virtual_raid_discard(id: String) -> Result<(), String> {
@@ -368,6 +396,14 @@ fn data_virtual_raid_close(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn data_virtual_raid_scan(request: virtual_raid_tasks::ScanRequest) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::scan(request)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_virtual_raid_search(request: virtual_raid_tasks::SearchRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::search(request)).await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_virtual_raid_browse_found(request: virtual_raid_tasks::BrowseFoundRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || virtual_raid_tasks::browse_found(request)).await.map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn image_source_select() -> Result<Option<image_files::Info>, String> {
@@ -461,6 +497,15 @@ fn data_discard_plan(token: String) {
 #[tauri::command]
 fn data_cancel(id: String) -> Result<(), String> {
     data_tasks::cancel(id)
+}
+#[tauri::command]
+async fn data_scan_bitlocker(
+    source: data_tasks::Selection,
+    mode: recovery::ScanMode,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::scan_bitlocker(source, mode))
+        .await
+        .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn data_scan(
@@ -806,6 +851,29 @@ async fn sector_copy_start(request: sector_copy::Request) -> Result<Option<Strin
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
+async fn sector_copy_image_start(request: sector_copy::ImageRequest) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || sector_copy::start_image(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn sector_copy_resume_file(
+    source: data_tasks::Selection,
+    reread_filled: Option<bool>,
+) -> Result<Option<sector_copy::ResumedFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || sector_copy::resume_file(source, reread_filled.unwrap_or(false)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn sector_copy_reread_report(
+    source: data_tasks::Selection,
+) -> Result<Option<sector_copy::ResumedFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || sector_copy::reread_file_report(source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 fn sector_copy_report(id: String) -> Option<sector_copy::Report> {
     sector_copy::report(id)
 }
@@ -879,6 +947,9 @@ fn main() {
             sector_status,
             sector_export,
             sector_copy_start,
+            sector_copy_image_start,
+            sector_copy_resume_file,
+            sector_copy_reread_report,
             sector_copy_report,
             sector_copy_save_report,
             sector_prepare_write,
@@ -926,6 +997,7 @@ fn main() {
             data_recovery_progress_save,
             data_recovery_progress_load,
             data_browse_id,
+            data_reconstruct_filesystem,
             data_backup_status,
             data_image_status,
             data_image_lvm_status,
@@ -935,10 +1007,15 @@ fn main() {
             data_image_lvm_scan,
             data_virtual_raid_status,
             data_virtual_raid_select,
+            data_virtual_raid_select_devices,
+            data_virtual_raid_detect_md,
             data_virtual_raid_open,
+            data_virtual_raid_configuration,
             data_virtual_raid_discard,
             data_virtual_raid_close,
             data_virtual_raid_scan,
+            data_virtual_raid_search,
+            data_virtual_raid_browse_found,
             image_source_select,
             image_source_add,
             image_source_discard,
@@ -955,6 +1032,7 @@ fn main() {
             data_discard_plan,
             data_cancel,
             data_scan,
+            data_scan_bitlocker,
             data_scan_btrfs_members,
             data_lvm_inspect,
             data_lvm_browse,

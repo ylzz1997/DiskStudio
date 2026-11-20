@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { matchPartitionTarget } from "./partitionCapabilities";
 import { mergeCandidates } from "./PartitionReallocationDialog";
+import { physicalMemberOptions } from "./LvmBrowserDialog";
 import type { Disk, Partition, PartitionStatus } from "./types";
 
 const disk = {
@@ -96,4 +97,29 @@ it("only offers immediately neighbouring deletable NTFS volumes for merge", () =
   expect(mergeCandidates({ ...gpt, kind: "image" }, keep, target)).toHaveLength(
     0,
   );
+});
+
+it("offers a whole-disk read scope when a data disk only has an MSR restriction", () => {
+  const reserved: Partition = {
+    id: "msr", name: "Reserved", fs: "", start: 1048576, size: 16777216,
+    used: null, color: "gray", system: true, number: 1, role: "MSR 保留",
+  };
+  const dataDisk = {
+    ...disk,
+    size: 64000000,
+    partitions: [reserved],
+    hardware: { ...disk.hardware!, number: 7, isSystem: false },
+  };
+  const labels = (key: string) => key;
+  const scopes = (candidate: Disk) =>
+    physicalMemberOptions([candidate], labels).map(({ source }) => source.partition);
+  expect(scopes(dataDisk)).toEqual([null]);
+  expect(scopes({
+    ...dataDisk,
+    hardware: { ...dataDisk.hardware, isSystem: true },
+  })).toEqual([]);
+  expect(scopes({
+    ...dataDisk,
+    partitions: [{ ...reserved, role: "系统分区" }],
+  })).toEqual([]);
 });

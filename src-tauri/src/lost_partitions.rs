@@ -1,12 +1,15 @@
 //! Find filesystem boundaries without consulting or modifying a partition table.
 //! All I/O is confined to the selected range; signatures alone are not results.
-use crate::surface_scan::Range;
+use crate::{data_io::Region, recovery::view, surface_scan::Range};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
-    io::{Read, Seek, SeekFrom},
+    collections::HashSet,
+    io::{self, Read, Seek, SeekFrom},
     sync::atomic::{AtomicBool, Ordering},
 };
+#[path = "lost_backup_boot.rs"]
+mod backup_boot;
 #[path = "lost_btrfs.rs"]
 mod btrfs;
 
@@ -26,11 +29,25 @@ pub struct Candidate {
     pub can_browse: bool,
     pub btrfs_member_count: Option<usize>,
     #[serde(skip)]
-    fingerprint: String,
-    #[serde(skip)]
-    btrfs_anchor: Option<u64>,
+    validation: Validation,
     #[serde(skip)]
     pub(crate) btrfs_member: Option<disk_core::btrfs::RecoveryMember>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Validation {
+    Primary(String),
+    Btrfs { anchor: u64, fingerprint: String },
+    BackupBoot(view::Proof),
+}
+
+impl Candidate {
+    pub(crate) fn reconstruction(&self) -> Option<&view::Proof> {
+        match &self.validation {
+            Validation::BackupBoot(proof) => Some(proof),
+            _ => None,
+        }
+    }
 }
 fn u16at(b: &[u8], n: usize) -> u64 {
     u16::from_le_bytes(b[n..n + 2].try_into().unwrap()) as u64
@@ -391,6 +408,9 @@ fn ext<R: Read + Seek>(
     )))
 }
 fn hint(b: &[u8]) -> bool {
+    if crate::bitlocker::boot_marker(b) {
+        return false;
+    }
     (b.len() >= 512
         && b[510..512] == [0x55, 0xaa]
         && (&b[3..11] == b"NTFS    "
@@ -429,6 +449,9 @@ pub fn probe<R: Read + Seek>(
         cancel,
     };
     let b = p.read(0, p.size.min(2048) as usize)?;
+    if crate::bitlocker::boot_marker(&b) {
+        return Ok(None);
+    }
     let found = if b.len() >= 512 && b[510..512] == [0x55, 0xaa] {
         if &b[3..11] == b"NTFS    " {
             ntfs(&mut p, &b, range.sector)?
@@ -454,23 +477,30 @@ pub fn probe<R: Read + Seek>(
         can_restore: true,
         can_browse: true,
         btrfs_member_count: None,
-        fingerprint: format!("{:x}", p.hash.finalize()),
-        btrfs_anchor: None,
+        validation: Validation::Primary(format!("{:x}", p.hash.finalize())),
         btrfs_member: None,
     }))
 }
-pub fn revalidate<R: Read + Seek>(
+fn revalidate<R: Read + Seek>(
     reader: &mut R,
     range: Range,
     candidate: &Candidate,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let current = match candidate.btrfs_anchor {
-        Some(anchor) => {
+    let current = match &candidate.validation {
+        Validation::Btrfs { anchor, .. } => {
             let mut budget = btrfs::BUDGET;
-            btrfs::probe(reader, range, candidate.offset, anchor, cancel, &mut budget)?
+            btrfs::probe(
+                reader,
+                range,
+                candidate.offset,
+                *anchor,
+                cancel,
+                &mut budget,
+            )?
         }
-        None => probe(reader, range, candidate.offset, cancel)?,
+        Validation::Primary(_) => probe(reader, range, candidate.offset, cancel)?,
+        Validation::BackupBoot(_) => return Err("候选需要按备用引导视图核对。".into()),
     }
     .ok_or("候选文件系统证据已失效")?;
     if current.filesystem != candidate.filesystem
@@ -478,7 +508,7 @@ pub fn revalidate<R: Read + Seek>(
         || current.can_restore != candidate.can_restore
         || current.can_browse != candidate.can_browse
         || current.btrfs_member != candidate.btrfs_member
-        || current.fingerprint != candidate.fingerprint
+        || current.validation != candidate.validation
     {
         return Err("候选文件系统证据已改变，请重新搜索。".into());
     }
@@ -486,14 +516,14 @@ pub fn revalidate<R: Read + Seek>(
 }
 // Bound the raw reader before adding any cache. A whole-disk cache here would
 // prefetch bytes outside an unaligned candidate despite higher-level bounds.
-pub fn candidate_reader<R: Read + Seek>(
+pub(crate) fn candidate_reader<R: Read + Seek>(
     reader: R,
     source_size: u64,
     sector: u64,
     range: Range,
     candidate: &Candidate,
     cancel: &AtomicBool,
-) -> Result<crate::data_io::Region<R>, String> {
+) -> Result<view::Reader<Region<R>>, String> {
     if sector != range.sector
         || !matches!(sector, 512 | 4096)
         || candidate.offset % sector != 0
@@ -510,8 +540,11 @@ pub fn candidate_reader<R: Read + Seek>(
     {
         return Err("候选范围或设备几何已变化".into());
     }
-    let mut reader = crate::data_io::Region::new(reader, candidate.offset, candidate.size)
-        .map_err(|e| e.to_string())?;
+    let mut reader =
+        Region::new(reader, candidate.offset, candidate.size).map_err(|e| e.to_string())?;
+    if let Some(proof) = candidate.reconstruction() {
+        return proof.reopen(reader, cancel);
+    }
     let local = Candidate {
         offset: 0,
         ..candidate.clone()
@@ -526,8 +559,7 @@ pub fn candidate_reader<R: Read + Seek>(
         &local,
         cancel,
     )?;
-    reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    Ok(reader)
+    Ok(view::Reader::new(reader, Vec::new(), candidate.size))
 }
 pub fn scan<R: Read + Seek>(
     reader: &mut R,
@@ -549,8 +581,10 @@ pub fn scan<R: Read + Seek>(
     let mut done = 0u64;
     let mut probes = 0usize;
     let mut found = 0usize;
-    let mut btrfs_offsets = std::collections::HashSet::new();
+    let mut btrfs_offsets = HashSet::new();
     let mut btrfs_budget = btrfs::BUDGET;
+    let mut boot_budget = backup_boot::BUDGET;
+    let mut boot_offsets = HashSet::new();
     progress(0, None)?;
     while done < range.size {
         canceled(cancel)?;
@@ -568,8 +602,12 @@ pub fn scan<R: Read + Seek>(
             let anchor = disk_core::btrfs::recovery_superblock_address(&bytes[i..])
                 .and_then(|relative| offset.checked_sub(relative).map(|start| (start, relative)))
                 .filter(|(start, _)| *start >= range.offset && !btrfs_offsets.contains(start));
-            let boot = hint(&bytes[i..]);
-            if !boot && anchor.is_none() {
+            let backup = backup_boot::hint(&bytes[i..], offset, range);
+            let known_copy = backup.as_ref().is_some_and(|item| {
+                boot_offsets.contains(&(item.start, item.filesystem, item.size))
+            });
+            let boot = !known_copy && hint(&bytes[i..]);
+            if !boot && anchor.is_none() && (backup.is_none() || known_copy) {
                 continue;
             }
             canceled(cancel)?;
@@ -585,8 +623,22 @@ pub fn scan<R: Read + Seek>(
                 }
                 Ok(())
             };
-            if boot {
-                if let Some(candidate) = probe(reader, range, offset, cancel)? {
+            let primary = if boot {
+                probe(reader, range, offset, cancel)?
+            } else {
+                None
+            };
+            if let Some(candidate) = primary {
+                if let Some(kind) = backup_boot::supported(&candidate.filesystem) {
+                    let size = candidate.size + if kind == "NTFS" { range.sector } else { 0 };
+                    boot_offsets.insert((candidate.offset, kind, size));
+                }
+                publish(candidate)?;
+            } else if let Some(backup) = backup.filter(|_| !known_copy) {
+                if let Some(candidate) =
+                    backup_boot::probe(reader, range.sector, backup, cancel, &mut boot_budget)?
+                {
+                    boot_offsets.insert((backup.start, backup.filesystem, backup.size));
                     publish(candidate)?;
                 }
             }

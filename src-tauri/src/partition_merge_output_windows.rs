@@ -1,6 +1,10 @@
 //! Windows destination materialization for the verified NTFS merge catalogue.
 //! The caller must keep the source volume locked throughout the copy.
-use super::{check, err, validate_component, Catalogue, Node, RecordId, RelativePath, Stream};
+use super::{
+    check, err,
+    metadata::{self, OBJECT_ID},
+    validate_component, Catalogue, Node, RecordId, RelativePath, Stream,
+};
 use crate::{
     data_tasks::Selection,
     data_windows as device,
@@ -73,9 +77,6 @@ const SETTABLE: u32 = FILE_ATTRIBUTE_READONLY
     | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 const PRESERVED_BY_STORAGE: u32 =
     FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_COMPRESSED;
-const OBJECT_ID: u32 = ntfs::NtfsAttributeType::ObjectId as u32;
-const EA_INFO: u32 = ntfs::NtfsAttributeType::EAInformation as u32;
-const EA: u32 = ntfs::NtfsAttributeType::EA as u32;
 // [MS-BKUP] WIN32_STREAM_ID flags.
 const STREAM_CONTAINS_SECURITY: u32 = 0x0000_0002;
 
@@ -188,28 +189,11 @@ struct CopyPlan<'a> {
 impl<'a> CopyPlan<'a> {
     fn new(source: &'a Catalogue, cancel: &AtomicBool) -> Result<Self, String> {
         let mut primary = BTreeMap::new();
-        let mut aliases = BTreeMap::new();
-        let mut per_directory = BTreeMap::<(&[Vec<u16>], RecordId), Vec<&RelativePath>>::new();
         for (path, &id) in &source.names {
             check(cancel)?;
             primary.entry(id).or_insert(path);
-            if let Some((_, dir)) = path.split_last() {
-                per_directory.entry((dir, id)).or_default().push(path);
-            }
         }
-        for (path, &id) in &source.short_names {
-            let (alias, dir) = path.split_last().ok_or("NTFS 短名缺少父目录。")?;
-            validate_component(alias)?;
-            if alias.len() > 12 {
-                return Err("NTFS 短名超过 Windows 8.3 格式。".into());
-            }
-            let Some([name]) = per_directory.get(&(dir, id)).map(Vec::as_slice) else {
-                return Err("无法唯一确定 NTFS 短名对应的同目录硬链接。".into());
-            };
-            if aliases.insert(*name, alias.as_slice()).is_some() {
-                return Err("同一 NTFS 文件链接对应多个短名。".into());
-            }
-        }
+        let aliases = metadata::short_name_links(source, cancel)?;
         let mut needs_sacl = false;
         for (&id, node) in &source.nodes {
             check(cancel)?;
@@ -850,74 +834,25 @@ fn extended_attributes(node: &Node) -> Result<Option<Vec<u8>>, String> {
     {
         return Err("NTFS 对象标识的长度无效。".into());
     }
-    match (node.metadata.get(&EA_INFO), node.metadata.get(&EA)) {
-        (None, None) => Ok(None),
-        (Some(info), Some(ea)) => ea_for_windows(info, ea).map(Some),
-        _ => Err("NTFS 扩展属性数据或长度信息缺失。".into()),
-    }
+    metadata::extended_attributes(node)?
+        .map(|(info, ea)| ea_for_windows(info, ea))
+        .transpose()
 }
 
 fn ea_for_windows(info: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
-    let invalid = "NTFS 扩展属性的记录、长度或名称无效。";
-    if info.len() != 8
-        || input.is_empty()
-        || u32::from_le_bytes(info[4..8].try_into().unwrap()) as usize != input.len()
-    {
-        return Err(invalid.into());
-    }
     let mut output = Vec::with_capacity(input.len());
-    let mut names = BTreeSet::new();
-    let mut packed = 0;
-    let mut required = 0;
-    let mut at = 0;
-    while at < input.len() {
-        let remaining = &input[at..];
-        if remaining.len() < 9 {
-            return Err(invalid.into());
+    metadata::visit_ea(info, input, |record, padded, last| {
+        if record[2..4] == [0, 0] {
+            return Err("NTFS 扩展属性的记录、长度或名称无效。".into());
         }
-        let flags = remaining[4];
-        let name_len = remaining[5] as usize;
-        let value_len = u16::from_le_bytes([remaining[6], remaining[7]]) as usize;
-        let len = 9 + name_len + value_len;
-        let padded = len.next_multiple_of(4);
-        let next = u32::from_le_bytes(remaining[..4].try_into().unwrap()) as usize;
-        if !matches!(flags, 0 | 0x80)
-            || name_len == 0
-            || value_len == 0
-            || !(len..=padded).contains(&next)
-                && !(next == 0 && (len..=padded).contains(&remaining.len()))
-            || len > remaining.len()
-            || remaining[8 + name_len] != 0
-        {
-            return Err(invalid.into());
-        }
-        let span = if next == 0 { remaining.len() } else { next };
-        let name = &remaining[8..8 + name_len];
-        if span > remaining.len()
-            || span < remaining.len() && span != padded
-            || name
-                .iter()
-                .any(|&ch| ch < 32 || b"\\/:*?\"<>|,+=[];".contains(&ch))
-            || !names.insert(name.to_ascii_uppercase())
-        {
-            return Err(invalid.into());
-        }
-        let last = span == remaining.len();
         let next = if last { 0 } else { padded as u32 };
         output.extend_from_slice(&next.to_le_bytes());
-        output.extend_from_slice(&remaining[4..len]);
+        output.extend_from_slice(record);
         if !last {
-            output.resize(output.len() + padded - len, 0);
+            output.resize(output.len() + padded - record.len() - 4, 0);
         }
-        packed += len - 4;
-        required += usize::from(flags == 0x80);
-        at += span;
-    }
-    if packed != u16::from_le_bytes(info[..2].try_into().unwrap()) as usize
-        || required != u16::from_le_bytes(info[2..4].try_into().unwrap()) as usize
-    {
-        return Err(invalid.into());
-    }
+        Ok(())
+    })?;
     Ok(output)
 }
 

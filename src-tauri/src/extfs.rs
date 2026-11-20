@@ -32,7 +32,7 @@ const BTRFS_ASSETS: [(&str, &[u8]); 1] = [(
     BTRFS_TOOL,
     include_bytes!("../btrfs-engine/diskstudio-mkbtrfs.exe"),
 )];
-struct Engine {
+pub(crate) struct Engine {
     directory: PathBuf,
     assets: &'static [(&'static str, &'static [u8])],
     held: Vec<File>,
@@ -50,7 +50,10 @@ impl Engine {
     fn new() -> Result<Self, String> {
         Self::load("ext4", &ASSETS)
     }
-    fn load(tag: &str, assets: &'static [(&'static str, &'static [u8])]) -> Result<Self, String> {
+    pub(crate) fn load(
+        tag: &str,
+        assets: &'static [(&'static str, &'static [u8])],
+    ) -> Result<Self, String> {
         let directory =
             std::env::temp_dir().join(format!("DiskStudio-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory).map_err(error)?;
@@ -84,6 +87,26 @@ impl Engine {
         }
         Ok(engine)
     }
+    pub(crate) fn command(&self, tool: &str) -> Result<Command, String> {
+        if !self
+            .assets
+            .iter()
+            .any(|(name, _)| *name == tool && tool.ends_with(".exe"))
+        {
+            return Err("未知文件系统工具。".into());
+        }
+        let mut command = Command::new(self.directory.join(tool));
+        command
+            .current_dir(&self.directory)
+            .creation_flags(0x08000000)
+            .env_clear()
+            .env(
+                "SystemRoot",
+                std::env::var_os("SystemRoot").ok_or("Windows 系统目录不可用。")?,
+            )
+            .env("LC_ALL", "C");
+        Ok(command)
+    }
     fn run(
         &self,
         tool: &str,
@@ -94,23 +117,8 @@ impl Engine {
         sector: u64,
         write: bool,
     ) -> Result<String, String> {
-        if !self
-            .assets
-            .iter()
-            .any(|(name, _)| *name == tool && tool.ends_with(".exe"))
-        {
-            return Err("未知文件系统工具。".into());
-        }
-        let mut child = Command::new(self.directory.join(tool))
+        let mut child = self.command(tool)?
             .args(args)
-            .current_dir(&self.directory)
-            .creation_flags(0x08000000)
-            .env_clear()
-            .env(
-                "SystemRoot",
-                std::env::var_os("SystemRoot").ok_or("Windows 系统目录不可用。")?,
-            )
-            .env("LC_ALL", "C")
             .env("MKE2FS_CONFIG", "mke2fs.conf")
             .env("E2FSCK_CONFIG", "NUL")
             .env("DISKSTUDIO_EXT4_OFFSET", offset.to_string())
@@ -141,7 +149,7 @@ impl Engine {
         Ok(output)
     }
 }
-fn collect(mut input: impl Read) -> Result<String, String> {
+pub(crate) fn collect(mut input: impl Read) -> Result<String, String> {
     let mut output = vec![];
     let mut data = [0; 8192];
     loop {
@@ -156,7 +164,7 @@ fn collect(mut input: impl Read) -> Result<String, String> {
     }
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
-fn tail(s: &str) -> String {
+pub(crate) fn tail(s: &str) -> String {
     s.chars()
         .rev()
         .take(1600)
@@ -1069,9 +1077,13 @@ mod tests {
         ] {
             let mut region = Region::new(file.try_clone().unwrap(), offset, before).unwrap();
             let plan = disk_core::btrfs::plan_resize(&mut region, after).unwrap();
+            let projected = disk_core::btrfs::project_resize(region, &plan, || Ok(())).unwrap();
             let mut target =
                 Region::new(file.try_clone().unwrap(), offset, before.max(after)).unwrap();
             disk_core::btrfs::resize(&mut target, &plan).unwrap();
+            let output = Region::new(file.try_clone().unwrap(), offset, after).unwrap();
+            let checked = disk_core::btrfs::open(output, || Ok(())).unwrap();
+            assert_eq!(projected.identity(), checked.identity());
         }
         for at in [offset - 4096, offset + total - 4096] {
             file.seek(SeekFrom::Start(at)).unwrap();

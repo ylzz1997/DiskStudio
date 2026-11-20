@@ -641,6 +641,7 @@ function Workspace() {
       {modal === "sector" && disk && (
         <SectorViewer
           disk={disk}
+          disks={disks}
           initialPartition={partition?.number}
           onClose={() => setModal(null)}
           onBusy={operationBusy}

@@ -121,11 +121,11 @@ fn partition_problem(p: &Partition, d: &Disk) -> Option<String> {
 fn writable_partition(p: &Partition, d: &Disk) -> bool {
     partition_problem(p, d).is_none()
 }
-fn context(
-    request: &Request,
+pub(crate) fn write_context(
+    source: &data_tasks::Selection,
     old: Option<(&TableReadContext, &device::Locks)>,
 ) -> Result<TableReadContext, String> {
-    let ctx = disk_read_context(&whole(request), old, true)?;
+    let ctx = disk_read_context(source, old, true)?;
     let d = &ctx.resolved.disk;
     if d.is_read_only != Some(false)
         || !matches!(d.bus_type, Some(1 | 3 | 7 | 11 | 17))
@@ -144,13 +144,21 @@ fn context(
         return Err("维护写入需要可写、身份明确的普通 RAW/GPT 磁盘。".into());
     }
     let session = Session::open()?;
-    let current = policy::target_disk(&session.disks, &request.source.target)?;
+    let current = policy::target_disk(&session.disks, &source.target)?;
     if digest(current)? != digest(d)?
         || digest(&policy::layout(current, &session.partitions)?)? != digest(&ctx.parts)?
     {
         return Err("身份核对期间磁盘或布局变化".into());
     }
     device_state::access_identity(&session, current, true)?;
+    Ok(ctx)
+}
+fn context(
+    request: &Request,
+    old: Option<(&TableReadContext, &device::Locks)>,
+) -> Result<TableReadContext, String> {
+    let ctx = write_context(&whole(request), old)?;
+    let d = &ctx.resolved.disk;
     let r = range(request, &ctx)?;
     match &request.operation {
         Operation::Wipe { options } => options.validate(r)?,
@@ -198,23 +206,48 @@ fn context(
             }
         }
     }
+    protect_partitions(&ctx, r)?;
+    Ok(ctx)
+}
+pub(crate) fn protect_partitions(ctx: &TableReadContext, r: Range) -> Result<(), String> {
     for p in ctx
         .parts
         .iter()
         .filter(|p| overlap(r.offset, r.size, p.offset, p.size))
     {
         // No Linux NULL/hidden exception: that exception is for deletion only.
-        if let Some(reason) = partition_problem(p, d) {
+        if let Some(reason) = partition_problem(p, &ctx.resolved.disk) {
             return Err(reason);
         }
     }
-    Ok(ctx)
+    Ok(())
 }
 fn capture(
     ctx: &TableReadContext,
     file: &mut File,
     request: &Request,
 ) -> Result<Option<Vec<u8>>, String> {
+    let r = range(request, ctx)?;
+    let full = matches!(request.operation, Operation::Wipe { .. })
+        && r.offset == 0
+        && r.size == ctx.resolved.size;
+    capture_write_table(
+        ctx,
+        file,
+        &request.source.target,
+        r,
+        request.operation.destructive() && !full,
+    )?
+    .map(|archive| archive.encode())
+    .transpose()
+}
+pub(crate) fn capture_write_table(
+    ctx: &TableReadContext,
+    file: &mut File,
+    identity: &Target,
+    r: Range,
+    protect_table: bool,
+) -> Result<Option<table_archive::Archive>, String> {
     let mut attributes = [0u8; 16];
     if device::control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut attributes)? != 16
         || u32::from_le_bytes(attributes[..4].try_into().unwrap()) != 16
@@ -228,12 +261,17 @@ fn capture(
         }
         let mut native = vec![0u8; 65536];
         let n = device::control(file, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, &[], &mut native)?;
-        if n < 48
-            || u32::from_le_bytes(native[..4].try_into().unwrap()) != 2
-            || u32::from_le_bytes(native[4..8].try_into().unwrap()) != 0
-        {
-            return Err("原生设备并非无分区 RAW 磁盘".into());
-        }
+        let sector = ctx
+            .resolved
+            .disk
+            .logical_sector_size
+            .ok_or("扇区大小缺失")?;
+        verify_empty_raw(
+            file,
+            ctx.resolved.size,
+            sector,
+            &native[..n.min(native.len())],
+        )?;
         return Ok(None);
     }
     let sector = ctx
@@ -245,7 +283,7 @@ fn capture(
         file,
         ctx.resolved.size,
         sector,
-        request.source.target.0.clone(),
+        identity.0.clone(),
         false,
         || Ok(()),
     )?;
@@ -255,7 +293,6 @@ fn capture(
     if !layout.agrees(&native) {
         return Err("原始 GPT 与 Windows 原生布局不一致。".into());
     }
-    let r = range(request, ctx)?;
     for entry in layout
         .entries
         .iter()
@@ -265,19 +302,50 @@ fn capture(
             return Err("所选范围内有受保护或未知的原生 GPT 属性。".into());
         }
     }
-    let full = matches!(request.operation, Operation::Wipe { .. })
-        && r.offset == 0
-        && r.size == ctx.resolved.size;
-    if request.operation.destructive()
-        && !full
+    if protect_table
         && archive
             .extents
             .iter()
             .any(|e| overlap(r.offset, r.size, e.offset, e.bytes.len() as u64))
     {
-        return Err("局部清除/写测速不能覆盖分区表；整盘清除须明确选择完整磁盘。".into());
+        return Err("所选写入范围与分区表重叠。".into());
     }
-    Ok(Some(archive.encode()?))
+    Ok(Some(archive))
+}
+
+fn verify_empty_raw(
+    file: &mut (impl Read + Seek),
+    size: u64,
+    sector: u64,
+    native: &[u8],
+) -> Result<(), String> {
+    let invalid = "原生设备并非无分区 RAW 磁盘";
+    if native.len() < 48 || native[4..8] != [0; 4] {
+        return Err(invalid.into());
+    }
+    match u32::from_le_bytes(native[..4].try_into().unwrap()) {
+        2 => Ok(()),
+        // Windows can return an unsigned, zero-entry MBR header for a disk
+        // classified RAW by the Storage Provider. Confirm the on-disk MBR
+        // and both possible GPT header locations before using this case.
+        0 if native.len() == 48
+            && native[8..12] == [0; 4]
+            && matches!(sector, 512 | 4096)
+            && size >= 3 * sector
+            && size % sector == 0 =>
+        {
+            for (offset, len) in [(0, 2 * sector), (size - sector, sector)] {
+                if table_archive::read_at(file, offset, len as usize, size)?
+                    .iter()
+                    .any(|&byte| byte != 0)
+                {
+                    return Err(invalid.into());
+                }
+            }
+            Ok(())
+        }
+        _ => Err(invalid.into()),
+    }
 }
 fn trim_capability(file: &File) -> Result<(), String> {
     let mut query = [0u8; 12];
@@ -791,6 +859,33 @@ pub fn export(id: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsigned_empty_mbr_header_requires_zero_partition_table_sectors() {
+        use std::io::Cursor;
+        for sector in [512, 4096] {
+            let size = 8 * sector;
+            let mut disk = Cursor::new(vec![0; size as usize]);
+            let mut layout = [0; 48];
+            assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_ok());
+            for offset in [510, sector, size - sector] {
+                disk.get_mut()[offset as usize] = 1;
+                assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_err());
+                disk.get_mut()[offset as usize] = 0;
+            }
+            layout[8] = 1;
+            assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_err());
+            layout[8] = 0;
+            layout[4] = 1;
+            assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_err());
+            layout[4] = 0;
+            layout[0] = 1;
+            assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_err());
+            layout[0] = 2;
+            assert!(verify_empty_raw(&mut disk, size, sector, &layout).is_ok());
+        }
+    }
+
     #[test]
     fn trim_serialization_cannot_enable_other_optimizations() {
         assert_eq!(

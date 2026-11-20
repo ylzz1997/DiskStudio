@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Dialog, FormError } from "./components";
 import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle } from "./LocalDiskView";
+import type { Translate } from "./i18n/translate";
 import { formatSize, type Disk } from "./types";
 
 export type LvmMember = {
@@ -9,6 +10,37 @@ export type LvmMember = {
   layoutKey: string;
   partition: number | null;
 };
+export function physicalMemberOptions(disks: Disk[], t: Translate) {
+  return disks.flatMap((disk) => {
+    const hardware = disk.hardware;
+    if (disk.kind !== "physical" || !hardware?.identity || !hardware.layoutKey)
+      return [];
+    const name = diskTitle(disk, t);
+    const scopes = disk.partitions
+      .filter((part) => part.number !== undefined && !part.system)
+      .map((part) => ({
+        partition: part.number!,
+        label: t("分区 {number}", { number: part.number! }),
+        size: part.size,
+      }));
+    const whole =
+      !hardware.isSystem && !disk.partitions.some((part) => part.system && part.role !== "MSR 保留")
+        ? [{ partition: null, label: t("整个磁盘"), size: disk.size }]
+        : [];
+    return [...whole, ...scopes].map(({ partition, label, size }) => {
+      const source = {
+        target: hardware.identity!,
+        layoutKey: hardware.layoutKey!,
+        partition,
+      };
+      return {
+        key: JSON.stringify(source),
+        source,
+        label: `${name} · ${label} · ${formatSize(size)}`,
+      };
+    });
+  });
+}
 export type LvmView = {
   id: string;
   name: string;
@@ -138,35 +170,7 @@ export function LvmBrowserDialog({
   const [deleted, setDeleted] = useState(false);
   const [allowDegradedRaid, setAllowDegradedRaid] = useState(view?.allowDegradedRaid ?? false);
   const [filter, setFilter] = useState("");
-  const offered = disks.flatMap((disk) => {
-    const hardware = disk.hardware;
-    if (disk.kind !== "physical" || !hardware?.identity || !hardware.layoutKey)
-      return [];
-    const name = diskTitle(disk, t);
-    const scopes = disk.partitions
-      .filter((part) => part.number !== undefined && !part.system)
-      .map((part) => ({
-        partition: part.number!,
-        label: t("分区 {number}", { number: part.number! }),
-        size: part.size,
-      }));
-    const whole =
-      !hardware.isSystem && !disk.partitions.some((part) => part.system)
-        ? [{ partition: null, label: t("整个磁盘"), size: disk.size }]
-        : [];
-    return [...whole, ...scopes].map(({ partition, label, size }) => {
-      const source = {
-        target: hardware.identity!,
-        layoutKey: hardware.layoutKey!,
-        partition,
-      };
-      return {
-        key: JSON.stringify(source),
-        source,
-        label: `${name} · ${label} · ${formatSize(size)}`,
-      };
-    });
-  });
+  const offered = physicalMemberOptions(disks, t);
   const members = offered.filter(({ key }) => selected.includes(key));
   const query = filter.trim().toLocaleLowerCase();
   const visible = offered.filter(({ label }) => label.toLocaleLowerCase().includes(query));

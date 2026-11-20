@@ -16,6 +16,9 @@ mod backup_files;
 mod backup_protection;
 #[path = "../../../../src-tauri/src/backup_secrets.rs"]
 mod backup_secrets;
+#[path = "../../../../src-tauri/src/bitlocker.rs"]
+mod bitlocker;
+mod bitlocker_checks;
 mod btrfs_checks;
 #[path = "../../../../src-tauri/src/btrfs_recovery.rs"]
 mod btrfs_recovery;
@@ -44,6 +47,7 @@ mod ext_recovery;
 mod ext_resume_checks;
 #[path = "../../../../src-tauri/src/extfs.rs"]
 mod extfs;
+mod fat_reconstruction_checks;
 #[path = "../../../../src-tauri/src/fat_recovery.rs"]
 mod fat_recovery;
 mod fat_resize_checks;
@@ -51,6 +55,8 @@ mod fat_resume_checks;
 mod fat_sector_checks;
 #[path = "../../../../src-tauri/src/fat_volume.rs"]
 mod fat_volume;
+mod file_clone_checks;
+mod whole_file_clone_checks;
 #[path = "../../../../src-tauri/src/file_metadata.rs"]
 mod file_metadata;
 mod format_checks;
@@ -64,7 +70,11 @@ mod image_browser;
 #[path = "../../../../src-tauri/src/image_files.rs"]
 mod image_files;
 mod letter_outcome_checks;
+mod lost_backup_boot_checks;
 mod lost_fixture;
+#[cfg(test)]
+#[path = "../../../../src-tauri/src/lost_partition_restore.rs"]
+mod lost_partition_restore;
 #[path = "../../../../src-tauri/src/lost_partition_tasks.rs"]
 mod lost_partition_tasks;
 #[path = "../../../../src-tauri/src/lost_partitions.rs"]
@@ -86,8 +96,12 @@ mod ntfs_allocation;
 mod ntfs_checkpoint;
 #[path = "../../../../src-tauri/src/ntfs_compression.rs"]
 mod ntfs_compression;
+#[path = "../../../../src-tauri/src/ntfs_file_clone.rs"]
+mod ntfs_file_clone;
+mod ntfs_file_clone_checks;
 #[path = "../../../../src-tauri/src/ntfs_names.rs"]
 mod ntfs_names;
+mod ntfs_reconstruction_checks;
 mod ntfs_resume_seed;
 #[path = "../../../../src-tauri/src/ntfs_scan.rs"]
 mod ntfs_scan;
@@ -116,6 +130,9 @@ mod recovery_output;
 mod recovery_output_checks;
 #[path = "../../../../src-tauri/src/recovery_tree.rs"]
 mod recovery_tree;
+mod resize_clone_checks;
+mod retained_restore_checks;
+mod archive_restore_checks;
 #[path = "../../../../src-tauri/src/sector_copy.rs"]
 mod sector_copy;
 mod sector_copy_checks;
@@ -138,6 +155,8 @@ mod table_archive;
 mod table_restore;
 #[path = "../../../../src-tauri/src/used_space.rs"]
 mod used_space;
+#[path = "../../../../src-tauri/src/windows_protection.rs"]
+mod windows_protection;
 use data_tasks::{Selection, Work};
 use partitions::policy::{identity, Disk};
 use serde::Deserialize;
@@ -574,10 +593,71 @@ fn main() {
             "Btrfs-Lab-4Kn-Create"
                 | "Btrfs-Lab-4Kn-Inspect"
                 | "Btrfs-Lab-4Kn-Online"
+                | "File-Clone-Ntfs-4Kn-Prepare"
+                | "File-Clone-Ntfs-4Kn-Baseline"
+                | "File-Clone-Ntfs-4Kn-Verify"
+                | "File-Clone-Ntfs-4Kn-Inspect-Source"
+                | "File-Clone-Ntfs-4Kn-Settled-Baseline"
+                | "File-Clone-Ntfs-4Kn-Verify-Settled"
+                | "File-Clone-Ntfs-4Kn-Audit-Settled"
+                | "File-Clone-Ntfs-4Kn-Metadata-Prepare"
+                | "File-Clone-Ntfs-4Kn-Metadata-Continue"
+                | "File-Clone-Ntfs-4Kn-Metadata-Inspect"
+                | "File-Clone-Ntfs-4Kn-Metadata-Inspect-Sample"
+                | "File-Clone-Ntfs-4Kn-Metadata-Baseline"
+                | "File-Clone-Ntfs-4Kn-Metadata-Verify"
+                | "File-Clone-Ntfs-4Kn-Storage-Prepare"
+                | "File-Clone-Ntfs-4Kn-Storage-Baseline"
+                | "File-Clone-Ntfs-4Kn-Storage-Verify"
+                | "File-Clone-Ntfs-4Kn-Storage-Audit"
+                | "File-Clone-Ntfs-4Kn-Links-Prepare"
+                | "File-Clone-Ntfs-4Kn-Links-Baseline"
+                | "File-Clone-Ntfs-4Kn-Links-Verify"
+                | "File-Clone-Ntfs-4Kn-Links-Inspect"
+                | "File-Clone-Ntfs-4Kn-Links-Resume-Baseline"
+                | "File-Clone-Ntfs-4Kn-Links-Resume-Verify"
+                | "File-Clone-Ntfs-4Kn-Links-Root-Audit"
+                | "File-Clone-Ntfs-4Kn-Wof-Prepare"
+                | "File-Clone-Ntfs-4Kn-Wof-Baseline"
+                | "File-Clone-Ntfs-4Kn-Wof-Verify"
+                | "File-Clone-Ntfs-4Kn-Wof-Continue"
+                | "File-Clone-Ntfs-4Kn-Wof-Resume-Baseline"
+                | "File-Clone-Ntfs-4Kn-Wof-Resume-Verify"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Prepare"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Baseline"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Verify"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Continue"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Resume-Baseline"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Resume-Verify"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-After-Online"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Settled-Baseline"
+                | "File-Clone-Ntfs-4Kn-Wof-Image-Settled-Verify"
+                | "File-Clone-Ntfs-4Kn-Efs-Prepare"
+                | "File-Clone-Ntfs-4Kn-Efs-Baseline"
+                | "File-Clone-Ntfs-4Kn-Efs-Verify"
+                | "Whole-File-Clone-4Kn-Prepare"
+                | "Whole-File-Clone-4Kn-Resume"
+                | "Whole-File-Clone-4Kn-Rebind"
+                | "Whole-File-Clone-4Kn-Verify"
+                | "Mixed-File-Clone-4Kn-Prepare"
+                | "Mixed-File-Clone-4Kn-Resume"
+                | "Mixed-File-Clone-4Kn-Verify"
+                | "Btrfs-Restore-4Kn-Prepare"
+                | "Btrfs-Restore-4Kn-Resume"
+                | "Btrfs-Restore-4Kn-Verify"
+                | "Archive-Restore-4Kn-Prepare"
+                | "Archive-Restore-4Kn-Continue"
+                | "Archive-Restore-4Kn-Verify-Partition"
+                | "Archive-Restore-4Kn-Verify-Disk"
                 | "Btrfs-Lab-4Kn-Move-Prepare"
                 | "Btrfs-Lab-4Kn-Move-Inspect"
                 | "Btrfs-Lab-4Kn-Move-Reuse"
                 | "Btrfs-Lab-4Kn-Move-Reuse-Inspect"
+                | "Btrfs-Lab-4Kn-Clone-Prepare"
+                | "Btrfs-Lab-4Kn-Clone-Resume"
+                | "Btrfs-Lab-4Kn-Clone-Diagnose"
+                | "Btrfs-Lab-4Kn-Clone-Inspect-Shrink"
+                | "Btrfs-Lab-4Kn-Clone-Inspect-Grow"
                 | "Btrfs-Lab-4Kn-Snapshot-Prepare"
                 | "Btrfs-Lab-4Kn-Snapshot-Inspect"
                 | "Btrfs-Lab-4Kn-Retained-Prepare"
@@ -613,9 +693,42 @@ fn main() {
                 | "Lvm-Raid10-4Kn-Inspect"
                 | "Virtual-Raid-4Kn-Prepare"
                 | "Virtual-Raid-4Kn-Inspect"
+                | "Virtual-Raid-Md6-Prepare"
+                | "Virtual-Raid-Md6-Inspect"
+                | "Virtual-Raid-Md-Metadata-Prepare"
+                | "Virtual-Raid-Md-Metadata-Inspect"
+                | "Virtual-Raid-Md10-Stage"
+                | "Virtual-Raid-Md10-Verify"
+                | "Virtual-Raid-Md10-Advanced-Stage"
+                | "Virtual-Raid-Md10-Advanced-Verify"
+                | "Virtual-Raid-Device-Fresh-Prepare"
+                | "Virtual-Raid-Device-Fresh-Inspect"
+                | "Virtual-Raid-Md-Zones-Prepare"
+                | "Virtual-Raid-Md-Zones-Inspect"
+                | "Virtual-Raid-Md-Zones-Continue"
                 | "Sector-Copy-4Kn-Baseline"
                 | "Sector-Copy-4Kn-Verify"
                 | "Sector-Copy-4Kn-Verify-Report"
+                | "Sector-Copy-Fault-4Kn-Prepare"
+                | "Sector-Copy-Fault-4Kn-Verify"
+                | "Sector-Copy-Device-4Kn-Prepare"
+                | "Sector-Copy-Device-4Kn-Continue"
+                | "Sector-Copy-Device-4Kn-Verify"
+                | "Sector-Copy-Reread-4Kn-Prepare"
+                | "Sector-Copy-Reread-4Kn-Verify-File"
+                | "Sector-Copy-Reread-4Kn-Verify-Device"
+                | "Sector-Copy-Reread-4Kn-Probe"
+                | "Sector-Continuation-4Kn-Prepare"
+                | "Sector-Continuation-4Kn-Interrupted"
+                | "Sector-Continuation-4Kn-Reread"
+                | "Sector-Continuation-4Kn-Finish"
+                | "Sector-Legacy-4Kn-Prepare"
+                | "Sector-Legacy-4Kn-File"
+                | "Sector-Legacy-4Kn-Rearm"
+                | "Sector-Legacy-4Kn-Device"
+                | "Sector-Image-4Kn-Prepare"
+                | "Sector-Image-4Kn-File"
+                | "Sector-Image-4Kn-Device"
                 | "Fat-Sectors-4Kn-Check"
                 | "Fat-Sectors-4Kn-Report"
                 | "Fat-Sectors-4Kn-Diagnose"
@@ -674,10 +787,29 @@ fn main() {
 
 fn dispatch(mode: Option<&str>) -> Result<String, String> {
     match mode {
+        Some("Whole-File-Clone-4Kn-Prepare") => whole_file_clone_checks::prepare(false),
+        Some("Whole-File-Clone-4Kn-Resume") => whole_file_clone_checks::prepare(true),
+        Some("Whole-File-Clone-4Kn-Rebind") => whole_file_clone_checks::rebind(),
+        Some("Whole-File-Clone-4Kn-Verify") => whole_file_clone_checks::verify(),
+        Some("Mixed-File-Clone-4Kn-Prepare") => btrfs_checks::whole_clone::prepare(false),
+        Some("Mixed-File-Clone-4Kn-Resume") => btrfs_checks::whole_clone::prepare(true),
+        Some("Mixed-File-Clone-4Kn-Verify") => btrfs_checks::whole_clone::verify(),
+        Some("Btrfs-Restore-4Kn-Prepare") => btrfs_checks::backup_restore::prepare(false),
+        Some("Btrfs-Restore-4Kn-Resume") => btrfs_checks::backup_restore::prepare(true),
+        Some("Btrfs-Restore-4Kn-Verify") => btrfs_checks::backup_restore::verify(),
+        Some("Archive-Restore-4Kn-Prepare") => archive_restore_checks::prepare(false),
+        Some("Archive-Restore-4Kn-Continue") => archive_restore_checks::prepare(true),
+        Some("Archive-Restore-4Kn-Verify-Partition") => archive_restore_checks::verify(false),
+        Some("Archive-Restore-4Kn-Verify-Disk") => archive_restore_checks::verify(true),
         Some("Btrfs-Lab-4Kn-Create") => btrfs_checks::create(),
         Some("Btrfs-Lab-4Kn-Inspect") => btrfs_checks::inspect(),
         Some("Btrfs-Lab-4Kn-Online") => btrfs_checks::online_fixture(),
         Some("Btrfs-Lab-4Kn-Move-Prepare") => btrfs_checks::prepare_move(false),
+        Some("Btrfs-Lab-4Kn-Clone-Prepare") => btrfs_checks::capacity_clone::prepare(),
+        Some("Btrfs-Lab-4Kn-Clone-Resume") => btrfs_checks::capacity_clone::resume(),
+        Some("Btrfs-Lab-4Kn-Clone-Diagnose") => btrfs_checks::capacity_clone::diagnose(),
+        Some("Btrfs-Lab-4Kn-Clone-Inspect-Shrink") => btrfs_checks::capacity_clone::verify(false),
+        Some("Btrfs-Lab-4Kn-Clone-Inspect-Grow") => btrfs_checks::capacity_clone::verify(true),
         Some("Btrfs-Lab-4Kn-Move-Reuse") => btrfs_checks::prepare_move(true),
         Some("Btrfs-Lab-4Kn-Move-Inspect" | "Btrfs-Lab-4Kn-Move-Reuse-Inspect") => {
             btrfs_checks::inspect_move()
@@ -711,22 +843,107 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Lvm-Lab-4Kn-Inspect") => btrfs_checks::lvm::inspect(),
         Some("Lvm-Images-4Kn-Prepare") => btrfs_checks::lvm::images::prepare(),
         Some("Lvm-Images-4Kn-Inspect") => btrfs_checks::lvm::images::inspect(),
-        Some("Lvm-Raid-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID),
-        Some("Lvm-Raid-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID),
-        Some("Lvm-Thin-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::THIN),
-        Some("Lvm-Thin-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::THIN),
-        Some("Lvm-Cow-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::COW),
-        Some("Lvm-Cow-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::COW),
-        Some("Lvm-Degraded-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::DEGRADED),
-        Some("Lvm-Degraded-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::DEGRADED),
+        Some("Lvm-Raid-4Kn-Prepare") => {
+            btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID)
+        }
+        Some("Lvm-Raid-4Kn-Inspect") => {
+            btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID)
+        }
+        Some("Lvm-Thin-4Kn-Prepare") => {
+            btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::THIN)
+        }
+        Some("Lvm-Thin-4Kn-Inspect") => {
+            btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::THIN)
+        }
+        Some("Lvm-Cow-4Kn-Prepare") => {
+            btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::COW)
+        }
+        Some("Lvm-Cow-4Kn-Inspect") => {
+            btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::COW)
+        }
+        Some("Lvm-Degraded-4Kn-Prepare") => {
+            btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::DEGRADED)
+        }
+        Some("Lvm-Degraded-4Kn-Inspect") => {
+            btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::DEGRADED)
+        }
         Some("Lvm-Cross-4Kn-Prepare") => btrfs_checks::lvm::cross::prepare(),
         Some("Lvm-Cross-4Kn-Inspect") => btrfs_checks::lvm::cross::inspect(),
-        Some("Lvm-Raid10-4Kn-Prepare") => btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID10),
-        Some("Lvm-Raid10-4Kn-Inspect") => btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID10),
-        Some("Virtual-Raid-4Kn-Prepare") => btrfs_checks::virtual_raid::prepare(),
-        Some("Virtual-Raid-4Kn-Inspect") => btrfs_checks::virtual_raid::inspect(),
+        Some("Lvm-Raid10-4Kn-Prepare") => {
+            btrfs_checks::lvm::group_images::prepare(btrfs_checks::lvm::group_images::RAID10)
+        }
+        Some("Lvm-Raid10-4Kn-Inspect") => {
+            btrfs_checks::lvm::group_images::inspect(btrfs_checks::lvm::group_images::RAID10)
+        }
+        Some("Virtual-Raid-4Kn-Prepare") => {
+            btrfs_checks::virtual_raid::prepare(btrfs_checks::virtual_raid::Mode::Raid5)
+        }
+        Some("Virtual-Raid-4Kn-Inspect") => {
+            btrfs_checks::virtual_raid::inspect(btrfs_checks::virtual_raid::Mode::Raid5)
+        }
+        Some("Virtual-Raid-Md6-Prepare") => {
+            btrfs_checks::virtual_raid::prepare(btrfs_checks::virtual_raid::Mode::Md6)
+        }
+        Some("Virtual-Raid-Md6-Inspect") => {
+            btrfs_checks::virtual_raid::inspect(btrfs_checks::virtual_raid::Mode::Md6)
+        }
+        Some("Virtual-Raid-Md-Metadata-Prepare") => {
+            btrfs_checks::virtual_raid::prepare(btrfs_checks::virtual_raid::Mode::MdMetadata)
+        }
+        Some("Virtual-Raid-Md-Metadata-Inspect") => {
+            btrfs_checks::virtual_raid::inspect(btrfs_checks::virtual_raid::Mode::MdMetadata)
+        }
+        Some("Virtual-Raid-Md10-Stage") => {
+            btrfs_checks::virtual_raid::prepare(btrfs_checks::virtual_raid::Mode::Md10)
+        }
+        Some("Virtual-Raid-Md10-Verify") => {
+            btrfs_checks::virtual_raid::inspect(btrfs_checks::virtual_raid::Mode::Md10)
+        }
+        Some("Virtual-Raid-Md10-Advanced-Stage") => {
+            btrfs_checks::virtual_raid::prepare(btrfs_checks::virtual_raid::Mode::Md10Advanced)
+        }
+        Some("Virtual-Raid-Md10-Advanced-Verify") => {
+            btrfs_checks::virtual_raid::inspect(btrfs_checks::virtual_raid::Mode::Md10Advanced)
+        }
+        Some("Virtual-Raid-Device-Fresh-Prepare") => btrfs_checks::virtual_raid::devices::prepare(
+            btrfs_checks::virtual_raid::devices::Mode::Manual,
+        ),
+        Some("Virtual-Raid-Device-Fresh-Inspect") => btrfs_checks::virtual_raid::devices::inspect(
+            btrfs_checks::virtual_raid::devices::Mode::Manual,
+        ),
+        Some("Virtual-Raid-Md-Zones-Prepare") => btrfs_checks::virtual_raid::devices::prepare(
+            btrfs_checks::virtual_raid::devices::Mode::MdZones,
+        ),
+        Some("Virtual-Raid-Md-Zones-Inspect") => btrfs_checks::virtual_raid::devices::inspect(
+            btrfs_checks::virtual_raid::devices::Mode::MdZones,
+        ),
+        Some("Virtual-Raid-Md-Zones-Continue") => {
+            btrfs_checks::virtual_raid::devices::finish_zones()
+        }
         Some("Sector-Copy-4Kn-Baseline") => sector_copy_checks::baseline(),
         Some("Sector-Copy-4Kn-Verify") => sector_copy_checks::verify(),
+        Some("Sector-Copy-Fault-4Kn-Prepare") => sector_copy_checks::fault_prepare(),
+        Some("Sector-Copy-Fault-4Kn-Verify") => sector_copy_checks::fault_verify(),
+        Some("Sector-Copy-Device-4Kn-Prepare") => sector_copy_checks::device_prepare(),
+        Some("Sector-Copy-Device-4Kn-Continue") => sector_copy_checks::device_continue(),
+        Some("Sector-Copy-Device-4Kn-Verify") => sector_copy_checks::device_verify(),
+        Some("Sector-Copy-Reread-4Kn-Prepare") => sector_copy_checks::reread_prepare(),
+        Some("Sector-Copy-Reread-4Kn-Verify-File") => sector_copy_checks::reread_file_verify(),
+        Some("Sector-Copy-Reread-4Kn-Verify-Device") => sector_copy_checks::reread_device_verify(),
+        Some("Sector-Copy-Reread-4Kn-Probe") => sector_copy_checks::reread_probe(),
+        Some("Sector-Continuation-4Kn-Prepare") => sector_copy_checks::continuation_prepare(),
+        Some("Sector-Continuation-4Kn-Interrupted") => {
+            sector_copy_checks::continuation_interrupted()
+        }
+        Some("Sector-Continuation-4Kn-Reread") => sector_copy_checks::continuation_reread(),
+        Some("Sector-Continuation-4Kn-Finish") => sector_copy_checks::continuation_finish(),
+        Some("Sector-Legacy-4Kn-Prepare") => sector_copy_checks::legacy_prepare(),
+        Some("Sector-Legacy-4Kn-File") => sector_copy_checks::legacy_file(),
+        Some("Sector-Legacy-4Kn-Rearm") => sector_copy_checks::legacy_rearm(),
+        Some("Sector-Legacy-4Kn-Device") => sector_copy_checks::legacy_device(),
+        Some("Sector-Image-4Kn-Prepare") => sector_copy_checks::image_prepare(),
+        Some("Sector-Image-4Kn-File") => sector_copy_checks::image_file(),
+        Some("Sector-Image-4Kn-Device") => sector_copy_checks::image_device(),
         Some("Sector-Copy-4Kn-Verify-Report") => {
             backup_protection::report(sector_copy_checks::VERIFY)
         }
@@ -893,6 +1110,168 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Lost-Fixture-Seed") => lost_fixture::seed(),
         Some("Lost-Fixture-Verify") => lost_fixture::verify(),
         Some("Lost-Fixture-Inspect") => lost_fixture::inspect_seed(),
+        Some("Ntfs-Reconstruct-Prepare") => ntfs_reconstruction_checks::prepare(),
+        Some("Ntfs-Reconstruct-Inspect") => ntfs_reconstruction_checks::inspect(),
+        Some("Ntfs-Reconstruct-Seed") => ntfs_reconstruction_checks::seed_registered(),
+        Some("Ntfs-Reconstruct-Verify") => ntfs_reconstruction_checks::verify(),
+        Some("Fat-Reconstruct-Prepare") => fat_reconstruction_checks::prepare(),
+        Some("Fat-Reconstruct-Verify") => fat_reconstruction_checks::verify(),
+        Some("Lost-Backup-Boot-Prepare") => lost_backup_boot_checks::prepare(),
+        Some("Lost-Backup-Boot-Verify") => lost_backup_boot_checks::verify(),
+        Some("BitLocker-Marker-Prepare") => bitlocker_checks::prepare(),
+        Some("BitLocker-Marker-Verify") => bitlocker_checks::verify(),
+        Some("Resize-Clone-Prepare") => resize_clone_checks::prepare(),
+        Some("Resize-Clone-Continue") => resize_clone_checks::continue_preparation(),
+        Some("Resize-Clone-After-Growth") => resize_clone_checks::verify(true),
+        Some("Resize-Clone-Verify") => resize_clone_checks::verify(false),
+        Some("Retained-Restore-Prepare") => retained_restore_checks::prepare(),
+        Some("Retained-Restore-Assess") => retained_restore_checks::assess_preparation(),
+        Some("Retained-Restore-After-Exact") => retained_restore_checks::verify(true),
+        Some("Retained-Restore-Verify") => retained_restore_checks::verify(false),
+        Some("File-Clone-Prepare") => file_clone_checks::prepare(file_clone_checks::Case::Fat),
+        Some("File-Clone-Verify") => file_clone_checks::verify(file_clone_checks::Case::Fat),
+        Some("File-Clone-Exfat-Prepare") => {
+            file_clone_checks::prepare(file_clone_checks::Case::Exfat)
+        }
+        Some("File-Clone-Exfat-Continue") => file_clone_checks::continue_exfat_preparation(),
+        Some("File-Clone-Exfat-Verify") => {
+            file_clone_checks::verify(file_clone_checks::Case::Exfat)
+        }
+        Some("File-Clone-Ntfs-Prepare") => ntfs_file_clone_checks::prepare(),
+        Some("File-Clone-Ntfs-Continue") => ntfs_file_clone_checks::continue_preparation(),
+        Some("File-Clone-Ntfs-Assess") => ntfs_file_clone_checks::prepare_seeded(),
+        Some("File-Clone-Ntfs-Confirm-Prepared") => {
+            ntfs_file_clone_checks::prepare_existing_target()
+        }
+        Some("File-Clone-Ntfs-Inspect") => ntfs_file_clone_checks::inspect_seeded(),
+        Some("File-Clone-Ntfs-Source-Lock") => ntfs_file_clone_checks::source_lock::diagnose(),
+        Some("File-Clone-Ntfs-Verify") => ntfs_file_clone_checks::verify(),
+        Some("File-Clone-Ntfs-4Kn-Prepare" | "File-Clone-Ntfs-4Kn-Metadata-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(
+                if mode.as_deref() == Some("File-Clone-Ntfs-4Kn-Metadata-Prepare") {
+                    Case::Metadata
+                } else {
+                    Case::Standard
+                },
+            )
+        }
+        Some("File-Clone-Ntfs-4Kn-Metadata-Continue") => {
+            ntfs_file_clone_checks::four_kn::continue_metadata_prepare()
+        }
+        Some("File-Clone-Ntfs-4Kn-Metadata-Inspect") => {
+            ntfs_file_clone_checks::four_kn::inspect_metadata_record()
+        }
+        Some("File-Clone-Ntfs-4Kn-Metadata-Inspect-Sample") => {
+            ntfs_file_clone_checks::four_kn::inspect_metadata_sample()
+        }
+        Some("File-Clone-Ntfs-4Kn-Storage-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(Case::Storage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Storage-Baseline") => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(Case::Storage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Storage-Verify" | "File-Clone-Ntfs-4Kn-Storage-Audit") => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(Case::Storage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Links-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(Case::Links)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(Case::Wof)
+        }
+        Some("File-Clone-Ntfs-4Kn-Efs-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(Case::Efs)
+        }
+        Some("File-Clone-Ntfs-4Kn-Efs-Baseline") => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(Case::Efs)
+        }
+        Some("File-Clone-Ntfs-4Kn-Efs-Verify") => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(Case::Efs)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Image-Prepare") => {
+            use ntfs_file_clone_checks::four_kn::{prepare, Case};
+            prepare(Case::WofImage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Image-Continue") => {
+            ntfs_file_clone_checks::four_kn::continue_wof_image_prepare()
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Image-After-Online") => {
+            ntfs_file_clone_checks::four_kn::after_wof_image_online()
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Image-Baseline" | "File-Clone-Ntfs-4Kn-Wof-Image-Resume-Baseline" | "File-Clone-Ntfs-4Kn-Wof-Image-Settled-Baseline") => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(Case::WofImage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Image-Verify" | "File-Clone-Ntfs-4Kn-Wof-Image-Resume-Verify" | "File-Clone-Ntfs-4Kn-Wof-Image-Settled-Verify") => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(Case::WofImage)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Baseline" | "File-Clone-Ntfs-4Kn-Wof-Resume-Baseline") => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(Case::Wof)
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Continue") => {
+            ntfs_file_clone_checks::four_kn::continue_wof_prepare()
+        }
+        Some("File-Clone-Ntfs-4Kn-Wof-Verify" | "File-Clone-Ntfs-4Kn-Wof-Resume-Verify") => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(Case::Wof)
+        }
+        Some(
+            "File-Clone-Ntfs-4Kn-Links-Baseline" | "File-Clone-Ntfs-4Kn-Links-Resume-Baseline",
+        ) => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(Case::Links)
+        }
+        Some(
+            "File-Clone-Ntfs-4Kn-Links-Verify"
+            | "File-Clone-Ntfs-4Kn-Links-Resume-Verify"
+            | "File-Clone-Ntfs-4Kn-Links-Root-Audit",
+        ) => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(Case::Links)
+        }
+        Some("File-Clone-Ntfs-4Kn-Links-Inspect") => {
+            ntfs_file_clone_checks::four_kn::inspect_link_record()
+        }
+        Some("File-Clone-Ntfs-4Kn-Baseline" | "File-Clone-Ntfs-4Kn-Metadata-Baseline") => {
+            use ntfs_file_clone_checks::four_kn::{baseline, Case};
+            baseline(
+                if mode.as_deref() == Some("File-Clone-Ntfs-4Kn-Metadata-Baseline") {
+                    Case::Metadata
+                } else {
+                    Case::Standard
+                },
+            )
+        }
+        Some("File-Clone-Ntfs-4Kn-Verify" | "File-Clone-Ntfs-4Kn-Metadata-Verify") => {
+            use ntfs_file_clone_checks::four_kn::{verify, Case};
+            verify(
+                if mode.as_deref() == Some("File-Clone-Ntfs-4Kn-Metadata-Verify") {
+                    Case::Metadata
+                } else {
+                    Case::Standard
+                },
+            )
+        }
+        Some("File-Clone-Ntfs-4Kn-Inspect-Source") => {
+            ntfs_file_clone_checks::four_kn::inspect_source()
+        }
+        Some("File-Clone-Ntfs-4Kn-Settled-Baseline") => {
+            ntfs_file_clone_checks::four_kn::settled_baseline()
+        }
+        Some("File-Clone-Ntfs-4Kn-Verify-Settled" | "File-Clone-Ntfs-4Kn-Audit-Settled") => {
+            ntfs_file_clone_checks::four_kn::verify_settled()
+        }
         Some("--fat-resume-checks" | "Fat-Resume-Checks") => fat_resume_checks::check(),
         Some("--ext-resume-checks" | "Ext-Resume-Checks") => ext_resume_checks::check(),
         Some("--ntfs-resume-seed" | "Ntfs-Resume-Seed") => ntfs_resume_seed::create(),

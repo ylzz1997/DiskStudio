@@ -109,6 +109,17 @@ mod platform {
     }
     impl Group {
         pub fn raw_readers(&self) -> Result<Vec<crate::data_io::Region<File>>, String> {
+            self.open_readers(crate::data_io::Region::new)
+        }
+
+        pub(crate) fn metadata_readers(&self) -> Result<Vec<crate::data_io::Region<File>>, String> {
+            self.open_readers(crate::data_io::Region::for_metadata)
+        }
+
+        fn open_readers(
+            &self,
+            region: impl Fn(File, u64, u64) -> std::io::Result<crate::data_io::Region<File>>,
+        ) -> Result<Vec<crate::data_io::Region<File>>, String> {
             self.entries
                 .lock()
                 .map_err(|_| "镜像文件状态异常".to_string())?
@@ -128,7 +139,7 @@ mod platform {
                         return Err(std::io::Error::last_os_error().to_string());
                     }
                     let file = unsafe { File::from_raw_handle(handle) };
-                    crate::data_io::Region::new(file, 0, entry.info.size).map_err(|e| e.to_string())
+                    region(file, 0, entry.info.size).map_err(|e| e.to_string())
                 })
                 .collect()
         }

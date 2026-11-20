@@ -17,16 +17,18 @@ import {
   Save,
   Upload,
 } from "lucide-react";
-import type { Disk } from "./types";
+import type { DataPlan, Disk, Partition } from "./types";
 import { formatSize } from "./types";
 import { Dialog, FormError, Hint } from "./components";
 import { native } from "./backend";
 import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
+import { BackupRestoreDialog } from "./BackupRestoreDialog";
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
+import { SectorCopyPanel } from "./SectorCopyPanel";
 import { ImageLvmDialog, type ImageLvmInfo } from "./ImageLvmDialog";
-import { VirtualRaidDialog, type RaidFiles, type RaidView } from "./VirtualRaidDialog";
-import type { ImageBrowseOptions } from "./ImageBrowserPanel";
+import { VirtualRaidDialog, type RaidDetection, type RaidEdit, type RaidFiles, type RaidView } from "./VirtualRaidDialog";
+import type { ImageBrowseMode, ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
@@ -55,6 +57,9 @@ type Selection = {
   layoutKey: string;
   partition: number | null;
 };
+type ReconstructionSource =
+  | { type: "partition"; selection: Selection }
+  | { type: "backup" | "image"; id: string; partition: number };
 type Job = {
   id: string;
   title: string;
@@ -65,15 +70,6 @@ type Job = {
   found: number;
   message: string;
   sha256: string | null;
-};
-type Plan = {
-  token: string;
-  title: string;
-  source: string;
-  destination: string;
-  bytes: number;
-  warning: string;
-  destructive: boolean;
 };
 type Preview = { name: string; bytes: number[]; truncated: boolean };
 type ScanStatus = {
@@ -107,7 +103,7 @@ const options = [
     id: "clone",
     icon: Copy,
     name: "磁盘与分区克隆",
-    description: "按已用空间或逐扇区复制",
+    description: "按扇区、已用空间或文件克隆",
   },
 ] as const;
 function selection(d: Disk | undefined, p: string): Selection {
@@ -154,6 +150,8 @@ export function DataTools({
   const [copyMode, setCopyMode] = useState<"allSectors" | "usedSpace">(
     "allSectors",
   );
+  const [partitionClone, setPartitionClone] = useState<"standard" | "resize" | "files" | "diskFiles">("standard");
+  const [diskCloneSizes, setDiskCloneSizes] = useState<Record<number, string>>({});
   const [sourceExpanded, setSourceExpanded] = useState(true);
   const [destination, setDestination] = useState("");
   const [destinationPartition, setDestinationPartition] = useState("");
@@ -168,19 +166,24 @@ export function DataTools({
   const [browsingBackup, setBrowsingBackup] = useState(false);
   const [browsingImage, setBrowsingImage] = useState(false);
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
+  const [imageCopy, setImageCopy] = useState<{ id: string; partition: string } | null>(null);
+  const [imageCopyBusy, setImageCopyBusy] = useState(false);
+  const imageCopyPart = imageInfo?.partitions.find((part) => String(part.id) === imageCopy?.partition);
   const [imageLvmInfo, setImageLvmInfo] = useState<ImageLvmInfo | null>(null);
   const [imageLvmOpen, setImageLvmOpen] = useState(false);
   const [raidInfo, setRaidInfo] = useState<RaidView | null>(null);
   const [raidFiles, setRaidFiles] = useState<RaidFiles | null>(null);
+  const [raidEdit, setRaidEdit] = useState<RaidEdit | null>(null);
   const [raidOpen, setRaidOpen] = useState(false);
   const [imageDraft, setImageDraft] = useState<{
     group: NativeImageGroup;
     options: ImageBrowseOptions;
   } | null>(null);
   const [backupInfo, setBackupInfo] = useState<BackupInfo | null>(null);
+  const [backupRestore, setBackupRestore] = useState<{ id: string; partition: number | null } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  const [plan, setPlan] = useState<Plan | null>(null);
+  const [plan, setPlan] = useState<DataPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
@@ -199,7 +202,9 @@ export function DataTools({
         : browsingBackup
           ? (backupInfo?.scanId ?? "")
           : ""
-      : scanId;
+      : page === "recovery"
+        ? (raidInfo?.scanId ?? scanId)
+        : scanId;
   useEffect(() => {
     setSourceExpanded(!resultsScanId);
   }, [resultsScanId, page, browsingBackup, browsingImage]);
@@ -213,8 +218,9 @@ export function DataTools({
   const allowMemberSelection =
     physical &&
     !!selectedPart &&
+    !selectedPart.encryption &&
     !selectedPart.system &&
-    (page === "files" || (page === "recovery" && mode !== "signatures"));
+    (page === "files" || (page === "recovery" && mode !== "signatures" && mode !== "reconstruct"));
   const memberOptions =
     allowMemberSelection && selectedPart
       ? disks.flatMap((other) => {
@@ -260,6 +266,58 @@ export function DataTools({
     if (!canHot) setHot(false);
   }, [canHot]);
   const sourceSize = selectedPart?.size ?? disk?.size ?? 0;
+  const linuxSource = selectedPart?.role === "Linux 数据";
+  const canResizeClone =
+    task === "clone" && disk?.scheme === "GPT" && !!selectedPart && !selectedPart.system &&
+    (!linuxSource || (disk.hardware?.offline != null && !disk.hardware.isSystem));
+  const fileClonePart = (part: Partition) =>
+    part.role === "数据分区" && !part.system && !part.hidden &&
+    ["FAT", "FAT12", "FAT16", "FAT32", "EXFAT", "NTFS"].includes(part.fs.toUpperCase());
+  const linuxDiskClonePart = (part: Partition) =>
+    part.role === "Linux 数据" && !part.system && part.number !== undefined;
+  const diskClonePart = (part: Partition) =>
+    linuxDiskClonePart(part) ||
+    (part.role === "数据分区" && !part.system && !part.hidden && part.number !== undefined);
+  const resizableDiskClonePart = (part: Partition) =>
+    fileClonePart(part) || linuxDiskClonePart(part);
+  const canFileClone = canResizeClone && fileClonePart(selectedPart);
+  const canDiskFileClone =
+    task === "clone" && !partition && physical && disk.scheme === "GPT" &&
+    disk.hardware?.offline === false && !disk.hardware.isSystem &&
+    parts.some(diskClonePart) &&
+    parts.every((part) => diskClonePart(part) || part.role === "MSR 保留");
+  const resizingClone = canResizeClone && partitionClone === "resize";
+  const cloningFiles = canFileClone && partitionClone === "files";
+  const cloningDiskFiles = canDiskFileClone && partitionClone === "diskFiles";
+  const specialClone = resizingClone || cloningFiles || cloningDiskFiles;
+  const cloneDisks = cloningDiskFiles
+    ? destinations.filter((d) =>
+        (d.scheme === "RAW" || d.scheme === "GPT") &&
+        d.sectorSize === disk.sectorSize && d.hardware?.layoutAvailable &&
+        d.hardware.deviceReadOnly === false &&
+        d.partitions.every((part) => part.number === undefined))
+    : destinations;
+  const cloneDiskSelected = cloneDisks.some((d) => d.id === destination);
+  const partitionSizes = parts.filter(resizableDiskClonePart).flatMap((part) => {
+    const partitionNumber = part.number!;
+    const value = diskCloneSizes[partitionNumber]?.trim();
+    return value ? [{ partition: partitionNumber, bytes: Number(value) * (1024 ** 2) }] : [];
+  });
+  const invalidDiskSizes = partitionSizes.some(({ bytes }) =>
+    !Number.isSafeInteger(bytes) || bytes <= 0 || bytes % (1024 ** 2) !== 0);
+  const cloneTargets = destinationDisk?.partitions.filter(
+    (part) =>
+      part.number !== undefined &&
+      (specialClone
+        ? destinationDisk.scheme === "GPT" &&
+          destinationDisk.sectorSize === disk?.sectorSize &&
+          !part.system &&
+          (resizingClone && linuxSource
+            ? destinationDisk.hardware?.offline != null && part.role === "Linux 数据"
+            : !part.hidden && part.role === "数据分区") &&
+          (cloningFiles || part.size !== sourceSize)
+        : part.size === sourceSize),
+  ) ?? [];
   const matchingProgress = progressMatches(
     recoveryProgress,
     disk?.hardware?.identity,
@@ -290,6 +348,7 @@ export function DataTools({
     setPartition(String(fixedPartition ?? ""));
     setDestination("");
     setDestinationPartition("");
+    setDiskCloneSizes({});
     setError("");
   }, [disk?.id, fixedPartition]);
   useEffect(() => {
@@ -297,8 +356,8 @@ export function DataTools({
     setAllowMissingMembers(false);
   }, [disk?.id, partition]);
   useEffect(() => {
-    callbacks.current.onBusy(!!busy || !!imageDraft);
-  }, [busy, imageDraft]);
+    callbacks.current.onBusy(!!busy || !!imageDraft || imageCopyBusy);
+  }, [busy, imageDraft, imageCopyBusy]);
   useEffect(() => () => callbacks.current.onBusy(false), []);
   useEffect(() => {
     if (!native) return;
@@ -393,16 +452,28 @@ export function DataTools({
       setProgressNotice("");
       const source = selection(disk, partition);
       const scanMode = page === "files" ? "existing" : mode;
-      const id = useMembers
-        ? await invoke<string>("data_scan_btrfs_members", {
+      let id: string;
+      if (scanMode === "reconstruct") {
+        id = await invoke<string>("data_reconstruct_filesystem", {
+          request: { type: "partition", selection: source },
+          mode: "allFiles",
+        });
+      } else if (selectedPart?.encryption && scanMode !== "signatures") {
+        id = await invoke<string>("data_scan_bitlocker", {
+          source,
+          mode: scanMode,
+        });
+      } else if (useMembers) {
+        id = await invoke<string>("data_scan_btrfs_members", {
             members: [
               source,
               ...selectedMembers.map((member) => member.source),
             ],
             mode: scanMode,
             allowMissing: allowMissingMembers,
-          })
-        : await invoke<string>("data_scan", {
+          });
+      } else {
+        id = await invoke<string>("data_scan", {
             source,
             mode: scanMode,
             signatures:
@@ -410,8 +481,19 @@ export function DataTools({
                 ? signatureRequest(signatureSettings, sourceSize)
                 : null,
           });
+      }
       setScanId(id);
       setOwnJobId(id);
+      setJob(await invoke<Job>("data_status"));
+    });
+  }
+  async function readReconstructed(source: () => ReconstructionSource, mode: ImageBrowseMode) {
+    await action(async () => {
+      setProgressNotice("");
+      const request = source();
+      const id = await invoke<string>("data_reconstruct_filesystem", { request, mode });
+      setOwnJobId(id);
+      if (request.type === "partition") setScanId(id);
       setJob(await invoke<Job>("data_status"));
     });
   }
@@ -464,6 +546,19 @@ export function DataTools({
         };
       else if (task === "restore")
         request = { type: "restore", destination: selection(disk, partition) };
+      else if (cloningDiskFiles)
+        request = {
+          type: "diskFileClone",
+          source: selection(disk, ""),
+          destination: selection(destinationDisk, ""),
+          partitionSizes,
+        };
+      else if (specialClone)
+        request = {
+          type: cloningFiles ? "fileClone" : "resizeClone",
+          source: selection(disk, partition),
+          destination: selection(destinationDisk, destinationPartition),
+        };
       else
         request = {
           type: "clone",
@@ -472,7 +567,7 @@ export function DataTools({
           destination: selection(destinationDisk, destinationPartition),
         };
       setConfirmed(false);
-      setPlan(await invoke<Plan | null>("data_prepare", { request }));
+      setPlan(await invoke<DataPlan | null>("data_prepare", { request }));
     });
   }
   async function execute() {
@@ -691,6 +786,7 @@ export function DataTools({
             available={native && !!physical && !staleMembers}
             loaded={!!resultsScanId}
             onRead={() => void startScan()}
+            onReconstruct={() => void readReconstructed(() => ({ type: "partition", selection: selection(disk, partition) }), "existing")}
             onBack={() => onBack?.()}
           >
             {memberSelector}
@@ -724,7 +820,7 @@ export function DataTools({
             {(!lostSource || chooseNewSource) && (
               <>
                 {sourceSelector()}
-                {mode !== "signatures" && memberSelector}
+                {mode !== "signatures" && mode !== "reconstruct" && memberSelector}
                 <section className="data-panel">
                   <div className="section-heading">
                     <h2>{t("选择扫描方式")}</h2>
@@ -742,6 +838,16 @@ export function DataTools({
                     >
                       {t("浏览 LVM2 逻辑卷")}
                     </button>
+                    <button
+                      className="button"
+                      disabled={busy || !native}
+                      onClick={() => {
+                        setError("");
+                        setRaidOpen(true);
+                      }}
+                    >
+                      {t("虚拟 RAID")}
+                    </button>
                   </div>
                   <div className="scan-modes">
                     {[
@@ -758,6 +864,11 @@ export function DataTools({
                         body: t(
                           "列出文件和目录，包括干净卸载的 Ext2/3/4 和 Btrfs。",
                         ),
+                      },
+                      {
+                        id: "reconstruct",
+                        title: t("重建文件视图"),
+                        body: t("使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。"),
                       },
                       {
                         id: "signatures",
@@ -793,11 +904,13 @@ export function DataTools({
                     </>
                   )}
                   <div className="data-action-row">
-                    <span>
+                    {mode !== "reconstruct" && <span>
                       {mode === "signatures"
                         ? t(
                             "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
                           )
+                        : selectedPart?.encryption
+                          ? t("请在 Windows 解锁已完成加密的 BitLocker NTFS 数据卷，再读取目录。")
                         : mode === "allFiles"
                           ? t(
                               "NTFS、FAT、exFAT 支持现存文件和删除候选。Btrfs 可从只读快照或保留事务查找删除候选。Ext2/3/4 支持干净卸载卷的现存文件。",
@@ -809,8 +922,8 @@ export function DataTools({
                             t(
                               "Btrfs 删除恢复需要可核对的只读快照或保留事务，且提取时必须通过数据校验。",
                             )}
-                    </span>
-                    {!useMembers && (
+                    </span>}
+                    {!useMembers && mode !== "reconstruct" && (
                       <button
                         className="button"
                         disabled={
@@ -864,6 +977,9 @@ export function DataTools({
             info={imageInfo}
             busy={!!busy}
             available={native}
+            onCopy={() => {
+              if (imageInfo) setImageCopy({ id: imageInfo.id, partition: "" });
+            }}
             lvmName={imageLvmInfo?.name}
             raidName={raidInfo?.name}
             onRaid={() => {
@@ -903,6 +1019,9 @@ export function DataTools({
                 setJob(await invoke<Job>("data_status"));
               })
             }
+            onReconstruct={(partition, mode) => {
+              if (imageInfo) void readReconstructed(() => ({ type: "image", id: imageInfo.id, partition }), mode);
+            }}
           />
         ) : browsingBackup ? (
           <BackupBrowserPanel
@@ -932,6 +1051,9 @@ export function DataTools({
                 setJob(await invoke<Job>("data_status"));
               })
             }
+            onReconstruct={(partition) => {
+              if (backupInfo) void readReconstructed(() => ({ type: "backup", id: backupInfo.id, partition }), "allFiles");
+            }}
             onPoint={(point) =>
               void action(async () => {
                 if (!backupInfo || point === backupInfo.selectedPoint) return;
@@ -941,6 +1063,11 @@ export function DataTools({
                 setJob(await invoke<Job>("data_status"));
               })
             }
+            onRestore={(partition) => {
+              if (!backupInfo) return;
+              setError("");
+              setBackupRestore({ id: backupInfo.id, partition });
+            }}
           />
         ) : (
           <>
@@ -997,8 +1124,12 @@ export function DataTools({
                         type="radio"
                         name="copy-mode"
                         value={value}
-                        checked={copyMode === value}
-                        onChange={() => setCopyMode(value)}
+                        checked={!specialClone && copyMode === value}
+                        onChange={() => {
+                          setCopyMode(value);
+                          if (specialClone) setDestinationPartition("");
+                          if (task === "clone") setPartitionClone("standard");
+                        }}
                       />
                       <span>
                         <strong>{title}</strong>
@@ -1006,9 +1137,66 @@ export function DataTools({
                       </span>
                     </label>
                   ))}
+                  {canResizeClone && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="copy-mode"
+                        value="resize"
+                        checked={resizingClone}
+                        onChange={() => {
+                          setPartitionClone("resize");
+                          setDestinationPartition("");
+                        }}
+                      />
+                      <span>
+                        <strong>{t("调整容量克隆")}</strong>
+                        <small>{linuxSource
+                          ? t("核对干净卸载的单设备 Btrfs，并适配目标分区容量")
+                          : t("复制 FAT 或 exFAT 文件系统，并适配目标分区容量")}</small>
+                      </span>
+                    </label>
+                  )}
+                  {canFileClone && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="copy-mode"
+                        value="files"
+                        checked={cloningFiles}
+                        onChange={() => {
+                          setPartitionClone("files");
+                          setDestinationPartition("");
+                        }}
+                      />
+                      <span>
+                        <strong>{t("按文件克隆")}</strong>
+                        <small>{t("在新 NTFS、FAT 或 exFAT 卷重建活动文件和目录")}</small>
+                      </span>
+                    </label>
+                  )}
+                  {canDiskFileClone && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="copy-mode"
+                        value="diskFiles"
+                        checked={cloningDiskFiles}
+                        onChange={() => {
+                          setPartitionClone("diskFiles");
+                          setDestination("");
+                          setDestinationPartition("");
+                        }}
+                      />
+                      <span>
+                        <strong>{t("整盘按文件克隆")}</strong>
+                        <small>{t("在空目标盘重建 GPT，按文件复制或逐扇区保留数据分区")}</small>
+                      </span>
+                    </label>
+                  )}
                 </fieldset>
               )}
-              {task !== "restore" && copyMode === "usedSpace" && (
+              {task !== "restore" && !specialClone && copyMode === "usedSpace" && (
                 <p className="copy-mode-note">
                   {t(
                     "检查 NTFS、FAT、exFAT、Ext2/3/4 和单设备 Btrfs 的分配信息。多设备 Btrfs 和未识别的文件系统完整保留。",
@@ -1119,14 +1307,14 @@ export function DataTools({
                       <select
                         id="clone-disk"
                         disabled={busy}
-                        value={destination}
+                        value={cloneDiskSelected ? destination : ""}
                         onChange={(e) => {
                           setDestination(e.target.value);
                           setDestinationPartition("");
                         }}
                       >
                         <option value="">{t("选择另一块数据磁盘")}</option>
-                        {destinations.map((d) => (
+                        {cloneDisks.map((d) => (
                           <option key={d.id} value={d.id}>
                             {diskTitle(d, t)} · {d.hardware?.model} ·{" "}
                             {formatSize(d.size)}
@@ -1142,13 +1330,14 @@ export function DataTools({
                             setDestinationPartition(e.target.value)
                           }
                         >
-                          <option value="">{t("选择同容量的目标分区")}</option>
-                          {destinationDisk?.partitions
-                            .filter(
-                              (p) =>
-                                p.number !== undefined && p.size === sourceSize,
-                            )
-                            .map((p) => (
+                          <option value="">
+                            {cloningFiles
+                              ? t("选择接收分区")
+                              : resizingClone
+                                ? t("选择不同容量的目标分区")
+                                : t("选择同容量的目标分区")}
+                          </option>
+                          {cloneTargets.map((p) => (
                               <option key={p.id} value={p.number}>
                                 {t("分区 {number}", { number: p.number! })} ·{" "}
                                 {partitionTitle(p, catalogText)} ·{" "}
@@ -1159,10 +1348,38 @@ export function DataTools({
                       )}
                     </div>
                   </div>
+                  {cloningDiskFiles && (
+                    <fieldset className="disk-clone-sizes" disabled={!!busy}>
+                      <legend>{t("目标数据分区容量（MiB）")}</legend>
+                      {parts.filter(resizableDiskClonePart).map((part) => (
+                        <label key={part.id}>
+                          <span>
+                            {t("分区 {number}", { number: part.number! })} ·{" "}
+                            {linuxDiskClonePart(part)
+                              ? t("Linux 数据（调整容量需核对为 Btrfs）")
+                              : catalogText(part.fs)}
+                          </span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={1}
+                            placeholder={formatSize(part.size)}
+                            value={diskCloneSizes[part.number!] ?? ""}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setDiskCloneSizes((old) => ({ ...old, [part.number!]: value }));
+                            }}
+                          />
+                        </label>
+                      ))}
+                    </fieldset>
+                  )}
                   <Hint>
-                    {t(
-                      "源与目标容量、逻辑扇区大小必须一致。整个目标磁盘会保持脱机，避免副本中的重复标识自动挂载。",
-                    )}
+                    {cloningDiskFiles
+                      ? t("容量留空则沿用源分区大小。选择逻辑扇区大小相同的空 RAW 或 GPT 盘，写入后目标保持脱机。")
+                      : specialClone
+                      ? t("源与目标必须使用相同的逻辑扇区大小。目标保持脱机，两盘的 GPT 分区表保持原样。")
+                      : t("源与目标容量、逻辑扇区大小必须一致。整个目标磁盘会保持脱机，避免副本中的重复标识自动挂载。")}
                   </Hint>
                 </>
               ) : (
@@ -1214,7 +1431,9 @@ export function DataTools({
                     !physical ||
                     !native ||
                     (task === "clone" &&
-                      (!destination || (!!partition && !destinationPartition)))
+                      (!cloneDiskSelected || (cloningDiskFiles && invalidDiskSizes) || (!!partition && !cloneTargets.some(
+                        (part) => String(part.number) === destinationPartition,
+                      ))))
                   }
                   onClick={() => void prepare()}
                 >
@@ -1229,7 +1448,7 @@ export function DataTools({
             </section>
             <p className="data-footnote">
               {t(
-                "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区；系统迁移、按文件缩小克隆及 DiskGenius 专有备份格式尚不支持。",
+                "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区。",
               )}
             </p>
           </>
@@ -1397,7 +1616,9 @@ export function DataTools({
                 job.title === "读取镜像目录" ||
                 job.title === "读取 Btrfs 成员" ||
                 job.title === "读取 LVM2 逻辑卷" ||
-                job.title === "读取找到的分区目录"
+                job.title === "读取虚拟 RAID 目录" ||
+                job.title === "读取找到的分区目录" ||
+                job.title === "重建文件视图"
                   ? t("找到 {count} 个文件", {
                       count: job.found.toLocaleString(language),
                     })
@@ -1426,6 +1647,7 @@ export function DataTools({
           running={job?.state === "running"}
           browsing={
             page === "files" ||
+            (page === "recovery" && raidInfo?.scanMode === "existing") ||
             (page === "backup" &&
               browsingImage &&
               (raidInfo?.scanId ? raidInfo.scanMode : imageLvmInfo?.scanId ? imageLvmInfo.scanMode : imageInfo?.scanMode) === "existing")
@@ -1436,20 +1658,37 @@ export function DataTools({
           onPreview={(c) => void showPreview(c)}
         />
       )}
-      {raidOpen && page === "backup" && browsingImage && (
+      {raidOpen && (page === "recovery" || (page === "backup" && browsingImage)) && (
         <VirtualRaidDialog
-          key={raidInfo?.id ?? raidFiles?.id}
+          key={raidEdit ? `edit-${raidEdit.request.replaces}` : raidInfo?.id}
           busy={!!busy}
+          pending={pending}
           error={error}
-          files={raidFiles}
-          view={raidInfo}
+          disks={disks}
+          files={raidFiles ?? raidEdit?.sources ?? null}
+          initial={raidEdit?.request}
+          initialMdVersion={raidInfo?.mdVersion}
+          view={raidEdit ? null : raidInfo}
           onSelect={() => void action(async () => {
             const selected = await invoke<RaidFiles | null>("data_virtual_raid_select");
             if (selected) setRaidFiles(selected);
           })}
+          onSelectPhysical={(members) => void action(async () => {
+            setRaidFiles(await invoke<RaidFiles>("data_virtual_raid_select_devices", {
+              request: { members },
+            }));
+          })}
+          onDetectMd={(request, apply) => void action(async () => {
+            apply(await invoke<RaidDetection>("data_virtual_raid_detect_md", { request }));
+          })}
           onOpen={(request) => void action(async () => {
             setRaidInfo(await invoke<RaidView>("data_virtual_raid_open", { request }));
             setRaidFiles(null);
+            setRaidEdit(null);
+          })}
+          onEdit={() => void action(async () => {
+            if (!raidInfo) return;
+            setRaidEdit(await invoke<RaidEdit>("data_virtual_raid_configuration", { id: raidInfo.id }));
           })}
           onScan={(partition, mode) => void action(async () => {
             if (!raidInfo) return;
@@ -1461,10 +1700,31 @@ export function DataTools({
             setRaidInfo(await invoke<RaidView>("data_virtual_raid_status"));
             setRaidOpen(false);
           })}
+          onSearch={(options) => void action(async () => {
+            if (!raidInfo) return;
+            setOwnJobId(await invoke<string>("data_virtual_raid_search", {
+              request: { id: raidInfo.id, options },
+            }));
+            setJob(await invoke<Job>("data_status"));
+            setRaidInfo(await invoke<RaidView>("data_virtual_raid_status"));
+          })}
+          onStopSearch={(id) => void action(async () => {
+            await invoke("data_cancel", { id });
+          })}
+          onBrowseFound={(candidate, mode) => void action(async () => {
+            if (!raidInfo) return;
+            setOwnJobId(await invoke<string>("data_virtual_raid_browse_found", {
+              request: { id: raidInfo.id, candidate, mode },
+            }));
+            setJob(await invoke<Job>("data_status"));
+            setRaidInfo(await invoke<RaidView>("data_virtual_raid_status"));
+            setRaidOpen(false);
+          })}
           onClose={() => void action(async () => {
             if (raidFiles) await invoke("data_virtual_raid_discard", { id: raidFiles.id });
             setRaidFiles(null);
-            setRaidOpen(false);
+            if (raidEdit) setRaidEdit(null);
+            else setRaidOpen(false);
           })}
           onCloseRaid={() => void action(async () => {
             if (!raidInfo) return;
@@ -1473,6 +1733,50 @@ export function DataTools({
             setRaidOpen(false);
           })}
         />
+      )}
+      {imageInfo && imageCopy?.id === imageInfo.id && page === "backup" && browsingImage && (
+        <Dialog
+          title={t("复制镜像扇区")}
+          subtitle={imageInfo.name}
+          wide
+          onClose={() => {
+            if (!imageCopyBusy) setImageCopy(null);
+          }}
+        >
+          <div className="sector-search-range">
+            <label>
+              {t("镜像范围")}
+              <select
+                value={imageCopy.partition}
+                disabled={imageCopyBusy}
+                onChange={(e) => setImageCopy({ id: imageInfo.id, partition: e.target.value })}
+              >
+                <option value="">{t("整个镜像")}</option>
+                {imageInfo.options.kind === "disk" && imageInfo.partitions.map((part) => (
+                  <option key={part.id} value={part.id}>
+                    {part.name} · {formatSize(part.size)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <SectorCopyPanel
+            key={imageCopy.partition}
+            source={{
+              kind: "image",
+              id: imageInfo.id,
+              partition: imageCopyPart?.id ?? null,
+              sourceDisks: imageInfo.sourceDisks,
+            }}
+            disks={disks}
+            size={imageCopyPart?.size ?? imageInfo.size}
+            sectorSize={imageInfo.options.sector}
+            offset={imageCopyPart?.start ?? 0}
+            initialSector={0}
+            onBusy={setImageCopyBusy}
+            onRefresh={onRefresh}
+          />
+        </Dialog>
       )}
       {imageLvmOpen && page === "backup" && browsingImage && (
         <ImageLvmDialog
@@ -1589,6 +1893,36 @@ export function DataTools({
             setJob(await invoke<Job>("data_status"));
             setImageDraft(null);
           }}
+        />
+      )}
+      {page === "backup" && browsingBackup && backupInfo && backupRestore?.id === backupInfo.id && (
+        <BackupRestoreDialog
+          backup={backupInfo}
+          partition={backupRestore.partition}
+          disks={disks}
+          busy={!!busy}
+          error={error}
+          onClose={() => {
+            setError("");
+            setBackupRestore(null);
+          }}
+          onPrepare={(targetDisk, targetPartition, resize) => void action(async () => {
+            const next = await invoke<DataPlan | null>("data_prepare", {
+              request: {
+                type: "restoreBackupPoint",
+                id: backupInfo.id,
+                point: backupInfo.selectedPoint,
+                partition: backupRestore.partition,
+                destination: selection(targetDisk, targetPartition),
+                resize,
+              },
+            });
+            if (next) {
+              setConfirmed(false);
+              setBackupRestore(null);
+              setPlan(next);
+            }
+          })}
         />
       )}
       {plan && (

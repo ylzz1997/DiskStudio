@@ -15,25 +15,35 @@ pub(crate) struct Opened {
     pub group: Arc<crate::image_files::Group>,
 }
 impl Opened {
-    pub(super) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         #[cfg(windows)]
         self.group.validate()?;
         self.bridge.healthy()?;
         Ok(())
     }
 }
+#[cfg(windows)]
+pub(crate) fn opened(id: &str) -> Result<Opened, String> {
+    let s = state();
+    s.opened_image
+        .as_ref()
+        .filter(|opened| opened.browser.info.id == id)
+        .cloned()
+        .ok_or_else(|| "镜像浏览会话已失效。".into())
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     #[serde(flatten)]
     info: Info,
+    source_disks: Vec<Target>,
     scan_id: Option<String>,
     scan_partition: Option<u32>,
     scan_mode: Option<ScanMode>,
 }
 fn status_in(s: &State) -> Option<Status> {
     let opened = s.opened_image.as_ref()?;
-    let current = s.scan.as_ref().and_then(|(id, source)| match source {
+    let current = s.scan.as_ref().and_then(|(id, source)| match source.original() {
         ScanSource::Image {
             opened: scan,
             partition,
@@ -42,6 +52,7 @@ fn status_in(s: &State) -> Option<Status> {
     });
     Some(Status {
         info: opened.browser.info.clone(),
+        source_disks: opened.source_disks.clone(),
         scan_id: current.as_ref().map(|c| c.0.clone()),
         scan_partition: current.as_ref().map(|c| c.1),
         scan_mode: current.map(|_| s.scan_mode),
@@ -51,7 +62,7 @@ pub fn status() -> Option<Status> {
     status_in(&state())
 }
 fn clear_results(s: &mut State) {
-    if matches!(s.scan, Some((_, ScanSource::Image { .. }))) {
+    if s.scan.as_ref().is_some_and(|(_, source)| matches!(source.original(), ScanSource::Image { .. })) {
         s.scan = None;
         s.candidates.clear();
         s.directories = Catalog::default();

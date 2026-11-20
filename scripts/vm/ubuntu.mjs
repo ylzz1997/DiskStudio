@@ -9,7 +9,12 @@ const base = path.join(root, 'ubuntu');
 const uuid = '25c39913-ac45-4445-aa54-bdd0dbca7001';
 const os = path.join(base, 'system.qcow2');
 const btrfsImages = ['btrfs-snapshot-image', 'btrfs-retained-image', 'btrfs-checksum-images', 'btrfs-members-images', 'btrfs-parity-images', 'btrfs-allocation-image'];
-const imageFixtures = [...btrfsImages, 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn'];
+const mdRaid6 = 'virtual-raid-md6-4kn';
+const mdRaidMetadata = 'virtual-raid-md-metadata-4kn';
+const mdRaidZones = 'virtual-raid-md-zones-4kn';
+const mdRaid10 = 'virtual-raid-md10-4kn';
+const mdFixtures = [mdRaid6, mdRaidMetadata, mdRaidZones, mdRaid10, 'virtual-raid-md10-advanced-4kn'];
+const imageFixtures = [...btrfsImages, 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn', ...mdFixtures];
 const phases = ['populate', 'verify', 'ext-populate', 'ext-verify', 'btrfs-verify', 'btrfs-move-verify', 'btrfs-sha256-verify', ...imageFixtures];
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 function stopped() {
@@ -55,9 +60,11 @@ async function main() {
     const phase = command.slice(5);
     const stage = safePath(path.join(base, `seed-${phase}`), root, false);
     fs.mkdirSync(stage);
-    const scriptName = phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
+    const mdFixture = mdFixtures.includes(phase);
+    const scriptName = mdFixture ? 'ubuntu-md6.py' : phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
     const script = fs.readFileSync(path.join(project, 'scripts/vm', scriptName)).toString('base64');
-    fs.writeFileSync(path.join(stage, 'meta-data'), `instance-id: diskstudio-ext4-${phase}-1\nlocal-hostname: diskstudio-ubuntu\n`);
+    const seedRevision = mdFixture ? crypto.createHash('sha256').update(script).digest('hex').slice(0, 12) : '1';
+    fs.writeFileSync(path.join(stage, 'meta-data'), `instance-id: diskstudio-ext4-${phase}-${seedRevision}\nlocal-hostname: diskstudio-ubuntu\n`);
     fs.writeFileSync(path.join(stage, 'user-data'), `#cloud-config
 users: []
 ssh_pwauth: false

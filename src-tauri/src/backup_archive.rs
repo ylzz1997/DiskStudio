@@ -931,10 +931,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(browser.info.version, 3);
-        assert!(browser.info.warning.contains("按已用空间"));
+        assert_eq!(browser.info.allocation_skipped_bytes, Some(0));
         let prior = browser.select_point(&original_id, |_, _| Ok(())).unwrap();
         assert_eq!(prior.info.version, 2);
-        assert!(!prior.info.warning.contains("按已用空间"));
+        assert_eq!(prior.info.allocation_skipped_bytes, None);
     }
     struct Temp(std::path::PathBuf);
     impl Temp {

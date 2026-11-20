@@ -1,5 +1,6 @@
 //! LVM2 RAID component bindings and clean dm-raid membership checks.
 use super::*;
+use crate::raid10::{Format as Raid10, Layout as Raid10Layout};
 use crate::raid_parity as parity;
 
 const COMPONENTS: &str = "LVM2 RAID 成员映射缺失、重复或不受支持。";
@@ -16,13 +17,6 @@ pub(super) enum Kind {
     Mirror,
     Raid10(Raid10),
     Parity { level: u32, layout: u32 },
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum Raid10 {
-    Near,
-    Far,
-    Offset,
 }
 
 const FAR_SETS: u32 = 1 << 18;
@@ -182,37 +176,17 @@ impl Geometry {
     }
     fn replica(&self, chunk: u64, ordinal: usize, row: u64) -> (usize, u64) {
         match self.kind {
-            Kind::Raid10(Raid10::Near) => {
-                let slot = chunk * self.copies as u64 + ordinal as u64;
-                (
-                    (slot % self.devices as u64) as usize,
-                    slot / self.devices as u64,
-                )
+            Kind::Raid10(format) => Raid10Layout {
+                format,
+                copies: self.copies as u8,
+                far_sets: self.far_sets,
             }
-            Kind::Raid10(layout) => {
-                let first = (chunk % self.devices as u64) as usize;
-                let (start, width) = if self.far_sets {
-                    // Linux folds any remainder into the last full group.
-                    let last = (self.devices / self.copies - 1) * self.copies;
-                    let start = (first / self.copies * self.copies).min(last);
-                    (
-                        start,
-                        if start == last {
-                            self.devices - last
-                        } else {
-                            self.copies
-                        },
-                    )
-                } else {
-                    (0, self.devices)
-                };
-                let lane = start + (first - start + ordinal) % width;
-                let row = match layout {
-                    Raid10::Offset => row * self.copies as u64 + ordinal as u64,
-                    _ => row + ordinal as u64 * (self.size / self.unit / self.devices as u64),
-                };
-                (lane, row)
-            }
+            .replica(
+                self.devices,
+                self.size / self.unit / self.devices as u64,
+                chunk,
+                ordinal,
+            ),
             _ => (ordinal, row),
         }
     }

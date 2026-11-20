@@ -14,6 +14,7 @@ export type ImageBrowseInfo = {
   format: string;
   files: string[];
   size: number;
+  sourceDisks: string[];
   options: ImageBrowseOptions;
   partitions: { id: number; name: string; start: number; size: number }[];
   warning: string;
@@ -28,6 +29,8 @@ export function ImageBrowserPanel({
   onOpen,
   onClose,
   onRead,
+  onReconstruct,
+  onCopy,
   lvmName,
   onLvm,
   raidName,
@@ -39,6 +42,8 @@ export function ImageBrowserPanel({
   onOpen: (options: ImageBrowseOptions) => void;
   onClose: () => void;
   onRead: (partition: number, mode: ImageBrowseMode) => void;
+  onReconstruct: (partition: number, mode: ImageBrowseMode) => void;
+  onCopy: () => void;
   lvmName?: string;
   onLvm: () => void;
   raidName?: string;
@@ -187,6 +192,15 @@ export function ImageBrowserPanel({
           )}
           <div className="data-action-row">
             <span>{t("读取后可预览、搜索并提取文件或整个目录。")}</span>
+            <button className="button" disabled={busy || !available} onClick={onCopy}>
+              {t("复制镜像扇区")}
+            </button>
+            <button className="button" disabled={busy || !available || partition === ""}
+              onClick={() => onReconstruct(Number(partition), mode)}
+              title={t("使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。")}
+            >
+              {t("重建文件视图")}
+            </button>
             <button
               className="button primary"
               disabled={busy || !available || partition === ""}

@@ -4,6 +4,10 @@ use super::{allocation::ClassicTable, at, e, u16at, u32at, Fs};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+#[path = "fat_clone.rs"]
+pub(crate) mod clone;
+#[path = "fat_file_clone.rs"]
+pub(crate) mod file_clone;
 #[path = "fat_exfat_resize.rs"]
 mod exfat;
 pub use exfat::prepare_exfat;
@@ -863,6 +867,7 @@ mod tests {
             let plan = prepare_classic(&mut image, u64::from(sector), new_mib * MIB).unwrap();
             assert!(plan.new_clusters > plan.old_clusters);
             assert_eq!(plan.moved_clusters(), if fs.bits == 32 { 3 } else { 2 });
+            super::clone::assert_materializes(image.get_ref(), u64::from(sector), new_mib * MIB);
             image.get_mut().resize((new_mib * MIB) as usize, 0xec);
             plan.apply(&mut image).unwrap();
             plan.verify(&mut image).unwrap();
@@ -971,6 +976,7 @@ mod tests {
             let plan = prepare_classic(&mut image, 512, new_mib * MIB).unwrap();
             let expected_moves = if fs.bits == 32 { 3 } else { 2 };
             assert_eq!(plan.moved_clusters(), expected_moves);
+            super::clone::assert_materializes(image.get_ref(), 512, new_mib * MIB);
             plan.apply(&mut image).unwrap();
             image.get_mut().truncate((new_mib * MIB) as usize);
             plan.verify(&mut image).unwrap();

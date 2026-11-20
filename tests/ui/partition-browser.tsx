@@ -147,6 +147,7 @@ function Harness() {
           setLoaded(loaded + 1);
           setEvent("读取目录回调");
         }}
+        onReconstruct={() => setEvent("重建 NTFS 回调")}
       />
       {loaded > 0 && (
         <RecoveryResults

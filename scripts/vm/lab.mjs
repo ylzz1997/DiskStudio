@@ -18,7 +18,19 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const profileDisks = fourKn => fourKn ? fourKnDisks : disks;
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore'];
+function profileDisks(fourKn, fixture) {
+  const base = fourKn ? fourKnDisks : disks;
+  return fixture ? base.map(disk => disk.controller ? {
+    ...disk, name: disk.name.replace('-4kn.qcow2', `-${fixture}-4kn.qcow2`),
+  } : disk) : base;
+}
+const stateFixture = state => state.fixture ?? (state.wholeClone === true ? 'whole-clone' : undefined);
+function validateFixtureProfile(fourKn, sectorFault, fixture) {
+  if (fixture !== undefined && (!fixtureProfiles.includes(fixture) || !fourKn || sectorFault)) {
+    throw new Error('Clone fixture requires its own separate 4Kn profile');
+  }
+}
 const uuid = 'e20adb9f-f665-432e-9a62-dd5d897b06a0';
 const vmName = 'DiskStudio-Test';
 const qemu = path.join(root, 'tools/qemu/qemu-system-x86_64.exe');
@@ -29,6 +41,9 @@ const statePath = path.join(root, 'run.json');
 const installIso = path.join(root, 'media/windows-server-2025-zh-cn.iso');
 const payloadIso = path.join(root, 'media/diskstudio-tools.iso');
 const port = 49365;
+// One logical 4Kn sector in the known Test A data extent. blkdebug uses 512 B units.
+const sectorCopyFaultLba = 2232323;
+const faultBaseNode = 'test_a_sector_copy_source';
 
 function readToolsManifest(name) {
   const filename = safePath(path.join(root, name));
@@ -132,9 +147,11 @@ function checkIso(filename) {
   if (magic.toString() !== 'CD001') throw new Error(`Invalid ISO 9660 media: ${filename}`);
 }
 
-export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false } = {}) {
+export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, fixture } = {}) {
   if (!['whpx', 'tcg'].includes(accelerator)) throw new Error('Unsupported accelerator');
   if (fourKn && (setup || network)) throw new Error('4Kn acceptance uses the installed offline guest');
+  if (sectorFault && (!fourKn || accelerator !== 'tcg')) throw new Error('Sector fault fixture requires 4Kn TCG');
+  validateFixtureProfile(fourKn, sectorFault, fixture);
   const args = [
     '-name', vmName, '-uuid', uuid,
     '-smbios', 'type=1,manufacturer=DiskStudio,product=DiskStudio-Test,serial=DS-VM-0001',
@@ -149,10 +166,19 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
     '-qmp', `tcp:127.0.0.1:${port},server=on,wait=off`,
     '-bios', bios,
   ];
-  for (const disk of profileDisks(fourKn)) {
+  for (const disk of profileDisks(fourKn, fixture)) {
     // During Windows Setup, expose only the OS disk. Test disks are attached later.
     if (setup && disk.id !== 'os') continue;
-    args.push('-blockdev', JSON.stringify({ driver: 'qcow2', 'node-name': disk.id, file: { driver: 'file', filename: diskPath(disk) } }));
+    const image = { driver: 'qcow2', 'node-name': disk.id, file: { driver: 'file', filename: diskPath(disk) } };
+    if (fixture && disk.controller) {
+      image.discard = 'unmap';
+      image['detect-zeroes'] = 'unmap';
+    }
+    const backend = sectorFault && disk.id === 'test_a' ? {
+      driver: 'blkdebug', 'node-name': disk.id, image: { ...image, 'node-name': faultBaseNode },
+      'inject-error': [{ event: 'none', iotype: 'read', sector: sectorCopyFaultLba * 8, errno: 5 }],
+    } : image;
+    args.push('-blockdev', JSON.stringify(backend));
     args.push('-device', disk.bus === 'nvme'
       ? `nvme,drive=${disk.id},serial=${disk.serial}${fourKn ? `,id=${disk.controller},logical_block_size=4096,physical_block_size=4096` : ''}`
       : `ide-hd,bus=ide.0,drive=${disk.id},serial=${disk.serial},model=${disk.model},bootindex=2`);
@@ -171,7 +197,7 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
   // WHPX 11.1 has a reset failure on this host. Keep experiments from attempting
   // a warm reset; TCG is the default and supports normal in-guest restarts.
   if (accelerator === 'whpx') args.push('-no-reboot');
-  if (paused) args.push('-S');
+  if (paused || sectorFault || fixture) args.push('-S');
   return args;
 }
 
@@ -263,7 +289,7 @@ async function start(options) {
   safePath(qemu); safePath(bios);
   // Validate the fixed profile before creating its two independent images.
   const args = buildArgs(options);
-  for (const disk of profileDisks(options.fourKn)) {
+  for (const disk of profileDisks(options.fourKn, options.fixture)) {
     if (disk.controller) {
       const filename = safePath(diskPath(disk), root, false);
       if (!fs.existsSync(filename)) tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
@@ -295,8 +321,12 @@ async function start(options) {
   child.unref();
   const qmp = await waitQmp(child);
   try {
-    const status = await qmp.execute('query-status');
     const blocks = await qmp.execute('query-block');
+    if (options.sectorFault || options.fixture) {
+      await validateProfile(qmp, blocks, options.fourKn, options.sectorFault, options.fixture);
+      await qmp.execute('cont');
+    }
+    const status = await qmp.execute('query-status');
     writeJson(path.join(root, 'last-boot.json'), { accelerator: options.accelerator ?? 'tcg', status, blocks });
     console.log(JSON.stringify({ pid: child.pid, status: status.status, disks: blocks.filter(b => b.inserted).map(b => ({ node: b.inserted['node-name'], file: b.inserted.file, readonly: b.inserted.ro })) }, null, 2));
   } finally { qmp.close(); }
@@ -361,7 +391,7 @@ async function refreshTools() {
   const qmp = await connectQmp();
   try {
     const blocks = await qmp.execute('query-block');
-    await validateProfile(qmp, blocks, state.fourKn === true);
+    await validateProfile(qmp, blocks, state.fourKn === true, state.sectorFault === true, stateFixture(state));
     const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw');
     if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso()) || !optical[0].qdev?.startsWith('/machine/')) throw new Error('Unable to identify the tools CD');
     await qmp.execute('blockdev-change-medium', { id: optical[0].qdev, filename: next.filename, format: 'raw', 'read-only-mode': 'read-only', force: false });
@@ -374,13 +404,20 @@ async function refreshTools() {
 
 // Test-only isolation check. The production application has no VM identity,
 // disk serial allowlist or special build. This harness owns the lab boundary.
-export function validateTestBlocks(blocks, fourKn = false) {
+export function validateTestBlocks(blocks, fourKn = false, sectorFault = false, fixture) {
   if (blocks.length !== 4) throw new Error('Unexpected test VM block inventory');
-  for (const disk of profileDisks(fourKn)) {
+  if (sectorFault && !fourKn) throw new Error('Sector fault fixture requires the 4Kn inventory');
+  validateFixtureProfile(fourKn, sectorFault, fixture);
+  for (const disk of profileDisks(fourKn, fixture)) {
     const found = blocks.filter(b => b.inserted?.['node-name'] === disk.id);
-    if (found.length !== 1 || found[0].removable || found[0].inserted.ro !== false ||
-        found[0].inserted.drv !== 'qcow2' || !same(found[0].inserted.file, checkDisk(disk)) ||
-        found[0].inserted.image?.['virtual-size'] !== disk.size * 1024 ** 3) {
+    const info = found[0]?.inserted;
+    const injected = sectorFault && disk.id === 'test_a';
+    const image = injected ? info?.image?.['backing-image'] : info?.image;
+    const file = injected ? image?.filename : info?.file;
+    if (found.length !== 1 || found[0].removable || info.ro !== false ||
+        info.drv !== (injected ? 'blkdebug' : 'qcow2') || typeof file !== 'string' || !same(file, checkDisk(disk)) ||
+        info.image?.['virtual-size'] !== disk.size * 1024 ** 3 ||
+        (injected && (image.format !== 'qcow2' || info.backing_file_depth !== 1 || image['backing-image']))) {
       throw new Error('A test disk is missing, replaced, or has an unexpected capacity');
     }
   }
@@ -388,8 +425,21 @@ export function validateTestBlocks(blocks, fourKn = false) {
   if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso())) throw new Error('Unexpected optical media');
 }
 
-async function validateProfile(qmp, blocks, fourKn) {
-  validateTestBlocks(blocks, fourKn);
+async function validateProfile(qmp, blocks, fourKn, sectorFault = false, fixture) {
+  validateTestBlocks(blocks, fourKn, sectorFault, fixture);
+  if (sectorFault) {
+    const nodes = await qmp.execute('query-named-block-nodes');
+    const top = nodes.find(node => node['node-name'] === 'test_a');
+    const base = nodes.find(node => node['node-name'] === faultBaseNode);
+    const fileNode = nodes.find(node => node['node-name'] === base?.children?.[0]?.['node-name']);
+    const expected = diskPath(fourKnDisks.find(disk => disk.id === 'test_a'));
+    if (top?.drv !== 'blkdebug' || top.children?.length !== 1 || top.children[0].child !== 'image' ||
+        top.children[0]['node-name'] !== faultBaseNode || base?.drv !== 'qcow2' || base.children?.length !== 1 ||
+        base.children[0].child !== 'file' || base.backing_file_depth !== 0 || fileNode?.drv !== 'file' ||
+        fileNode.children?.length !== 0 || !same(base.file, expected) || !same(fileNode.file, expected)) {
+      throw new Error('Sector fault fixture does not wrap the single allowed Test A file');
+    }
+  }
   if (!fourKn) return;
   for (const disk of fourKnDisks.filter(d => d.controller)) {
     const controller = `/machine/peripheral/${disk.controller}`;
@@ -409,9 +459,15 @@ async function preflight() {
   if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp(); // Checks the fixed VM name and UUID.
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
+    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
     console.log('PASS: DiskStudio-Test identity, three isolated QCOW2 disks, capacities and read-only tools CD verified.');
     if (state.fourKn) console.log('Both disposable NVMe controllers expose 4096-byte logical and physical sectors.');
+    if (state.sectorFault) console.log(`Read fault restricted to Test A 4Kn LBA ${sectorCopyFaultLba}.`);
+    if (stateFixture(state) === 'whole-clone') console.log('Whole-disk cloning uses its independent A/B pair.');
+    if (stateFixture(state) === 'btrfs-clone') console.log('Btrfs capacity cloning uses its independent A/B pair.');
+    if (stateFixture(state) === 'mixed-clone') console.log('Mixed-filesystem cloning uses its independent A/B pair.');
+    if (stateFixture(state) === 'btrfs-restore') console.log('Btrfs backup restoration uses its independent A/B pair.');
+    if (stateFixture(state) === 'archive-restore') console.log('Encrypted disk backup restoration uses its independent A/B pair.');
     console.log('Partition tests may target ONLY DS-TEST-A-0001 and DS-TEST-B-0001 (16 GiB each), never the 80 GiB OS disk.');
   } finally { qmp.close(); }
 }
@@ -421,7 +477,7 @@ async function ioStats() {
   if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp();
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
+    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
     const stats = await qmp.execute('query-blockstats');
     console.log(stats.filter(s => disks.some(d => d.id === s['node-name'])).map(s => ({
       disk: s['node-name'], readBytes: s.stats.rd_bytes, writtenBytes: s.stats.wr_bytes,
@@ -435,7 +491,7 @@ async function fixtureNumberKeys(value) {
   if (!isAlive(state?.pid) || state.fourKn !== true) throw new Error('Start the 4Kn test VM first');
   const qmp = await connectQmp();
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), true);
+    await validateProfile(qmp, await qmp.execute('query-block'), true, state.sectorFault === true, stateFixture(state));
     const send = async keys => {
       await qmp.execute('send-key', { keys: keys.map(data => ({ type: 'qcode', data })), 'hold-time': 100 });
       await new Promise(resolve => setTimeout(resolve, 160));
@@ -488,12 +544,18 @@ async function main() {
     console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
     console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
+    console.log('start --4kn --sector-copy-fault: inject a read error at one fixed Test A LBA');
+    console.log('start --4kn --whole-clone: use the dedicated whole-disk clone fixtures');
+    console.log('start --4kn --btrfs-clone: use the dedicated Btrfs resize clone fixtures');
+    console.log('start --4kn --mixed-clone: use the dedicated mixed-filesystem clone fixtures');
+    console.log('start --4kn --btrfs-restore: use the dedicated Btrfs backup restore fixtures');
+    console.log('start --4kn --archive-restore: use the dedicated encrypted disk backup restore fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];
-  if (command === 'start') allowed.push('--4kn');
+  if (command === 'start') allowed.push('--4kn', '--sector-copy-fault', ...fixtureProfiles.map(name => `--${name}`));
   if (!['checkpoint', 'restore'].includes(command) && args.some(a => !allowed.includes(a))) throw new Error('Unsupported option; arbitrary paths/QEMU arguments are not accepted');
   if (['checkpoint', 'restore'].includes(command) && args.length !== 1) throw new Error('Provide exactly one checkpoint name');
   if (args.includes('--tcg') && args.includes('--whpx')) throw new Error('Choose only one accelerator');
@@ -506,7 +568,7 @@ async function main() {
     if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
     const qmp = await connectQmp();
     try {
-      await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true);
+      await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
       await qmp.execute(command === 'pause-vm' ? 'stop' : 'cont');
       console.log(await qmp.execute('query-status'));
     } finally { qmp.close(); }
@@ -533,7 +595,9 @@ async function main() {
     if (command === 'init') return init();
     if (command === 'checkpoint') return checkpoint(args[0]);
     if (command === 'restore') return restore(args[0]);
-    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn') };
+    const fixtures = fixtureProfiles.filter(name => args.includes(`--${name}`));
+    if (fixtures.length > 1) throw new Error('Choose one clone fixture');
+    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn'), sectorFault: args.includes('--sector-copy-fault'), fixture: fixtures[0] };
     if (options.accelerator === 'whpx') console.warn('Experimental WHPX: Windows startup/reset was unreliable on this host. Guest reboot exits QEMU; use start again.');
     if (command === 'smoke') {
       assertStopped();

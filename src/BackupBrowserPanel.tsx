@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Archive, FolderOpen, Search, X } from "lucide-react";
 import { formatSize } from "./types";
 import { useLocale } from "./i18n/LanguageProvider";
+import type { Translate } from "./i18n/translate";
 
 export type BackupInfo = {
   id: string;
@@ -11,13 +12,26 @@ export type BackupInfo = {
   size: number;
   sector: number;
   layers: number;
-  points: { id: string; label: string }[];
+  points: { id: string; label: string; ordinal?: number }[];
   selectedPoint: string;
-  partitions: { id: number; name: string; start: number; size: number }[];
+  partitions: { id: number; name: string; start: number; size: number; btrfs?: boolean }[];
   warning: string;
+  tableIssue?: string;
+  allocationSkippedBytes?: number;
+  sourceDisks: string[];
   scanId: string | null;
   scanPartition: number | null;
 };
+
+export function backupPointLabel(
+  point: BackupInfo["points"][number],
+  t: Translate,
+  catalogText: (label: string) => string,
+) {
+  return point.ordinal === undefined
+    ? catalogText(point.label)
+    : t("此前第 {layer} 层增量备份", { layer: point.ordinal });
+}
 
 export function BackupBrowserPanel({
   info,
@@ -26,7 +40,9 @@ export function BackupBrowserPanel({
   onOpen,
   onClose,
   onRead,
+  onReconstruct,
   onPoint,
+  onRestore,
 }: {
   info: BackupInfo | null;
   busy: boolean;
@@ -34,7 +50,9 @@ export function BackupBrowserPanel({
   onOpen: () => void;
   onClose: () => void;
   onRead: (partition: number) => void;
+  onReconstruct: (partition: number) => void;
   onPoint: (point: string) => void;
+  onRestore?: (partition: number | null) => void;
 }) {
   const { language, t, catalogText } = useLocale();
   const [partition, setPartition] = useState("");
@@ -89,7 +107,7 @@ export function BackupBrowserPanel({
               >
                 {info.points.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.label}
+                    {backupPointLabel(p, t, catalogText)}
                   </option>
                 ))}
               </select>
@@ -108,7 +126,8 @@ export function BackupBrowserPanel({
               )}
               {info.partitions.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} · {formatSize(p.size)}
+                  {info.kind === "partition" ? t("备份分区") : p.name} ·{" "}
+                  {formatSize(p.size)}
                 </option>
               ))}
             </select>
@@ -116,12 +135,37 @@ export function BackupBrowserPanel({
           {info.warning && (
             <p className="data-footnote">{catalogText(info.warning)}</p>
           )}
+          {info.allocationSkippedBytes !== undefined && (
+            <p className="data-footnote">
+              {t("按已用空间备份：{free} B 确认空闲区域按零保存，不包含这些区域的已删除内容。", {
+                free: info.allocationSkippedBytes.toLocaleString(language),
+              })}
+            </p>
+          )}
+          {info.tableIssue !== undefined && (
+            <details className="data-footnote">
+              <summary>
+                {t("无法校验分区表。此还原点仅支持整盘还原。")}
+              </summary>
+              <p>{catalogText(info.tableIssue)}</p>
+            </details>
+          )}
           <div className="data-action-row">
             <span>
               {t(
                 "读取目录后可预览、选择文件，提取到其他磁盘。文件系统支持范围与“文件恢复”一致。",
               )}
             </span>
+            <button
+              className="button"
+              disabled={busy || !available || partition === ""}
+              onClick={() => onReconstruct(Number(partition))}
+              title={t(
+                "使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。",
+              )}
+            >
+              {t("重建文件视图")}
+            </button>
             <button
               className="button primary"
               disabled={busy || !available || partition === ""}
@@ -131,6 +175,31 @@ export function BackupBrowserPanel({
               {t("读取目录")}
             </button>
           </div>
+          {onRestore && (
+            <div className="data-action-row">
+              <span>{t("使用当前还原点，将所选范围写入另一块物理磁盘。")}</span>
+              {info.kind === "disk" && (
+                <button
+                  className="button"
+                  disabled={busy || !available}
+                  onClick={() => onRestore(null)}
+                >
+                  {t("还原备份中的整盘…")}
+                </button>
+              )}
+              <button
+                className="button"
+                disabled={
+                  busy ||
+                  !available ||
+                  !info.partitions.some((part) => String(part.id) === partition)
+                }
+                onClick={() => onRestore(Number(partition))}
+              >
+                {t("还原所选备份分区…")}
+              </button>
+            </div>
+          )}
         </>
       ) : (
         <div className="backup-browser-empty">

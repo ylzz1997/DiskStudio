@@ -2,6 +2,7 @@ param(
     [switch]$Live,
     [string[]]$GuestTools,
     [switch]$BtrfsMoveFixture,
+    [switch]$BtrfsCloneFixture,
     [switch]$BtrfsSnapshotFixture,
     [switch]$BtrfsRetainedFixture,
     [switch]$BtrfsSha256Fixture,
@@ -26,7 +27,7 @@ if (!$Live -and (Test-Path -LiteralPath (Join-Path $diskStudioVmRoot 'run.json')
     if (Get-Process -Id $diskStudioRun.pid -ErrorAction SilentlyContinue) { throw 'Shut down the VM before replacing its optical media' }
 }
 if ($GuestTools -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
-$diskStudioFixtures = @($BtrfsMoveFixture.IsPresent, $BtrfsSnapshotFixture.IsPresent, $BtrfsRetainedFixture.IsPresent, $BtrfsSha256Fixture.IsPresent, $BtrfsMembersFixture.IsPresent, $BtrfsParityFixture.IsPresent, $BtrfsAllocationFixture.IsPresent, $BtrfsLostFixture.IsPresent, $BtrfsLostMembersFixture.IsPresent) | Where-Object { $_ }
+$diskStudioFixtures = @($BtrfsMoveFixture.IsPresent, $BtrfsCloneFixture.IsPresent, $BtrfsSnapshotFixture.IsPresent, $BtrfsRetainedFixture.IsPresent, $BtrfsSha256Fixture.IsPresent, $BtrfsMembersFixture.IsPresent, $BtrfsParityFixture.IsPresent, $BtrfsAllocationFixture.IsPresent, $BtrfsLostFixture.IsPresent, $BtrfsLostMembersFixture.IsPresent) | Where-Object { $_ }
 if (@($diskStudioFixtures).Count -gt 1) { throw 'Choose one Btrfs fixture for this ISO' }
 $diskStudioLvmMedia = @{
     'Lvm-Lab-4Kn-Prepare.exe' = @{ MemberFiles = $true }
@@ -46,6 +47,10 @@ $diskStudioMoveFresh = 'Btrfs-Lab-4Kn-Move-Prepare.exe' -in $GuestTools
 $diskStudioMoveReuse = 'Btrfs-Lab-4Kn-Move-Reuse.exe' -in $GuestTools
 if ($BtrfsMoveFixture -and (!$Live -or $diskStudioMoveFresh -eq $diskStudioMoveReuse)) {
     throw 'A Btrfs relocation fixture requires exactly one selected preparation helper on an immutable ISO'
+}
+$diskStudioClonePreparation = @($GuestTools | Where-Object { $_ -in 'Btrfs-Lab-4Kn-Clone-Prepare.exe','Mixed-File-Clone-4Kn-Prepare.exe','Btrfs-Restore-4Kn-Prepare.exe' })
+if ($BtrfsCloneFixture -and (!$Live -or $diskStudioClonePreparation.Count -ne 1)) {
+    throw 'Btrfs clone fixtures require their selected preparation helper on an immutable ISO'
 }
 if ($BtrfsSnapshotFixture -and (!$Live -or 'Btrfs-Lab-4Kn-Snapshot-Prepare.exe' -notin $GuestTools)) {
     throw 'A Btrfs snapshot fixture requires its selected guest preparation helper on an immutable ISO'
@@ -92,8 +97,17 @@ if ($GuestTools) {
         }
         $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
     }
+    if ($GuestTools -match '^File-Clone-Ntfs-4Kn-Wof-Image-(Prepare|Continue|After-Online)\.exe$') {
+        $diskStudioName = 'Ntfs-Wof-Source.raw'
+        $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+        if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 96MB) {
+            throw 'Invalid immutable NTFS WOF fixture'
+        }
+        $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+    }
     if ($diskStudioFixtures) {
-        $diskStudioFixtureNames = if ($BtrfsLostFixture) { @('Btrfs-Lost-Primary.raw', 'Btrfs-Lost-Mirror.raw') }
+        $diskStudioFixtureNames = if ($BtrfsCloneFixture) { 'Btrfs-Clone-Source.raw' }
+            elseif ($BtrfsLostFixture) { @('Btrfs-Lost-Primary.raw', 'Btrfs-Lost-Mirror.raw') }
             elseif ($BtrfsLostMembersFixture) { @('Btrfs-Lost-Member-1.raw', 'Btrfs-Lost-Member-2.raw') }
             elseif ($BtrfsAllocationFixture) { 'Btrfs-Allocation-Source.raw' }
             elseif ($BtrfsParityFixture) { @('Btrfs-Raid5-1.raw', 'Btrfs-Raid6-1.raw', 'Btrfs-Raid6-2.raw') }
@@ -144,6 +158,58 @@ if ($GuestTools) {
             $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
             if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 25MB) {
                 throw 'Invalid immutable virtual RAID member'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ('Virtual-Raid-Md6-Prepare.exe' -in $GuestTools) {
+        foreach ($diskStudioMember in 0..4) {
+            $diskStudioName = "Virtual-Raid-Md6-$diskStudioMember.raw"
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 12MB) {
+                throw 'Invalid immutable Linux md RAID6 member'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    $diskStudioMdImages = @{
+        'Virtual-Raid-Md-Metadata-Prepare.exe' = @{ Layout = 'native'; Width = 5 }
+        'Virtual-Raid-Md10-Stage.exe' = @{ Layout = 'o2'; Width = 5 }
+        'Virtual-Raid-Md10-Advanced-Stage.exe' = @{ Layout = 'mixed-offset'; Width = 6 }
+    }
+    foreach ($diskStudioPrepare in ($GuestTools | Where-Object { $diskStudioMdImages.ContainsKey($_) })) {
+        $diskStudioMembers = $diskStudioMdImages[$diskStudioPrepare]
+        foreach ($diskStudioMember in 0..($diskStudioMembers.Width - 1)) {
+            $diskStudioName = "Virtual-Raid-Md-$($diskStudioMembers.Layout)-$diskStudioMember.raw"
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 16MB) {
+                throw 'Invalid immutable Linux md metadata fixture'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ('Virtual-Raid-Device-Fresh-Prepare.exe' -in $GuestTools) {
+        $diskStudioRaidMedia = @{
+            'Virtual-Raid-Device-1.raw' = 32MB
+            'Virtual-Raid-Device-2.raw' = 32MB
+            'Virtual-Raid-Device-Whole.raw' = 64MB
+        }
+        foreach ($diskStudioName in $diskStudioRaidMedia.Keys) {
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $diskStudioItem.Length -ne $diskStudioRaidMedia[$diskStudioName]) {
+                throw 'Invalid immutable physical RAID fixture'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ('Virtual-Raid-Md-Zones-Prepare.exe' -in $GuestTools -or 'Virtual-Raid-Md-Zones-Continue.exe' -in $GuestTools) {
+        $diskStudioMemberSizes = @(20MB,6MB,13MB)
+        foreach ($diskStudioMember in 0..2) {
+            $diskStudioName = "Virtual-Raid-Md-alternate-$diskStudioMember.raw"
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne $diskStudioMemberSizes[$diskStudioMember]) {
+                throw 'Invalid immutable Linux md zoned RAID0 fixture'
             }
             $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
         }
