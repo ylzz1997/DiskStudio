@@ -10,6 +10,10 @@ use std::sync::{Mutex, OnceLock};
 pub struct Request {
     pub source: Selection,
     pub options: Options,
+    #[serde(default)]
+    pub refine_failures: bool,
+    #[serde(default)]
+    pub read_timeout_seconds: Option<u16>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,6 +48,7 @@ pub fn start(request: Request) -> Result<String, String> {
     launch(request, None)
 }
 fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> {
+    surface_scan::validate_read_timeout(request.read_timeout_seconds)?;
     #[cfg(not(windows))]
     {
         let _ = (request, resume);
@@ -70,6 +75,8 @@ fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> 
                 return Err("检测进度已被替换，请重新选择。".into());
             }
             if snapshot.report.range() != range
+                || snapshot.options != request.options
+                || snapshot.report.refinement.is_some() != request.refine_failures
                 || snapshot.report.checked_bytes == range.size
                 || snapshot.report.state == "running"
                 || snapshot.resume_count >= 1024
@@ -96,7 +103,7 @@ fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> 
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                report: Report::new(range),
+                report: Report::new(range, request.refine_failures),
                 partition: request.source.partition,
                 options: request.options,
                 loaded: false,
@@ -105,6 +112,8 @@ fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> 
         };
         snapshot.report.state = "running".into();
         snapshot.report.message.clear();
+        snapshot.report.read_timeout_seconds = request.read_timeout_seconds;
+        snapshot.report.timed_out_read = None;
         let initial_report = snapshot.report.clone();
         *state() = Some(Saved {
             source: request.source.clone(),
@@ -131,10 +140,12 @@ fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> 
                     if initial_report.range() != range {
                         return Err("检测范围已变化，请重新选择。".into());
                     }
-                    let mut reader = platform::surface_device(&resolved)?;
+                    let (mut reader, limit) =
+                        platform::surface_scan_device(&resolved, request.read_timeout_seconds)?;
                     let mut report = surface_scan::continue_scan(
                         &mut reader,
                         initial_report,
+                        limit,
                         &cancel,
                         |report| {
                             data_tasks::record_progress(
@@ -152,10 +163,13 @@ fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> 
                     )?;
                     // Same selection/layout must still resolve. A changed layout cannot
                     // be presented as a successful verification of the new target.
-                    if let Err(e) = platform::resolve(&request.source, false, false) {
-                        report.state = "failed".into();
-                        report.message =
-                            format!("检测结束时设备或布局核对失败：{e}。结果仅对应已读取范围。");
+                    if report.state == "completed" {
+                        if let Err(e) = platform::resolve(&request.source, false, false) {
+                            report.state = "failed".into();
+                            report.message = format!(
+                                "检测结束时设备或布局核对失败：{e}。结果仅对应已读取范围。"
+                            );
+                        }
                     }
                     Ok(report)
                 },
@@ -211,12 +225,14 @@ pub fn pause(id: String) -> Result<(), String> {
     saved.pause_requested = true;
     Ok(())
 }
-pub fn resume(id: String) -> Result<String, String> {
+pub fn resume(id: String, read_timeout_seconds: Option<u16>) -> Result<String, String> {
     let saved = stopped(&id)?;
     launch(
         Request {
             source: saved.source,
             options: saved.snapshot.options,
+            refine_failures: saved.snapshot.report.refinement.is_some(),
+            read_timeout_seconds,
         },
         Some(saved.snapshot),
     )
@@ -351,7 +367,17 @@ pub fn export(id: String) -> Result<Option<String>, String> {
             }
             (saved.source.clone(), saved.snapshot.clone())
         };
-        let report = serde_json::json!({"format": "DiskStudio surface report", "version": 1, "limitations": "每次读取最多 1 MiB；读取失败标记整个请求块，不代表块内每个扇区损坏。耗时包含设备和虚拟化缓存影响，不是健康诊断。未读取范围没有结论。未锁定在线卷，内容可能变化。", "result": snapshot});
+        let limitations = if snapshot.report.refinement.is_some() {
+            "耗时分布和失败块统计基于初读，平均速度包含细查时间。细查在初读失败的块内读取更小的范围，记录单扇区读取失败及预算用尽时尚未定位的范围。结果反映该次读取，不能判定介质健康。未锁定在线卷，内容可能变化。"
+        } else {
+            "每次读取最多 1 MiB；读取失败标记整个请求块，不代表块内每个扇区损坏。耗时包含设备和虚拟化缓存影响，不是健康诊断。未读取范围没有结论。未锁定在线卷，内容可能变化。"
+        };
+        let report = serde_json::json!({
+            "format": "DiskStudio surface report",
+            "version": 1,
+            "limitations": limitations,
+            "result": snapshot,
+        });
         let bytes = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
         save_file(
             &source,

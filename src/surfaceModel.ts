@@ -8,7 +8,8 @@ export interface SurfaceSnapshot {
   loaded: boolean;
   resumeCount: number;
   report: {
-    state: "running" | "completed" | "paused" | "canceled" | "failed";
+    state:
+      "running" | "completed" | "paused" | "canceled" | "failed" | "timedOut";
     offset: number;
     size: number;
     sectorSize: number;
@@ -27,15 +28,38 @@ export interface SurfaceSnapshot {
     }[];
     omittedFailures: number;
     message: string;
+    readTimeoutSeconds?: number;
+    timedOutRead?: { startSector: number; sectorCount: number };
+    refinement?: {
+      reads: number;
+      failedSectors: number;
+      unresolvedSectors: number;
+      ranges: {
+        startSector: number;
+        sectorCount: number;
+        code: number;
+        resolution: "sectorReadFailed" | "unresolved";
+      }[];
+      omittedRanges: number;
+    };
   };
 }
 export function surfaceCanResume(snapshot: SurfaceSnapshot | null) {
   return (
     !!snapshot &&
-    ["paused", "canceled", "failed"].includes(snapshot.report.state) &&
+    ["paused", "canceled", "failed", "timedOut"].includes(
+      snapshot.report.state,
+    ) &&
     snapshot.report.checkedBytes < snapshot.report.size &&
     snapshot.resumeCount < 1024
   );
+}
+export function surfaceReadTimeout(text: string): number | null {
+  if (text === "") return null;
+  const seconds = Number(text);
+  if (!/^\d+$/.test(text) || seconds < 1 || seconds > 120)
+    throw Error("单次读取超时须为 1 到 120 秒。");
+  return seconds;
 }
 export function surfaceRange(
   startText: string,

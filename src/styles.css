@@ -64,6 +64,35 @@
   margin: 10px 0;
   overflow-wrap: anywhere;
 }
+.surface-refinement-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.surface-refinement-option input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.surface-timeout-option {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.surface-timeout-option input {
+  width: 9rem;
+  height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
 .surface-progress-heading {
   display: flex;
   justify-content: space-between;

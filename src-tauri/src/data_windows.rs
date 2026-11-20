@@ -23,6 +23,10 @@ use windows_sys::Win32::{
 };
 use wmi::WMIConnection;
 
+#[path = "surface_device_windows.rs"]
+mod surface_device_windows;
+pub(crate) use surface_device_windows::surface_scan_device;
+
 const DISKS: &str = "SELECT __PATH,Number,SerialNumber,UniqueId,FriendlyName,Size,LogicalSectorSize,BusType,PartitionStyle,NumberOfPartitions,IsBoot,IsSystem,IsOffline,IsReadOnly,IsClustered FROM MSFT_Disk";
 const PARTITIONS: &str = "SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition";
 #[derive(Clone)]
@@ -437,35 +441,47 @@ fn open_device(r: &Resolved, write: bool, sharing: u32) -> Result<File, String> 
     open_device_flags(r, write, sharing, 0)
 }
 fn open_device_flags(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Result<File, String> {
-    let f = OpenOptions::new()
+    let file = open_device_file(r, write, sharing, flags)?;
+    verify_device(r, |code, input, output| control(&file, code, input, output))?;
+    Ok(file)
+}
+
+fn open_device_file(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Result<File, String> {
+    OpenOptions::new()
         .read(true)
         .write(write)
         .share_mode(sharing)
         .custom_flags(flags)
         .open(format!("\\\\.\\PhysicalDrive{}", r.disk.number))
-        .map_err(|e| format!("无法打开所选设备：{e}。程序不会自动提权。"))?;
+        .map_err(|e| format!("无法打开所选设备：{e}。程序不会自动提权。"))
+}
+
+fn verify_device(
+    r: &Resolved,
+    mut control: impl FnMut(u32, &[u8], &mut [u8]) -> Result<usize, String>,
+) -> Result<(), String> {
     let mut number = [0; 12];
-    if control(&f, IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut number)? < 12
+    if control(IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut number)? < 12
         || u32::from_le_bytes(number[4..8].try_into().unwrap()) != r.disk.number
     {
         return Err("设备句柄编号与选择不一致。".into());
     }
     let mut length = [0; 8];
-    if control(&f, IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length)? < 8
+    if control(IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length)? < 8
         || u64::from_le_bytes(length) != r.disk.size
     {
         return Err("设备句柄容量与选择不一致。".into());
     }
     let mut geometry = [0u8; 24];
-    if control(&f, IOCTL_DISK_GET_DRIVE_GEOMETRY, &[], &mut geometry)? < 24
+    if control(IOCTL_DISK_GET_DRIVE_GEOMETRY, &[], &mut geometry)? < 24
         || Some(u32::from_le_bytes(geometry[20..24].try_into().unwrap()) as u64)
             != r.disk.logical_sector_size
     {
         return Err("设备句柄扇区大小与选择不一致。".into());
     }
     let mut descriptor = vec![0; 65536];
-    let n = control(&f, IOCTL_STORAGE_QUERY_PROPERTY, &[0; 12], &mut descriptor)?;
-    if n < 36 {
+    let n = control(IOCTL_STORAGE_QUERY_PROPERTY, &[0; 12], &mut descriptor)?;
+    if n < 36 || n > descriptor.len() {
         return Err("无法核对设备序列号。".into());
     }
     let start = u32::from_le_bytes(descriptor[24..28].try_into().unwrap()) as usize;
@@ -483,7 +499,7 @@ fn open_device_flags(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Res
     if Some(serial.as_str()) != r.disk.serial_number.as_deref().map(policy::clean) {
         return Err("设备句柄序列号与 Windows 元数据不一致，已拒绝 I/O。".into());
     }
-    Ok(f)
+    Ok(())
 }
 pub fn reader(r: &Resolved) -> Result<Region<File>, String> {
     Region::new(device(r, false)?, r.offset, r.size).map_err(err)
@@ -626,10 +642,18 @@ pub fn benchmark_device(r: &Resolved, write: bool) -> Result<File, String> {
         },
         FILE_FLAG_NO_BUFFERING | if write { FILE_FLAG_WRITE_THROUGH } else { 0 },
     )?;
+    verify_unbuffered_alignment(r, |code, input, output| control(&f, code, input, output))?;
+    Ok(f)
+}
+
+fn verify_unbuffered_alignment(
+    r: &Resolved,
+    mut control: impl FnMut(u32, &[u8], &mut [u8]) -> Result<usize, String>,
+) -> Result<(), String> {
     let mut query = [0u8; 12];
     query[..4].copy_from_slice(&6u32.to_le_bytes()); // StorageAccessAlignmentProperty
     let mut descriptor = [0u8; 28];
-    let n = control(&f, IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut descriptor)?;
+    let n = control(IOCTL_STORAGE_QUERY_PROPERTY, &query, &mut descriptor)?;
     let logical = u32::from_le_bytes(descriptor[16..20].try_into().unwrap());
     let physical = u32::from_le_bytes(descriptor[20..24].try_into().unwrap());
     if n < 28
@@ -639,7 +663,7 @@ pub fn benchmark_device(r: &Resolved, write: bool) -> Result<File, String> {
     {
         return Err("无法确认无缓存读取的设备对齐要求。".into());
     }
-    Ok(f)
+    Ok(())
 }
 struct LockIdentity {
     disk: String,

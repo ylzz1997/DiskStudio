@@ -177,6 +177,200 @@ fn fault_reference(bound: &Selection) -> Result<(Vec<u8>, i32), String> {
     Ok((bytes, code.ok_or("Expected one native sector read error")?))
 }
 
+pub(super) fn prepare_surface_refinement() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let disks = inventory()?;
+    fat_sector_checks::confirm_4kn(&disks)?;
+    let destination = disks
+        .iter()
+        .find(|d| d.serial_number.as_deref().map(disk_identity::clean) == Some(B))
+        .ok_or("Test B missing")?;
+    let b_offline = destination
+        .is_offline
+        .ok_or("Test B offline state unknown")?;
+    state(&disks, B, b_offline)?;
+    if destination.is_clustered != Some(false) {
+        return Err("Test B cluster state differs from the fixture".into());
+    }
+    metadata_partition(B, None, 32, 256)?;
+    let tables = reread_tables(&disks)?;
+    if b_offline {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct OfflineReason {
+            number: u32,
+            offline_reason: Option<u16>,
+        }
+        let connection =
+            WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
+        let reasons: Vec<OfflineReason> = connection
+            .raw_query("SELECT Number,OfflineReason FROM MSFT_Disk")
+            .map_err(err)?;
+        let reasons: Vec<_> = reasons
+            .iter()
+            .filter(|r| r.number == destination.number)
+            .collect();
+        if reasons.len() != 1 || reasons[0].offline_reason != Some(1) {
+            return Err("Test B was not explicitly taken offline earlier".into());
+        }
+    }
+    offline_fault_source()?;
+    online(B)?;
+    let (folder, _, _, _) = fixture()?;
+    if reread_tables(&inventory()?)? != tables {
+        return Err("A/B GPT or the system layout changed during fixture preparation".into());
+    }
+    Ok(format!("PASS: desktop {desktop}. Test A is offline and Test B is online. GPTs and system layout unchanged. B report folder: {}.", folder.display()))
+}
+
+pub(super) fn inspect_surface_refinement() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, bound_a, _, _) = fixture()?;
+    let (_, code) = fault_reference(&bound_a)?;
+    Ok(format!(
+        "PASS: desktop {desktop}. {A} is offline. {B} is online. Both NVMe disks are 16 GiB, 4Kn. Only A LBA {FAULT_LBA} in the reference range returned Win32 code {code}. Save to {}.",
+        folder.display()
+    ))
+}
+
+fn surface_result(folder: &Path, bound_b: &Selection, name: &str) -> Result<serde_json::Value, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(folder.join(name))
+        .map_err(err)?;
+    data_windows::FileBinding::validate_all(&[data_windows::FileBinding::new(
+        &file,
+        &bound_b.target,
+    )?])?;
+    if file.metadata().map_err(err)?.len() > 2 * MIB {
+        return Err(format!("Unexpected file length for {name}"));
+    }
+    serde_json::from_reader(file.take(2 * MIB)).map_err(err)
+}
+
+pub(super) fn verify_surface_refinement() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, bound_a, bound_b, _) = fixture()?;
+    let (_, code) = fault_reference(&bound_a)?;
+    let coarse = surface_result(&folder, &bound_b, "SurfaceCoarse.json")?;
+    let refined = surface_result(&folder, &bound_b, "SurfaceRefined.json")?;
+    let progress = surface_result(&folder, &bound_b, "SurfaceRefined.dsscan")?;
+    let sectors_per_block = MIB / SECTOR;
+    let start = FAULT_LBA / sectors_per_block * sectors_per_block;
+    for file in [&coarse, &refined] {
+        let report = &file["result"]["report"];
+        let initial = &report["failures"][0];
+        if file["format"] != "DiskStudio surface report"
+            || file["version"] != 1
+            || file["result"]["target"] != bound_a.target.0
+            || !file["result"]["partition"].is_null()
+            || file["result"]["options"]
+                != json!({"startSector": start, "sectorCount": 2 * sectors_per_block})
+            || report["state"] != "completed"
+            || report["sectorSize"] != SECTOR
+            || report["offset"] != start * SECTOR
+            || report["checkedBytes"] != 2 * MIB
+            || report["readableBytes"] != MIB
+            || report["failedBytes"] != MIB
+            || report["omittedFailures"] != 0
+            || report["failures"].as_array().map(Vec::len) != Some(1)
+            || initial["startSector"] != start
+            || initial["sectorCount"] != sectors_per_block
+            || initial["code"] != code
+        {
+            return Err(
+                "Surface report's initial read results differ from the fixed fault fixture".into(),
+            );
+        }
+    }
+    let expected = json!({
+        "reads": 16,
+        "failedSectors": 1,
+        "unresolvedSectors": 0,
+        "ranges": [{"startSector": FAULT_LBA, "sectorCount": 1, "code": code, "resolution": "sectorReadFailed"}],
+        "omittedRanges": 0,
+    });
+    if coarse["result"]["report"].get("refinement").is_some()
+        || refined["result"]["report"]["refinement"] != expected
+        || progress["format"] != "DiskStudio surface progress"
+        || progress["version"] != 1
+        || progress["progress"]["snapshot"]["report"] != refined["result"]["report"]
+        || progress["progress"]["options"] != refined["result"]["options"]
+    {
+        return Err(
+            "Refined report or saved progress differs from the expected sector result".into(),
+        );
+    }
+    Ok(format!(
+        "PASS: desktop {desktop}. A is offline. Both reports match the initial 1 MiB error. B's refined report and checkpoint agree: LBA {FAULT_LBA}, Win32 code {code}, 16 follow-up reads, 255 sectors read on follow-up, none unresolved."
+    ))
+}
+
+pub(super) fn verify_surface_timeout() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, bound_a, bound_b, _) = fixture()?;
+    let checkpoint = surface_result(&folder, &bound_b, "SurfaceTimeout.dsscan")?;
+    let resumed = surface_result(&folder, &bound_b, "SurfaceTimeoutResumed.json")?;
+    let previous = &checkpoint["progress"]["snapshot"];
+    let current = &resumed["result"];
+    let start = FAULT_START + MIB / SECTOR;
+    let options = json!({"startSector": start, "sectorCount": 2 * MIB / SECTOR});
+    for snapshot in [previous, current] {
+        let report = &snapshot["report"];
+        if snapshot["target"] != bound_a.target.0
+            || !snapshot["partition"].is_null()
+            || snapshot["options"] != options
+            || report["sectorSize"] != SECTOR
+            || report["offset"] != start * SECTOR
+            || report["size"] != 2 * MIB
+            || report["failedBytes"] != 0
+            || report["failures"] != json!([])
+        {
+            return Err("Surface timeout case has an unexpected source, range, or media failure".into());
+        }
+    }
+    let stopped = &previous["report"];
+    let finished = &current["report"];
+    let checked = stopped["checkedBytes"]
+        .as_u64()
+        .ok_or("Missing completed prefix")?;
+    let timed_out_read = &stopped["timedOutRead"];
+    let timed_out_lba = timed_out_read["startSector"]
+        .as_u64()
+        .ok_or("Missing timeout LBA")?;
+    let timed_out_sectors = timed_out_read["sectorCount"]
+        .as_u64()
+        .ok_or("Missing timeout extent")?;
+    let block_start = start + checked / SECTOR;
+    if checkpoint["format"] != "DiskStudio surface progress"
+        || checkpoint["version"] != 1
+        || checkpoint["progress"]["options"] != options
+        || stopped["state"] != "timedOut"
+        || stopped["readTimeoutSeconds"] != 1
+        || !matches!(checked, 0 | MIB)
+        || stopped["readableBytes"] != checked
+        || timed_out_sectors == 0
+        || timed_out_lba < block_start
+        || timed_out_lba
+            .checked_add(timed_out_sectors)
+            .is_none_or(|end| end > block_start + MIB / SECTOR)
+        || resumed["format"] != "DiskStudio surface report"
+        || resumed["version"] != 1
+        || current["loaded"] != true
+        || current["resumeCount"] != 1
+        || finished["state"] != "completed"
+        || finished["readTimeoutSeconds"] != 3
+        || finished.get("timedOutRead").is_some()
+        || finished["checkedBytes"] != 2 * MIB
+        || finished["readableBytes"] != 2 * MIB
+    {
+        return Err("Unexpected timeout checkpoint or resumed report properties".into());
+    }
+    Ok(format!("PASS: desktop {desktop}. A remains offline. One-second timeout at LBA {timed_out_lba} across {timed_out_sectors} sectors recorded {checked} completed bytes and zero media errors. Reloaded checkpoint resumed with three seconds and completed 2 MiB. Exact files verified on B."))
+}
+
 pub(super) fn fault_prepare() -> Result<String, String> {
     let desktop = btrfs_checks::desktop()?;
     let receipt = witness_path()?.with_extension("fault.json");

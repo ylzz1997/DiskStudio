@@ -541,6 +541,43 @@ async function moveStopWindow(enabled) {
   } finally { qmp.close(); }
 }
 
+async function surfaceReadWindow(enabled) {
+  const state = readState();
+  if (!isAlive(state?.pid) || state.fourKn !== true || state.network !== false || stateFixture(state)) {
+    throw new Error('Start the isolated standard 4Kn test profile first');
+  }
+  const fault = state.sectorFault === true;
+  const qmp = await connectQmp();
+  try {
+    const before = await qmp.execute('query-block');
+    await validateProfile(qmp, before, true, fault);
+    const source = before.find(b => b.inserted?.['node-name'] === 'test_a');
+    if (source.qdev !== fourKnDisks.find(d => d.id === 'test_a').controller && !source.qdev?.startsWith('/machine/')) {
+      throw new Error('Unable to bind the read limit to Test A');
+    }
+    const limit = 128 * 1024;
+    const fields = ['bps', 'bps_rd', 'bps_wr', 'iops', 'iops_rd', 'iops_wr', 'bps_max', 'bps_rd_max', 'bps_wr_max', 'iops_max', 'iops_rd_max', 'iops_wr_max', 'iops_size'];
+    const rateOf = (device, field) => Number(device?.inserted?.[field] ?? 0);
+    if (fields.some(field => ![0, field === 'bps_rd' ? limit : 0].includes(rateOf(source, field)))) {
+      throw new Error('Test A has another throttle configured');
+    }
+    const rate = enabled ? limit : 0;
+    await qmp.execute('block_set_io_throttle', {
+      id: source.qdev, group: 'diskstudio-test-a-surface',
+      bps: 0, bps_rd: rate, bps_wr: 0, iops: 0, iops_rd: 0, iops_wr: 0,
+    });
+    const after = await qmp.execute('query-block');
+    await validateProfile(qmp, after, true, fault);
+    for (const previous of before.filter(b => b.inserted)) {
+      const current = after.find(b => b.inserted?.['node-name'] === previous.inserted['node-name']);
+      if (fields.some(field => rateOf(current, field) !== (previous === source && field === 'bps_rd' ? rate : rateOf(previous, field)))) {
+        throw new Error('Test A read limit could not be verified');
+      }
+    }
+    console.log(enabled ? 'Test A read limit: 128 KiB/s.' : 'Test A read limit cleared.');
+  } finally { qmp.close(); }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'reallocation-capacity-keys') {
@@ -551,7 +588,7 @@ async function main() {
     if (args.length !== 1 || !['2', '3'].includes(args[0])) throw new Error('Choose the 4Kn fixture sector count of 2 or 3');
     return fixtureNumberKeys(args[0]);
   }
-  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear'].includes(command)) {
+  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear', 'surface-read-window', 'surface-read-clear'].includes(command)) {
     console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
     console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
@@ -569,6 +606,7 @@ async function main() {
     console.log('start --4kn --signature-formats: use the dedicated 4Kn signature format fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
+    console.log('surface-read-window|surface-read-clear: set or clear the fixed Test A 4Kn read limit');
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];
@@ -580,6 +618,7 @@ async function main() {
   if (command === 'preflight') return preflight();
   if (command === 'io-stats') return ioStats();
   if (['move-stop-window', 'move-stop-clear'].includes(command)) return moveStopWindow(command === 'move-stop-window');
+  if (['surface-read-window', 'surface-read-clear'].includes(command)) return surfaceReadWindow(command === 'surface-read-window');
   if (['pause-vm', 'resume-vm'].includes(command)) {
     const state = readState();
     if (!isAlive(state?.pid)) throw new Error('Start the test VM first');

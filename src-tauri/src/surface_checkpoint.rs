@@ -34,8 +34,7 @@ impl Progress {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.source.partition == Some(0)
             || s.partition != self.source.partition
-            || s.options.start_sector != self.options.start_sector
-            || s.options.sector_count != self.options.sector_count
+            || s.options != self.options
             || s.source.len() > 1024
             || s.source.chars().any(char::is_control)
             || uuid::Uuid::parse_str(&s.id).is_err()
@@ -95,18 +94,21 @@ pub fn decode(bytes: &[u8], target: &Target) -> Result<Progress, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::surface_scan::{Range, Report, BLOCK};
+    use crate::surface_scan::{Range, Refinement, Report, TimedOutRead, BLOCK};
     fn sample() -> Progress {
         let target = Target("a".repeat(64));
         let options = Options {
             start_sector: 0,
             sector_count: BLOCK * 3 / 512,
         };
-        let report = Report::new(Range {
-            offset: 0,
-            size: BLOCK * 3,
-            sector: 512,
-        });
+        let report = Report::new(
+            Range {
+                offset: 0,
+                size: BLOCK * 3,
+                sector: 512,
+            },
+            false,
+        );
         let mut p = Progress {
             source: Selection {
                 target: target.clone(),
@@ -147,6 +149,36 @@ mod tests {
         assert!(decode(&serde_json::to_vec(&value).unwrap(), &p.source.target).is_err());
     }
     #[test]
+    fn legacy_progress_keeps_its_shape_and_refined_progress_retains_its_mode() {
+        let mut p = sample();
+        let legacy = encode(p.clone()).unwrap();
+        let envelope: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        assert!(envelope["progress"]["snapshot"]["report"]
+            .get("refinement")
+            .is_none());
+        assert!(decode(&legacy, &p.source.target)
+            .unwrap()
+            .snapshot
+            .report
+            .refinement
+            .is_none());
+
+        p.snapshot.report.refinement = Some(Refinement {
+            reads: 1,
+            ..Refinement::default()
+        });
+        let bytes = encode(p.clone()).unwrap();
+        let restored = decode(&bytes, &p.source.target).unwrap();
+        assert_eq!(restored.snapshot.report.refinement.unwrap().reads, 1);
+        p.snapshot
+            .report
+            .refinement
+            .as_mut()
+            .unwrap()
+            .failed_sectors = 1;
+        assert!(encode(p).is_err());
+    }
+    #[test]
     fn valid_digest_does_not_bypass_structural_validation() {
         let mut p = sample();
         p.snapshot.report.checked_bytes = 512;
@@ -172,5 +204,34 @@ mod tests {
         v.as_object_mut().unwrap().remove("devicePath");
         v["version"] = 2.into();
         assert!(decode(&serde_json::to_vec(&v).unwrap(), &p.source.target).is_err());
+    }
+
+    #[test]
+    fn timeout_checkpoint_requires_a_valid_limit_and_an_unfinished_transfer() {
+        let mut p = sample();
+        p.snapshot.report.state = "timedOut".into();
+        p.snapshot.report.read_timeout_seconds = Some(1);
+        p.snapshot.report.timed_out_read = Some(TimedOutRead {
+            start_sector: 7,
+            sector_count: 8,
+        });
+        let decoded = decode(&encode(p.clone()).unwrap(), &p.source.target).unwrap();
+        assert_eq!(decoded.snapshot.report.read_timeout_seconds, Some(1));
+        assert_eq!(
+            decoded.snapshot.report.timed_out_read.unwrap().start_sector,
+            7
+        );
+        for illegal in [None, Some(0), Some(121)] {
+            let mut invalid = p.clone();
+            invalid.snapshot.report.read_timeout_seconds = illegal;
+            assert!(encode(invalid).is_err());
+        }
+        p.snapshot
+            .report
+            .timed_out_read
+            .as_mut()
+            .unwrap()
+            .start_sector = BLOCK / 512;
+        assert!(encode(p).is_err());
     }
 }

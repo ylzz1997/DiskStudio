@@ -96,6 +96,24 @@ FAT32 和 exFAT 备用引导验收使用 `build-guest-checks.ps1 -FatReconstruct
 
 延后重读用 `build-sector-copy.ps1 -Reread`，与同 SHA-256 的正式程序一起放入只读光盘，使用同一 4Kn 故障启动参数。Prepare 复用已验证的 B/7 测试分区，核对目标区全零和两个 GPT 后才为测试联机 B。先从 A 的 LBA 2232320 反向复制 8 扇区到 B 的普通文件 `ds-sector-reread-checked.bin`。选择 `LOSS`、额外跳过 2 扇区并启用重读，保存 `ds-sector-reread-checked.json`，运行 Verify-File。再从 A 的 LBA 2232064 正向复制 1024 扇区到 B/7 相对 LBA 2048，选择跳过大段后重读及 `LOSS`。预期 384 扇区延后，383 扇区在重读时恢复。Verify-Device 检查整个测试分区、相邻扇区、两盘 GPT、来宾系统盘布局及脱机状态。
 
+## 坏道检测的逐扇区细查
+
+若共用夹具仍保留其他验收的联机状态，先用无读故障的 `start --4kn` 启动并通过预检。以 `build-guest-checks.ps1 -SurfaceRefinementSetup` 制备 `Surface-Refinement-4Kn-Prepare.exe`。关闭正式程序后运行 Prepare。它核对 A/B 标识、保护状态、GPT 及 B 的保留输出分区，只将 A 脱机、B 联机，随后重新核对两盘 GPT 与客体系统盘布局。正常关机后再启动故障场景。
+
+复用 `node scripts/vm/lab.mjs start --4kn --sector-copy-fault` 的固定读故障。用 `build-guest-checks.ps1 -SurfaceRefinement` 绑定当前正式构建，将 `Surface-Refinement-4Kn-Inspect.exe` 和 `Surface-Refinement-4Kn-Verify.exe` 放入只读工具光盘。来宾预检后运行 Inspect，确认脱机 A、联机 B 和报告输出卷。Inspect 对比故障扇区及其相邻扇区的读取结果。
+
+在正式界面的「坏道检测」选 A 整盘，从 LBA 2232320 检测 512 个扇区。先关闭细查，将报告保存到 Inspect 指定 B 卷上的 `SurfaceCoarse.json`。再启用细查，在同一范围运行，将报告和进度保存为 `SurfaceRefined.json` 与 `SurfaceRefined.dsscan`。加载该进度并核对设置与结果。Verify 读取 B 上的三个文件，并对比两次检测的 1 MiB 初读失败范围、细查的 16 次追加读取、LBA 2232323 的单扇区读取错误和未定位计数。QMP 记录测试盘的读写计数。
+
+正式构建 `e1c80fbf…` 通过上述 4Kn 场景。两份报告显示相同的初读失败块。细查确认一处 Win32 1117，另有 255 个扇区在细查时读通，未定位计数为 0。保存的进度成功恢复选项和结果，独立工具核对三个文件通过。QMP 记录显示两次扫描期间 A/B 无新增写入，进度加载期间 A 的读取计数也未变化。512 字节扇区和细查中断续扫由合成测试覆盖。证据见 `.vm/surface-refinement-status.json`。
+
+## 坏道检测的单次读取超时
+
+使用已准备的 4Kn A/B 夹具和匹配的正式构建。保持 A 脱机及 B 输出卷联机。`build-guest-checks.ps1 -SurfaceTimeout` 构建只读核对工具，用 `make-tools-iso.ps1 -Live -GuestTools @('Surface-Refinement-4Kn-Inspect.exe','Surface-Timeout-4Kn-Verify.exe')` 制备工具光盘。通过带固定故障的 `start --4kn --sector-copy-fault` 和预检后，在来宾运行 Inspect 核对 A/B 和正式程序摘要。在正式界面选择 A 整盘、起点 LBA 2232576、512 扇区、超时 1 秒。开始前执行 `node scripts/vm/lab.mjs surface-read-window`，它只给 A 设置读限速。超时界面须显示尚未完成的请求，失败块计数应为零。保存到 B 的 `SurfaceTimeout.dsscan`。
+
+执行 `node scripts/vm/lab.mjs surface-read-clear` 后加载该进度。超时应恢复为 1 秒。改为 3 秒并继续，检查全部 2 MiB 正常读完。保存 `SurfaceTimeoutResumed.json` 到同一 B 卷。Verify 复核正式程序摘要、两份文件的来源和范围、超时请求及续扫设置。用 QMP 核对扫描或加载阶段的 A/B 读写计数。最后用同一正式程序复查带故障的 LBA 2232320 起 512 扇区，开启细查时应再次定位 LBA 2232323。
+
+构建 `6c652c18…` 已通过这组 4Kn 测试。超时请求从绝对 LBA 2232704 开始，覆盖 128 扇区，界面记录了 0 字节已完成和零介质错误。进度加载期间 A 盘未发生读写，续扫读完 2 MiB。限速扫描、续扫和故障细查期间 A/B 写入计数均未增加。验收记录位于 `.vm/surface-timeout-status.json`。
+
 ## FAT 与 exFAT 保留数据缩放
 
 `build-fat-resize.ps1` 只编译客体驱动，绑定已完成桌面程序的 SHA-256。只在通过身份、容量和隔离预检的 DiskStudio-Test 内运行 `Fat-Resize-Check.exe`。它用跨构建的单次标记保护八次操作，匹配 A 的四个已有测试卷并各建立独立文件，不删除或格式化分区。每次缩放后核对脱机状态、精确 GPT 几何、独立读取的 65,553 字节文件及 SHA-256。在后续扩容之前单独联机并确认 Windows 能识别缩容的卷。失败停止且不重试，结束时 A 保持脱机，B 只用于核对。

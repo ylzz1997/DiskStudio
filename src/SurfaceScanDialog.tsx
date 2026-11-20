@@ -16,6 +16,7 @@ import { formatSize } from "./types";
 import {
   surfaceRange,
   surfaceCanResume,
+  surfaceReadTimeout,
   type SurfaceSnapshot,
 } from "./surfaceModel";
 
@@ -41,6 +42,8 @@ export function SurfaceScanDialog({
   const [partition, setPartition] = useState("");
   const [start, setStart] = useState("0");
   const [count, setCount] = useState(String(disk.size / disk.sectorSize));
+  const [refineFailures, setRefineFailures] = useState(false);
+  const [timeout, setTimeoutText] = useState("");
   const [snapshot, setSnapshot] = useState<SurfaceSnapshot | null>(null);
   const [pending, setPending] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -52,6 +55,7 @@ export function SurfaceScanDialog({
   const control = useRef({ pending: false, id: "", busy: false, onBusy });
   control.current.onBusy = onBusy;
   const report = snapshot?.report;
+  const refinement = report?.refinement;
   const running = report?.state === "running";
   const busy = pending || running;
   const resumable = surfaceCanResume(snapshot);
@@ -96,6 +100,8 @@ export function SurfaceScanDialog({
     setPartition(next.partition === null ? "" : String(next.partition));
     setStart(String(next.options.startSector));
     setCount(String(next.options.sectorCount));
+    setRefineFailures(!!next.report.refinement);
+    setTimeoutText(next.report.readTimeoutSeconds?.toString() ?? "");
   }
   function choose(value: string) {
     setPartition(value);
@@ -116,6 +122,7 @@ export function SurfaceScanDialog({
       const options = resume
         ? snapshot!.options
         : surfaceRange(start, count, size, disk.sectorSize);
+      const readTimeoutSeconds = surfaceReadTimeout(timeout);
       if (!disk.hardware?.identity || !disk.hardware.layoutKey)
         throw Error(t("请刷新磁盘信息后重试。"));
       control.current.pending = true;
@@ -123,7 +130,10 @@ export function SurfaceScanDialog({
       setBusy(true);
       setStopping(false);
       control.current.id = resume
-        ? await invoke<string>("surface_resume", { id: snapshot!.id })
+        ? await invoke<string>("surface_resume", {
+            id: snapshot!.id,
+            readTimeoutSeconds,
+          })
         : await invoke<string>("surface_start", {
             request: {
               source: {
@@ -132,6 +142,8 @@ export function SurfaceScanDialog({
                 partition: partition ? Number(partition) : null,
               },
               options,
+              refineFailures,
+              readTimeoutSeconds,
             },
           });
       const next = await invoke<SurfaceSnapshot | null>("surface_status");
@@ -257,6 +269,41 @@ export function SurfaceScanDialog({
           bytes: disk.sectorSize,
         })}
       </p>
+      <label className="surface-timeout-option">
+        {t("单次读取超时（秒）")}
+        <input
+          inputMode="numeric"
+          placeholder={t("系统默认")}
+          value={timeout}
+          onChange={(e) => setTimeoutText(e.target.value)}
+          disabled={busy}
+          aria-describedby="surface-timeout-help"
+        />
+      </label>
+      <p className="surface-note" id="surface-timeout-help">
+        {t(
+          "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。",
+        )}
+      </p>
+      <label className="surface-refinement-option">
+        <input
+          type="checkbox"
+          checked={refineFailures}
+          disabled={busy}
+          onChange={(e) => setRefineFailures(e.target.checked)}
+          aria-describedby={
+            refineFailures ? "surface-refinement-help" : undefined
+          }
+        />
+        {t("细查读取失败的块")}
+      </label>
+      {refineFailures && (
+        <p className="surface-note" id="surface-refinement-help">
+          {t(
+            "细查会在失败块内读取更小的范围。达到读取上限后，余下范围标为未定位。",
+          )}
+        </p>
+      )}
       <div className="surface-progress-heading">
         <strong>
           {running
@@ -267,11 +314,13 @@ export function SurfaceScanDialog({
               ? t("检测完成")
               : report?.state === "paused"
                 ? t("检测已暂停")
-                : report?.state === "canceled"
-                  ? t("检测已取消")
-                  : report?.state === "failed"
-                    ? t("检测已停止")
-                    : t("准备检测")}
+                : report?.state === "timedOut"
+                  ? t("检测因读取超时停止")
+                  : report?.state === "canceled"
+                    ? t("检测已取消")
+                    : report?.state === "failed"
+                      ? t("检测已停止")
+                      : t("准备检测")}
         </strong>
         <span>
           {(progress / 100).toLocaleString(language, {
@@ -358,6 +407,85 @@ export function SurfaceScanDialog({
           {catalogText(report.message)}
         </p>
       )}
+      {report?.timedOutRead && (
+        <p className="surface-note">
+          {t("超时请求 · 绝对 LBA {start} · {count} 扇区 · {seconds} 秒", {
+            start: report.timedOutRead.startSector.toLocaleString(language),
+            count: report.timedOutRead.sectorCount.toLocaleString(language),
+            seconds: report.readTimeoutSeconds!,
+          })}
+        </p>
+      )}
+      {refinement && report && (
+        <>
+          <div className="surface-totals">
+            <div>
+              <span>{t("单扇区读取失败")}</span>
+              <strong>
+                {refinement.failedSectors.toLocaleString(language)}
+              </strong>
+            </div>
+            <div>
+              <span>{t("未定位扇区")}</span>
+              <strong>
+                {refinement.unresolvedSectors.toLocaleString(language)}
+              </strong>
+            </div>
+            <div>
+              <span>{t("细查时读通的扇区")}</span>
+              <strong>
+                {(
+                  report.failedBytes / report.sectorSize -
+                  refinement.failedSectors -
+                  refinement.unresolvedSectors
+                ).toLocaleString(language)}
+              </strong>
+            </div>
+          </div>
+          {refinement.ranges.length > 0 && (
+            <details className="surface-failures">
+              <summary>
+                {t("细查范围（{count} 项）", {
+                  count: (
+                    refinement.ranges.length + refinement.omittedRanges
+                  ).toLocaleString(language),
+                })}
+              </summary>
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("绝对起始 LBA")}</th>
+                    <th>{t("扇区数量")}</th>
+                    <th>{t("错误码")}</th>
+                    <th>{t("扫描结果")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {refinement.ranges.slice(0, 20).map((range) => (
+                    <tr key={range.startSector}>
+                      <td>{range.startSector.toLocaleString(language)}</td>
+                      <td>{range.sectorCount.toLocaleString(language)}</td>
+                      <td>{range.code}</td>
+                      <td>
+                        {t(
+                          range.resolution === "sectorReadFailed"
+                            ? "单扇区读取失败"
+                            : "未定位范围",
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p>
+                {t(
+                  "界面显示前 20 项。报告最多保留 1024 项，超出部分计入总数。",
+                )}
+              </p>
+            </details>
+          )}
+        </>
+      )}
       {!!report?.failures.length && (
         <details className="surface-failures">
           <summary>
@@ -389,7 +517,9 @@ export function SurfaceScanDialog({
           </table>
           <p>
             {t(
-              "界面显示前 20 项；报告最多保留 1024 项，超出部分只计入总数。失败块内未逐扇区定位。",
+              refinement
+                ? "界面显示前 20 项。报告最多保留 1024 项，超出部分计入总数。"
+                : "界面显示前 20 项；报告最多保留 1024 项，超出部分只计入总数。失败块内未逐扇区定位。",
             )}
           </p>
         </details>

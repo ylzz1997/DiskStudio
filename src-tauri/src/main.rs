@@ -739,8 +739,8 @@ fn surface_pause(id: String) -> Result<(), String> {
     surface_tasks::pause(id)
 }
 #[tauri::command]
-async fn surface_resume(id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || surface_tasks::resume(id))
+async fn surface_resume(id: String, read_timeout_seconds: Option<u16>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || surface_tasks::resume(id, read_timeout_seconds))
         .await
         .map_err(|e| e.to_string())?
 }

@@ -1,4 +1,4 @@
-param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$LostBackupBoot, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone)
+param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$LostBackupBoot, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone, [switch]$SurfaceRefinement, [switch]$SurfaceRefinementSetup, [switch]$SurfaceTimeout)
 $ErrorActionPreference = 'Stop'
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 Push-Location $diskStudioProject
@@ -9,7 +9,7 @@ try {
     # Build only. Never launch this executable on the host.
     # Apply CRT selection to C dependencies too (not just the final Rust crate).
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
-    $fixtureBatches = @($NtfsReconstruction, $FatReconstruction, $LostBackupBoot, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
+    $fixtureBatches = @($SurfaceTimeout, $SurfaceRefinementSetup, $SurfaceRefinement, $NtfsReconstruction, $FatReconstruction, $LostBackupBoot, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
     if (@($fixtureBatches).Count -gt 1) { throw 'Select one fixture batch' }
     if ($fixtureBatches) {
         $desktopHash = (Get-FileHash -LiteralPath 'target/release/diskstudio.exe').Hash.ToLowerInvariant()
@@ -31,7 +31,13 @@ try {
     if (!(Test-Path -LiteralPath $diskStudioPayload)) { New-Item -ItemType Directory -Path $diskStudioPayload | Out-Null }
     if ((Get-Item -LiteralPath $diskStudioPayload).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload must not be a link' }
     if ($fixtureBatches) {
-        $testEntrypoints = if ($WholeFileClone) {
+        $testEntrypoints = if ($SurfaceTimeout) {
+            @('Surface-Refinement-4Kn-Inspect.exe', 'Surface-Timeout-4Kn-Verify.exe')
+        } elseif ($SurfaceRefinementSetup) {
+            @('Surface-Refinement-4Kn-Prepare.exe')
+        } elseif ($SurfaceRefinement) {
+            @('Surface-Refinement-4Kn-Inspect.exe', 'Surface-Refinement-4Kn-Verify.exe')
+        } elseif ($WholeFileClone) {
             @('Whole-File-Clone-4Kn-Prepare.exe', 'Whole-File-Clone-4Kn-Resume.exe', 'Whole-File-Clone-4Kn-Rebind.exe', 'Whole-File-Clone-4Kn-Verify.exe')
         } elseif ($FileCloneNtfsEfs) {
             @('File-Clone-Ntfs-4Kn-Efs-Prepare.exe', 'File-Clone-Ntfs-4Kn-Efs-Baseline.exe', 'File-Clone-Ntfs-4Kn-Efs-Verify.exe')
