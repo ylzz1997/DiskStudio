@@ -1,7 +1,10 @@
 //! Exact-sector rewrite plans. The Windows adapter owns device identity,
 //! volume locks, the exclusive writable handle, and disk state.
-use crate::surface_scan::{self, FailureResolution, Range, Report, ScanSource, TransferError};
-use serde::Serialize;
+use crate::{
+    data_tasks::Selection,
+    surface_scan::{self, FailureResolution, Options, Range, Report, ScanSource, TransferError},
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Seek, SeekFrom, Write},
@@ -12,7 +15,33 @@ use std::{
 #[path = "surface_repair_windows.rs"]
 mod windows;
 #[cfg(windows)]
-pub use windows::{discard, execute, prepare};
+pub use windows::{discard, execute, prepare, prepare_range};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RangeRequest {
+    pub source: Selection,
+    pub options: Options,
+    pub read_timeout_seconds: Option<u16>,
+}
+
+pub(crate) fn probe_range(
+    reader: &mut impl ScanSource,
+    range: Range,
+    transfer_limit: surface_scan::TransferLimit,
+    timeout_seconds: Option<u16>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(&Report),
+) -> Result<Report, String> {
+    let mut report = Report::new(range, true);
+    report.read_timeout_seconds = timeout_seconds;
+    let report = surface_scan::continue_scan(reader, report, transfer_limit, cancel, progress)?;
+    canceled(cancel)?;
+    if report.state != "completed" {
+        return Err(report.message);
+    }
+    Ok(report)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Geometry {
@@ -223,9 +252,11 @@ pub(crate) fn write_verified<W: Seek + Write>(
 pub struct Preview {
     pub token: String,
     pub target: String,
+    pub range: Range,
     pub logical_sector_size: u64,
     pub physical_sector_size: u64,
     pub excluded_sectors: u64,
+    pub unresolved_sectors: u64,
     pub now_readable_sectors: u64,
     pub blocks: Vec<BlockProof>,
 }
@@ -243,6 +274,10 @@ pub struct Outcome {
 
 #[cfg(not(windows))]
 pub fn prepare(_: String) -> Result<Preview, String> {
+    Err("当前仅 Windows 支持坏道写入修复。".into())
+}
+#[cfg(not(windows))]
+pub fn prepare_range(_: RangeRequest) -> Result<Preview, String> {
     Err("当前仅 Windows 支持坏道写入修复。".into())
 }
 #[cfg(not(windows))]
@@ -397,10 +432,11 @@ mod tests {
         };
         let mut media = Media::new(vec![1024, 3072, 4096]);
         let cancel = AtomicBool::new(false);
-        let report = surface_scan::continue_scan(
+        let report = probe_range(
             &mut media,
-            Report::new(range, true),
+            range,
             surface_scan::TransferLimit::from_adapter(1048576, 256, 0, 4096).unwrap(),
+            None,
             &cancel,
             |_| {},
         )
@@ -418,5 +454,40 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].range.offset, 2560);
         assert_eq!(groups[0].candidates, vec![6, 8]);
+        assert_eq!(media.0.borrow().writes, 0);
+    }
+
+    #[test]
+    fn direct_probe_does_not_authorize_a_partial_report_after_cancellation_or_timeout() {
+        struct TimedOut;
+        impl ScanSource for TimedOut {
+            fn read_at(
+                &mut self,
+                _: u64,
+                _: &mut [u8],
+                _: &AtomicBool,
+            ) -> Result<usize, TransferError> {
+                Err(TransferError::TimedOut)
+            }
+        }
+        let range = Range {
+            offset: 4096,
+            size: 4096,
+            sector: 4096,
+        };
+        let limit = surface_scan::TransferLimit::from_adapter(1048576, 256, 0, 4096).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(probe_range(&mut TimedOut, range, limit, Some(1), &cancel, |_| {}).is_err());
+        let failure = probe_range(
+            &mut Media::new(vec![4096]),
+            range,
+            limit,
+            None,
+            &cancel,
+            |_| {
+                cancel.store(true, Ordering::Relaxed);
+            },
+        );
+        assert!(failure.is_err());
     }
 }

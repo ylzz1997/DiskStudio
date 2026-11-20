@@ -287,6 +287,10 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+.surface-report-action {
+  display: flex;
+  gap: 8px;
+}
 .surface-actions .button {
   padding-left: 10px;
   padding-right: 10px;
@@ -4234,6 +4238,21 @@ i {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+.health-diagnostics {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+.health-log {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.health-log > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
 }
 .health-metric {
   border: 1px solid var(--border);

@@ -67,9 +67,11 @@ export interface SurfaceRepairBlock {
 export interface SurfaceRepairPreview {
   token: string;
   target: string;
+  range: { offset: number; size: number; sector: number };
   logicalSectorSize: number;
   physicalSectorSize: number;
   excludedSectors: number;
+  unresolvedSectors: number;
   nowReadableSectors: number;
   blocks: SurfaceRepairBlock[];
 }
@@ -82,6 +84,8 @@ export interface SurfaceRepairOutcome {
   diskLeftOffline: boolean | null;
   message: string;
 }
+
+export type SurfaceReportFormat = "json" | "text" | "excel";
 
 export function surfaceCanResume(snapshot: SurfaceSnapshot | null) {
   return (

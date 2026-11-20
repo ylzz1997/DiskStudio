@@ -315,7 +315,7 @@ pub(super) fn surface_repair_witness(verify: bool) -> Result<String, String> {
     Ok(format!("PASS: desktop {desktop}. {A} remains offline. LBA {REPAIR_LBA} read back as zero, seven neighboring sectors match the baseline, and both GPTs and guest OS layout are unchanged."))
 }
 
-fn surface_result(folder: &Path, bound_b: &Selection, name: &str) -> Result<serde_json::Value, String> {
+fn surface_file(folder: &Path, bound_b: &Selection, name: &str) -> Result<File, String> {
     let file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
@@ -329,7 +329,100 @@ fn surface_result(folder: &Path, bound_b: &Selection, name: &str) -> Result<serd
     if file.metadata().map_err(err)?.len() > 2 * MIB {
         return Err(format!("Unexpected file length for {name}"));
     }
+    Ok(file)
+}
+
+fn surface_result(
+    folder: &Path,
+    bound_b: &Selection,
+    name: &str,
+) -> Result<serde_json::Value, String> {
+    let file = surface_file(folder, bound_b, name)?;
     serde_json::from_reader(file.take(2 * MIB)).map_err(err)
+}
+
+pub(super) fn verify_surface_reports() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, _, bound_b, _) = fixture()?;
+    let name = format!("DiskStudio-surface-{}", &desktop[..8]);
+    let json = surface_result(&folder, &bound_b, &format!("{name}.json"))?;
+    let report = &json["result"]["report"];
+    let coarse = report["failures"]
+        .as_array()
+        .ok_or("Missing initial failures")?;
+    let refined = report["refinement"]["ranges"]
+        .as_array()
+        .ok_or("Missing refined failures")?;
+    if json["version"] != 1
+        || report["state"] != "completed"
+        || report["offset"] != REPAIR_START * SECTOR
+        || report["checkedBytes"] != FAULT_COUNT * SECTOR
+        || coarse.len() != 1
+        || coarse[0]["startSector"] != REPAIR_START
+        || coarse[0]["sectorCount"] != FAULT_COUNT
+        || coarse[0]["code"] != 1117
+        || refined.len() != 1
+        || refined[0]["startSector"] != REPAIR_LBA
+        || refined[0]["sectorCount"] != 1
+        || refined[0]["resolution"] != "sectorReadFailed"
+        || refined[0]["code"] != 1117
+    {
+        return Err("The JSON report disagrees with the injected fault or scan range".into());
+    }
+
+    let mut text = String::new();
+    surface_file(&folder, &bound_b, &format!("{name}.txt"))?
+        .take(2 * MIB)
+        .read_to_string(&mut text)
+        .map_err(err)?;
+    let initial_text = format!("{REPAIR_START}\t{FAULT_COUNT}\t1117\t");
+    let refined_text = format!("{REPAIR_LBA}\t1\t1117\t");
+    if !text.lines().any(|line| line.starts_with(&initial_text))
+        || !text.lines().any(|line| line.starts_with(&refined_text))
+    {
+        return Err("The text report does not contain both exact ranges".into());
+    }
+
+    let file = surface_file(&folder, &bound_b, &format!("{name}.xlsx"))?;
+    let mut workbook = zip::ZipArchive::new(file).map_err(err)?;
+    let mut entry = |path: &str| -> Result<String, String> {
+        let mut xml = String::new();
+        let file = workbook.by_name(path).map_err(err)?;
+        if file.size() > MIB {
+            return Err("Unexpected worksheet size".into());
+        }
+        file.take(MIB).read_to_string(&mut xml).map_err(err)?;
+        Ok(xml)
+    };
+    let contains_cells = |xml: &str, cells: &[(&str, u64)]| {
+        cells.iter().all(|&(address, value)| {
+            xml.contains(&format!("<c r=\"{address}\"><v>{value}</v></c>"))
+        })
+    };
+    if !contains_cells(
+        &entry("xl/worksheets/sheet1.xml")?,
+        &[
+            ("B5", REPAIR_START),
+            ("B6", FAULT_COUNT),
+            ("B7", SECTOR),
+            ("B8", FAULT_COUNT * SECTOR),
+            ("B14", 1),
+            ("B15", 0),
+        ],
+    ) || !contains_cells(
+        &entry("xl/worksheets/sheet2.xml")?,
+        &[("A2", REPAIR_START), ("B2", FAULT_COUNT), ("C2", 1117)],
+    ) || !contains_cells(
+        &entry("xl/worksheets/sheet3.xml")?,
+        &[("A2", REPAIR_LBA), ("B2", 1), ("C2", 1117)],
+    ) {
+        return Err(
+            "The XLSX summary, initial failures or refined ranges differ from the fixture".into(),
+        );
+    }
+    Ok(format!(
+        "PASS: desktop {desktop}. Three native reports on B matched the fixture. XLSX summary, initial read failure and refined LBA {REPAIR_LBA} verified independently."
+    ))
 }
 
 pub(super) fn verify_surface_refinement() -> Result<String, String> {

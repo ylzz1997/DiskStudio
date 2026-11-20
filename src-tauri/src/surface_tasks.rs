@@ -502,10 +502,13 @@ pub fn load_progress(target: Target) -> Result<Option<Snapshot>, String> {
         Ok(Some(snapshot))
     }
 }
-pub fn export(id: String) -> Result<Option<String>, String> {
+pub fn export(
+    id: String,
+    format: crate::surface_report::ReportFormat,
+) -> Result<Option<String>, String> {
     #[cfg(not(windows))]
     {
-        let _ = id;
+        let _ = (id, format);
         Err("当前仅 Windows 支持保存检测报告。".into())
     }
     #[cfg(windows)]
@@ -515,24 +518,15 @@ pub fn export(id: String) -> Result<Option<String>, String> {
             .map_err(|_| "请等待当前任务完成。")?;
         data_tasks::ensure_idle()?;
         let (source, snapshot) = state().stopped(&id)?;
-        let limitations = if snapshot.report.refinement.is_some() {
-            "耗时分布和失败块统计基于初读，平均速度包含细查时间。细查在初读失败的块内读取更小的范围，记录单扇区读取失败及预算用尽时尚未定位的范围。结果反映该次读取，不能判定介质健康。未锁定在线卷，内容可能变化。"
-        } else {
-            "每次读取最多 1 MiB；读取失败标记整个请求块，不代表块内每个扇区损坏。耗时包含设备和虚拟化缓存影响，不是健康诊断。未读取范围没有结论。未锁定在线卷，内容可能变化。"
-        };
-        let report = serde_json::json!({
-            "format": "DiskStudio surface report",
-            "version": 1,
-            "limitations": limitations,
-            "result": snapshot,
-        });
-        let bytes = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+        let bytes =
+            crate::surface_report::encode(format, &snapshot, &crate::native_locale::current())?;
+        let (extension, name) = format.file_name();
         save_file(
             &source,
             &bytes,
             "保存检测报告到另一块磁盘（使用新文件名）",
-            "json",
-            "DiskStudio-surface.json",
+            extension,
+            name,
         )
     }
 }
@@ -564,9 +558,9 @@ fn save_file(
     {
         return Err(format!("文件需要使用 .{extension} 扩展名。"));
     }
-    let folder = platform::destination_folder(
+    let (folder, destination) = platform::destination_location(
         path.parent().ok_or("输出目录无效")?,
-        &source.target,
+        std::slice::from_ref(&source.target),
         bytes.len() as u64,
     )?;
     let name = path.file_name().ok_or("输出文件名无效")?;
@@ -586,6 +580,8 @@ fn save_file(
         .create_new(true)
         .open(&partial)
         .map_err(platform::err)?;
+    let output_binding = platform::FileBinding::new(&file, &destination)?;
+    platform::FileBinding::validate_all(&[output_binding])?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("报告未写完：{e}；保留 {}", partial.display()))?;

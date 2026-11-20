@@ -4,7 +4,7 @@ use crate::{
     data_windows as device,
     maintenance_tasks::{self, Ticket},
     partitions::platform::{maintenance, TableReadContext},
-    surface_tasks::{self, Snapshot},
+    surface_tasks,
     table_archive::Archive,
     table_restore::Layout,
 };
@@ -13,7 +13,9 @@ use std::{fs::File, sync::Mutex, time::Instant};
 type Table = Option<(Archive, Layout)>;
 
 struct Plan {
-    scan_id: String,
+    scan_id: Option<String>,
+    request: RangeRequest,
+    range: Range,
     geometry: Geometry,
     fingerprint: String,
     table: Table,
@@ -34,27 +36,27 @@ pub fn discard(token: String) {
 }
 
 fn context(
-    source: &Selection,
-    snapshot: &Snapshot,
-) -> Result<(Selection, TableReadContext), String> {
-    let selected = device::resolve(source, false, false)?;
-    if snapshot.options.range(
+    request: &RangeRequest,
+    expected: Option<Range>,
+) -> Result<(Selection, TableReadContext, Range), String> {
+    let selected = device::resolve(&request.source, false, false)?;
+    let range = request.options.range(
         selected.offset,
         selected.size,
         selected.disk.logical_sector_size.ok_or("扇区大小缺失")?,
-    )? != snapshot.report.range()
-    {
-        return Err("检测范围已变化，请重新检测。".into());
+    )?;
+    if expected.is_some_and(|expected| range != expected) {
+        return Err("修复范围已变化，请重新预览。".into());
     }
     let whole = Selection {
         partition: None,
-        ..source.clone()
+        ..request.source.clone()
     };
     let ctx = maintenance::write_context(&whole, None)?;
     if selected.disk != ctx.resolved.disk {
         return Err("检测范围与写入目标的磁盘状态不一致。".into());
     }
-    Ok((whole, ctx))
+    Ok((whole, ctx, range))
 }
 
 fn geometry(ctx: &TableReadContext, file: &File) -> Result<Geometry, String> {
@@ -79,17 +81,69 @@ fn check_range(ctx: &TableReadContext, table: &Table, range: Range) -> Result<()
 }
 
 pub fn prepare(scan_id: String) -> Result<Preview, String> {
+    prepare_plan(Origin::Scan(scan_id))
+}
+
+pub fn prepare_range(request: RangeRequest) -> Result<Preview, String> {
+    prepare_plan(Origin::Range(request))
+}
+
+enum Origin {
+    Scan(String),
+    Range(RangeRequest),
+}
+
+fn prepare_plan(origin: Origin) -> Result<Preview, String> {
     maintenance::reserve("预览坏道修复", |id, cancel| {
         *pending() = None;
-        let (source, snapshot) = surface_tasks::repair_source(&scan_id)?;
-        let (whole, ctx) = context(&source, &snapshot)?;
+        let (request, scan_id, report) = match origin {
+            Origin::Scan(scan_id) => {
+                let (source, scan) = surface_tasks::repair_source(&scan_id)?;
+                (
+                    RangeRequest {
+                        source,
+                        options: scan.options,
+                        read_timeout_seconds: scan.report.read_timeout_seconds,
+                    },
+                    Some(scan_id),
+                    Some(scan.report),
+                )
+            }
+            Origin::Range(request) => (request, None, None),
+        };
+        surface_scan::validate_read_timeout(request.read_timeout_seconds)?;
+        let expected = report.as_ref().map(Report::range);
+        let (whole, ctx, range) = context(&request, expected)?;
         canceled(cancel)?;
         let mut proof_file = device::device(&ctx.resolved, false)?;
         let geometry = geometry(&ctx, &proof_file)?;
+        geometry.validate(range)?;
         let table = maintenance::write_table(&ctx, &mut proof_file, &whole.target)?;
-        let (candidates, mut excluded_sectors) = groups(&snapshot.report, geometry)?;
-        let (mut reader, _) =
-            device::surface_scan_device(&ctx.resolved, snapshot.report.read_timeout_seconds)?;
+        let (mut reader, limit) =
+            device::surface_scan_device(&ctx.resolved, request.read_timeout_seconds)?;
+        let report = match report {
+            Some(report) => report,
+            None => probe_range(
+                &mut reader,
+                range,
+                limit,
+                request.read_timeout_seconds,
+                cancel,
+                |report| {
+                    data_tasks::record_progress(
+                        id,
+                        "读取指定修复范围",
+                        report.checked_bytes,
+                        report.size,
+                    );
+                },
+            )?,
+        };
+        let unresolved_sectors = report
+            .refinement
+            .as_ref()
+            .map_or(0, |r| r.unresolved_sectors);
+        let (candidates, mut excluded_sectors) = groups(&report, geometry)?;
         let total = candidates.len() as u64;
         let mut blocks = Vec::new();
         let mut now_readable_sectors = 0;
@@ -112,6 +166,9 @@ pub fn prepare(scan_id: String) -> Result<Preview, String> {
         }
         canceled(cancel)?;
         if blocks.is_empty() {
+            if unresolved_sectors != 0 {
+                return Err("当前范围没有可确认的修复扇区。可缩小未定位范围后重新预览。".into());
+            }
             return Err("复读后没有符合范围和保护条件的扇区可修复。".into());
         }
         if maintenance::write_context(&whole, None)?.fingerprint != ctx.fingerprint
@@ -119,12 +176,15 @@ pub fn prepare(scan_id: String) -> Result<Preview, String> {
         {
             return Err("预览期间磁盘、分区或卷信息发生变化。".into());
         }
+        canceled(cancel)?;
         let preview = Preview {
             token: uuid::Uuid::new_v4().to_string(),
             target: ctx.resolved.label,
+            range,
             logical_sector_size: geometry.logical,
             physical_sector_size: geometry.physical,
             excluded_sectors,
+            unresolved_sectors,
             now_readable_sectors,
             blocks: blocks.iter().map(|(_, proof)| proof.clone()).collect(),
         };
@@ -132,6 +192,8 @@ pub fn prepare(scan_id: String) -> Result<Preview, String> {
             preview.token.clone(),
             Plan {
                 scan_id,
+                request,
+                range,
                 geometry,
                 fingerprint: ctx.fingerprint,
                 table,
@@ -177,8 +239,10 @@ fn execute_plan(
     id: &str,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let (source, snapshot) = surface_tasks::repair_source(&plan.scan_id)?;
-    let (whole, ctx) = context(&source, &snapshot)?;
+    if let Some(scan_id) = &plan.scan_id {
+        surface_tasks::repair_source(scan_id)?;
+    }
+    let (whole, ctx, _) = context(&plan.request, Some(plan.range))?;
     if ctx.fingerprint != plan.fingerprint {
         return Err("身份、布局或保护状态与预览不一致。".into());
     }
@@ -201,14 +265,16 @@ fn execute_plan(
         check_range(&fresh, &plan.table, group.range)?;
     }
     let (mut reader, _) =
-        device::surface_scan_device(&fresh.resolved, snapshot.report.read_timeout_seconds)?;
+        device::surface_scan_device(&fresh.resolved, plan.request.read_timeout_seconds)?;
     // Recheck every block while locked before taking the disk offline.
     for (group, expected) in &plan.blocks {
         canceled(cancel)?;
         recheck(&mut reader, group, expected, cancel)?;
     }
     canceled(cancel)?;
-    surface_tasks::mark_repair_used(&plan.scan_id);
+    if let Some(scan_id) = &plan.scan_id {
+        surface_tasks::mark_repair_used(scan_id);
+    }
     let offline_result = device::offline(&writer);
     outcome.disk_left_offline = Some(device::confirm_writable_offline(&writer).is_ok());
     offline_result?;

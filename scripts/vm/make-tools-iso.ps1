@@ -1,6 +1,6 @@
 param(
     [switch]$Live,
-    [string[]]$GuestTools,
+    [string[]]$GuestTools = @(),
     [switch]$BtrfsMoveFixture,
     [switch]$BtrfsCloneFixture,
     [switch]$BtrfsSnapshotFixture,
@@ -11,7 +11,8 @@ param(
     [switch]$BtrfsAllocationFixture,
     [switch]$BtrfsLostFixture,
     [switch]$BtrfsLostMembersFixture,
-    [switch]$LvmFixture
+    [switch]$LvmFixture,
+    [switch]$DesktopOnly
 )
 $ErrorActionPreference = 'Stop'
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -26,8 +27,9 @@ if (!$Live -and (Test-Path -LiteralPath (Join-Path $diskStudioVmRoot 'run.json')
     $diskStudioRun = Get-Content -LiteralPath (Join-Path $diskStudioVmRoot 'run.json') -Raw | ConvertFrom-Json
     if (Get-Process -Id $diskStudioRun.pid -ErrorAction SilentlyContinue) { throw 'Shut down the VM before replacing its optical media' }
 }
-if ($GuestTools -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
+if (($GuestTools -or $DesktopOnly) -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
 $diskStudioFixtures = @($BtrfsMoveFixture.IsPresent, $BtrfsCloneFixture.IsPresent, $BtrfsSnapshotFixture.IsPresent, $BtrfsRetainedFixture.IsPresent, $BtrfsSha256Fixture.IsPresent, $BtrfsMembersFixture.IsPresent, $BtrfsParityFixture.IsPresent, $BtrfsAllocationFixture.IsPresent, $BtrfsLostFixture.IsPresent, $BtrfsLostMembersFixture.IsPresent) | Where-Object { $_ }
+if ($DesktopOnly -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture)) { throw 'A desktop-only ISO cannot include guest tools or fixtures' }
 if (@($diskStudioFixtures).Count -gt 1) { throw 'Choose one Btrfs fixture for this ISO' }
 $diskStudioLvmMedia = @{
     'Lvm-Lab-4Kn-Prepare.exe' = @{ MemberFiles = $true }
@@ -82,7 +84,7 @@ foreach ($diskStudioDirectory in @($diskStudioVmRoot, $diskStudioPayload, (Join-
     } else { New-Item -ItemType Directory -Path $diskStudioDirectory | Out-Null }
 }
 if (Test-Path -LiteralPath $diskStudioIso) { throw 'Tools ISO already exists; preserve it or remove that single file after shutting down the VM' }
-if ($GuestTools) {
+if ($GuestTools -or $DesktopOnly) {
     # Use a fresh staging directory. Older payloads and ISO files may still be
     # needed for failure diagnosis and must not be changed.
     $diskStudioSelected = @{}

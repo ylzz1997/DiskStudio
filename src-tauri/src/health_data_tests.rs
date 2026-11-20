@@ -122,9 +122,12 @@ fn nvme_descriptor_rejects_truncation_and_wrong_relative_offsets() {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
     bytes[48..].copy_from_slice(&nvme_log());
-    assert_eq!(nvme_descriptor(&bytes).unwrap(), &bytes[48..]);
+    assert_eq!(
+        nvme_descriptor(&bytes, NvmeQuery::Health).unwrap(),
+        &bytes[48..]
+    );
     for length in [0, 47, 48, 559] {
-        assert!(nvme_descriptor(&bytes[..length]).is_err());
+        assert!(nvme_descriptor(&bytes[..length], NvmeQuery::Health).is_err());
     }
     for (offset, value) in [
         (0, 49u32),
@@ -140,10 +143,112 @@ fn nvme_descriptor_rejects_truncation_and_wrong_relative_offsets() {
         let mut invalid = bytes.clone();
         invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         assert!(
-            nvme_descriptor(&invalid).is_err(),
+            nvme_descriptor(&invalid, NvmeQuery::Health).is_err(),
             "offset {offset}, value {value}"
         );
     }
+}
+
+#[test]
+fn nvme_identify_controller_validates_descriptor_and_bounds_error_history() {
+    let mut response = vec![0; 48 + 4096];
+    for (offset, value) in [
+        (0, 48u32),
+        (4, 48),
+        (8, 3),
+        (12, 1),
+        (16, 1),
+        (24, 40),
+        (28, 4096),
+    ] {
+        response[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    assert!(nvme_descriptor(&response, NvmeQuery::Health).is_err());
+    assert!(nvme_controller(&response[48..]).is_err());
+    let bytes = &mut response[48..];
+    bytes[64..72].copy_from_slice(b"1.01    ");
+    bytes[80..84].copy_from_slice(&0x0001_0402u32.to_le_bytes());
+    bytes[256] = 1 << 4;
+    bytes[262] = 255;
+    bytes[266..268].copy_from_slice(&343u16.to_le_bytes());
+    let controller =
+        nvme_controller(nvme_descriptor(&response, NvmeQuery::Controller).unwrap()).unwrap();
+    assert_eq!(controller.error_limit, 256);
+    assert_eq!(controller.error_read_limit(), 64);
+    assert!(controller.self_test);
+    let mut metrics = Vec::new();
+    controller.add_metrics(&mut metrics);
+    assert_eq!(
+        metrics.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(),
+        ["1.01", "1.4.2", "69.85", "未知"]
+    );
+}
+
+#[test]
+fn nvme_error_history_retains_large_values_and_uses_only_reported_slots() {
+    let mut identify = vec![0; 4096];
+    identify[64] = b'Q';
+    let controller = nvme_controller(&identify).unwrap();
+    let mut page = [0; 512];
+    let status = (1 << 15) | (2 << 9) | (0x81 << 1) | 1u16;
+    page[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+    page[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+    page[10..12].copy_from_slice(&7u16.to_le_bytes());
+    page[12..14].copy_from_slice(&status.to_le_bytes());
+    page[16..24].copy_from_slice(&9_007_199_254_740_993u64.to_le_bytes());
+    page[24..28].copy_from_slice(&1u32.to_le_bytes());
+    page[64] = 1; // Beyond the one reported slot.
+    let log = nvme_errors(&page, &controller).unwrap();
+    assert_eq!(log.entries.len(), 1);
+    let entry = &log.entries[0];
+    assert_eq!(entry.count, "18446744073709551615");
+    assert_eq!(entry.lba.as_deref(), Some("9007199254740993"));
+    assert_eq!(entry.namespace_id, Some(1));
+    assert_eq!((entry.queue_id, entry.command_id), (None, Some(7)));
+    assert_eq!(
+        (entry.status_type, entry.status_code, entry.do_not_retry),
+        (2, 0x81, true)
+    );
+    assert!(nvme_errors(&page[..63], &controller).is_err());
+    assert!(nvme_errors(&[0; 512], &controller)
+        .unwrap()
+        .entries
+        .is_empty());
+}
+
+#[test]
+fn nvme_self_test_decodes_validity_flags_and_keeps_empty_distinct_from_missing() {
+    let mut page = [0; NVME_SELF_TEST_BYTES];
+    assert!(nvme_self_tests(&page).is_err());
+    for slot in page[4..].chunks_exact_mut(28) {
+        slot[0] = 0xf;
+    }
+    assert!(nvme_self_tests(&page[..NVME_SELF_TEST_BYTES - 1]).is_err());
+    let result = nvme_self_tests(&page).unwrap();
+    assert_eq!(result.completion_percent, None);
+    assert!(result.entries.is_empty());
+    page[0] = 2;
+    page[1] = 33;
+    let slot = &mut page[4..32];
+    slot[0] = 0x27;
+    slot[2] = 0b1010;
+    slot[4..12].copy_from_slice(&9_007_199_254_740_993u64.to_le_bytes());
+    slot[12..16].copy_from_slice(&1u32.to_le_bytes());
+    slot[24] = 7; // Not valid even though populated.
+    slot[25] = 0x81;
+    let result = nvme_self_tests(&page).unwrap();
+    assert_eq!(result.completion_percent, Some(33));
+    assert_eq!(result.entries.len(), 1);
+    let entry = &result.entries[0];
+    assert_eq!((entry.test_code, entry.outcome), (2, 7));
+    assert_eq!(entry.power_on_hours, "9007199254740993");
+    assert_eq!(entry.failing_lba.as_deref(), Some("0"));
+    assert_eq!(
+        (entry.namespace_id, entry.status_type, entry.status_code),
+        (None, None, Some(0x81))
+    );
+    page[1] = 101;
+    assert!(nvme_self_tests(&page).is_err());
 }
 #[test]
 fn ata_thresholds_use_ids_and_preserve_vendor_defined_raw_bytes() {

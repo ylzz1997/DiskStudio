@@ -23,6 +23,7 @@ import {
   type SurfaceStatus,
   type SurfaceRepairPreview,
   type SurfaceRepairOutcome,
+  type SurfaceReportFormat,
 } from "./surfaceModel";
 
 const labels = [
@@ -83,20 +84,25 @@ export function SurfaceScanDialog({
   const [pending, setPending] = useState(false);
   const [pausingId, setPausingId] = useState("");
   const [error, setError] = useState("");
-  const [repairPlan, setRepairPlan] = useState<SurfaceRepairPreview | null>(
-    null,
-  );
+  const [repairPlan, setRepairPlan] = useState<
+    (SurfaceRepairPreview & { scanId: string | null }) | null
+  >(null);
   const [confirmedRepair, setConfirmedRepair] = useState(false);
   const [repairResult, setRepairResult] = useState<{
-    scanId: string;
+    target: string;
+    scanId: string | null;
     outcome: SurfaceRepairOutcome;
   } | null>(null);
+  const [repairPhase, setRepairPhase] = useState<"preview" | "write" | null>(
+    null,
+  );
   const [repairJob, setRepairJob] = useState<{
     id: string;
     phase: string;
     done: number;
     total: number;
   } | null>(null);
+  const [reportFormat, setReportFormat] = useState<SurfaceReportFormat>("json");
   const [saved, setSaved] = useState<{
     target: string;
     path: string;
@@ -139,7 +145,10 @@ export function SurfaceScanDialog({
   const unlisted = candidates.filter((d) => !visible.includes(d));
   const shownSave = saved?.target === target ? saved : null;
   const shownRepair =
-    repairResult?.scanId === snapshot?.id ? repairResult?.outcome : null;
+    repairResult?.target === target &&
+    (repairResult.scanId === null || repairResult.scanId === snapshot?.id)
+      ? repairResult.outcome
+      : null;
 
   function apply(next: SurfaceStatus) {
     setStatus({ ...next, target });
@@ -174,9 +183,9 @@ export function SurfaceScanDialog({
     };
   }, [target]);
 
-  const applyingRepair = !!repairPlan && pending;
   useEffect(() => {
-    if (!applyingRepair) return;
+    if (!repairPhase) return;
+    const title = repairPhase === "write" ? "写入修复坏道" : "预览坏道修复";
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function pollRepair() {
@@ -189,7 +198,7 @@ export function SurfaceScanDialog({
           done: number;
           total: number;
         } | null>("data_status");
-        if (live && job?.title === "写入修复坏道" && job.state === "running") {
+        if (live && job?.title === title && job.state === "running") {
           setRepairJob(job);
         }
       } catch {
@@ -202,7 +211,7 @@ export function SurfaceScanDialog({
       live = false;
       clearTimeout(timer);
     };
-  }, [applyingRepair]);
+  }, [repairPhase]);
 
   function edit(changes: Partial<Draft>) {
     setEdits((current) => ({
@@ -313,6 +322,13 @@ export function SurfaceScanDialog({
       } else {
         await invoke("surface_start", { requests: targets.map(request) });
       }
+      setRepairResult((current) =>
+        targets.some(
+          (candidate) => candidate.hardware?.identity === current?.target,
+        )
+          ? null
+          : current,
+      );
       control.current.running = true;
       clearEdits(targets.map((d) => d.id));
     });
@@ -332,10 +348,14 @@ export function SurfaceScanDialog({
   async function save(progress = false) {
     if (!snapshot || fileBusy) return;
     await perform(async () => {
-      const path = await invoke<string | null>(
-        progress ? "surface_save_progress" : "surface_export",
-        { id: snapshot.id },
-      );
+      const path = progress
+        ? await invoke<string | null>("surface_save_progress", {
+            id: snapshot.id,
+          })
+        : await invoke<string | null>("surface_export", {
+            id: snapshot.id,
+            format: reportFormat,
+          });
       if (path) setSaved({ target, path, progress });
     });
   }
@@ -351,18 +371,42 @@ export function SurfaceScanDialog({
       if (next) clearEdits([disk.id]);
     });
   }
-  async function prepareRepair() {
-    if (!snapshot || !canRepair || fileBusy) return;
+  async function prepareRepair(origin: "scan" | "range") {
+    if (fileBusy || (origin === "scan" && (!snapshot || !canRepair))) return;
     await perform(async () => {
-      const plan = await invoke<SurfaceRepairPreview>(
-        "surface_prepare_repair",
-        {
-          scanId: snapshot.id,
-        },
-      );
-      setConfirmedRepair(false);
-      setRepairPlan(plan);
+      const scanId = origin === "scan" ? snapshot!.id : null;
+      setRepairJob(null);
+      setRepairPhase("preview");
+      try {
+        let plan: SurfaceRepairPreview;
+        if (scanId !== null) {
+          plan = await invoke<SurfaceRepairPreview>("surface_prepare_repair", {
+            scanId,
+          });
+        } else {
+          const { source, options, readTimeoutSeconds } = request(disk);
+          plan = await invoke<SurfaceRepairPreview>(
+            "surface_prepare_range_repair",
+            {
+              request: { source, options, readTimeoutSeconds },
+            },
+          );
+        }
+        setConfirmedRepair(false);
+        setRepairPlan({ ...plan, scanId });
+      } finally {
+        setRepairPhase(null);
+      }
     });
+  }
+
+  async function cancelRepair() {
+    if (!repairJob) return;
+    try {
+      await invoke("data_cancel", { id: repairJob.id });
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   function dismissRepair() {
@@ -375,9 +419,10 @@ export function SurfaceScanDialog({
   }
 
   async function executeRepair() {
-    if (!repairPlan || !snapshot || !confirmedRepair) return;
-    setRepairJob(null);
+    if (!repairPlan || !confirmedRepair) return;
     await perform(async () => {
+      setRepairJob(null);
+      setRepairPhase("write");
       try {
         const outcome = await invoke<SurfaceRepairOutcome>(
           "surface_execute_repair",
@@ -385,9 +430,10 @@ export function SurfaceScanDialog({
             token: repairPlan.token,
           },
         );
-        setRepairResult({ scanId: snapshot.id, outcome });
+        setRepairResult({ target, scanId: repairPlan.scanId, outcome });
         if (outcome.diskLeftOffline !== null) await onRefresh();
       } finally {
+        setRepairPhase(null);
         setRepairPlan(null);
       }
     });
@@ -409,6 +455,15 @@ export function SurfaceScanDialog({
           )}
         </p>
         <p className="surface-note">
+          {t("绝对起始 LBA {start} · {count} 个扇区", {
+            start: (
+              repairPlan.range.offset / repairPlan.range.sector
+            ).toLocaleString(language),
+            count: (
+              repairPlan.range.size / repairPlan.range.sector
+            ).toLocaleString(language),
+          })}
+          {" · "}
           {t("逻辑扇区 {logical} B · 物理扇区 {physical} B", {
             logical: repairPlan.logicalSectorSize,
             physical: repairPlan.physicalSectorSize,
@@ -431,6 +486,14 @@ export function SurfaceScanDialog({
               {repairPlan.excludedSectors.toLocaleString(language)}
             </strong>
           </div>
+          {repairPlan.unresolvedSectors > 0 && (
+            <div>
+              <span>{t("尚未定位的扇区")}</span>
+              <strong>
+                {repairPlan.unresolvedSectors.toLocaleString(language)}
+              </strong>
+            </div>
+          )}
         </div>
         <div className="surface-repair-sectors">
           <table>
@@ -459,7 +522,7 @@ export function SurfaceScanDialog({
           />
           {t("我接受所列扇区的内容可能永久丢失。")}
         </label>
-        {applyingRepair && (
+        {repairPhase === "write" && (
           <p className="surface-note" role="status">
             {repairJob
               ? `${catalogText(repairJob.phase)} · ${repairJob.done}/${repairPlan.blocks.length}`
@@ -473,10 +536,7 @@ export function SurfaceScanDialog({
             disabled={pending && !repairJob}
             onClick={() => {
               if (!pending) dismissRepair();
-              else if (repairJob)
-                void invoke("data_cancel", { id: repairJob.id }).catch((err) =>
-                  setError(String(err)),
-                );
+              else void cancelRepair();
             }}
           >
             {t(pending ? "取消任务" : "取消")}
@@ -936,6 +996,24 @@ export function SurfaceScanDialog({
           )}
         </section>
       )}
+      {repairPhase === "preview" && (
+        <div className="surface-file-actions">
+          <p className="surface-note" role="status">
+            {repairJob?.phase === "读取指定修复范围"
+              ? `${catalogText(repairJob.phase)} · ${formatSize(repairJob.done)} / ${formatSize(repairJob.total)}`
+              : repairJob
+                ? `${catalogText(repairJob.phase)} · ${repairJob.done}/${repairJob.total}`
+                : t("请稍候…")}
+          </p>
+          <button
+            className="button"
+            disabled={!repairJob}
+            onClick={() => void cancelRepair()}
+          >
+            {t("取消任务")}
+          </button>
+        </div>
+      )}
       <FormError message={catalogText(error)} />
       {(snapshot?.loaded || !!snapshot?.resumeCount) && (
         <p className="surface-note" role="status">
@@ -972,14 +1050,28 @@ export function SurfaceScanDialog({
             <Save size={16} />
             {t("保存进度")}
           </button>
-          <button
-            className="button"
-            disabled={fileBusy || !snapshot}
-            onClick={() => void save()}
-          >
-            <Download size={16} />
-            {t("报告")}
-          </button>
+          <div className="surface-report-action">
+            <select
+              aria-label={t("报告格式")}
+              value={reportFormat}
+              disabled={fileBusy || !snapshot}
+              onChange={(event) =>
+                setReportFormat(event.target.value as SurfaceReportFormat)
+              }
+            >
+              <option value="json">JSON</option>
+              <option value="excel">Excel (.xlsx)</option>
+              <option value="text">{t("纯文本")} (.txt)</option>
+            </select>
+            <button
+              className="button"
+              disabled={fileBusy || !snapshot}
+              onClick={() => void save()}
+            >
+              <Download size={16} />
+              {t("报告")}
+            </button>
+          </div>
         </div>
         {running ? (
           <button
@@ -996,12 +1088,20 @@ export function SurfaceScanDialog({
               <button
                 className="button"
                 disabled={fileBusy}
-                onClick={() => void prepareRepair()}
+                onClick={() => void prepareRepair("scan")}
               >
                 <Wrench size={15} />
                 {t("预览坏道修复")}
               </button>
             )}
+            <button
+              className="button"
+              disabled={fileBusy || !disk.hardware?.identity}
+              onClick={() => void prepareRepair("range")}
+            >
+              <Wrench size={15} />
+              {t("按所选范围预览修复")}
+            </button>
             <button
               className={`button ${resumable ? "" : "primary"}`}
               disabled={busy || !disk.hardware?.identity}

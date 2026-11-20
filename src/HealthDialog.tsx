@@ -1,10 +1,42 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Activity, LoaderCircle, RefreshCcw } from "lucide-react";
 import { Dialog, FormError } from "./components";
 import type { Disk } from "./types";
 import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle } from "./LocalDiskView";
+
+type Reading<T> =
+  | { state: "available"; value: T }
+  | { state: "unsupported" }
+  | { state: "unavailable"; reason: string };
+interface ErrorLog {
+  controllerLimit: number;
+  readLimit: number;
+  entries: {
+    count: string;
+    queueId: number | null;
+    commandId: number | null;
+    statusType: number;
+    statusCode: number;
+    doNotRetry: boolean;
+    namespaceId: number | null;
+    lba: string | null;
+  }[];
+}
+interface SelfTestLog {
+  currentOperation: number;
+  completionPercent: number | null;
+  entries: {
+    testCode: number;
+    outcome: number;
+    powerOnHours: string;
+    namespaceId: number | null;
+    failingLba: string | null;
+    statusType: number | null;
+    statusCode: number | null;
+  }[];
+}
 
 interface HealthReport {
   observedAt: number;
@@ -28,7 +60,157 @@ interface HealthReport {
       thresholdReached: boolean;
     }[];
     notes: string[];
+    nvmeDiagnostics: {
+      errorLog: Reading<ErrorLog>;
+      selfTestLog: Reading<SelfTestLog>;
+    } | null;
   };
+}
+
+function statusCode(type: number | null, code: number | null) {
+  const hex = (value: number | null) =>
+    value === null ? "—" : value.toString(16).padStart(2, "0").toUpperCase();
+  return `${hex(type)} / ${hex(code)}`;
+}
+
+function DiagnosticLog<T>({
+  title,
+  reading,
+  children,
+}: {
+  title: string;
+  reading: Reading<T>;
+  children: (value: T) => ReactNode;
+}) {
+  const { t } = useLocale();
+  return (
+    <details className="health-log">
+      <summary>{title}</summary>
+      {reading.state === "available" ? (
+        children(reading.value)
+      ) : (
+        <p className="health-note">
+          {reading.state === "unsupported"
+            ? t("控制器未报告对该日志的支持。")
+            : reading.reason}
+        </p>
+      )}
+    </details>
+  );
+}
+
+function NvmeErrorHistory({ log }: { log: ErrorLog }) {
+  const { t } = useLocale();
+  return (
+    <>
+      <p className="health-note">
+        {t("控制器最多保留 {capacity} 条，本次最多读取 {limit} 条。", {
+          capacity: log.controllerLimit,
+          limit: log.readLimit,
+        })}
+      </p>
+      {log.entries.length === 0 ? (
+        <p className="health-note">{t("本次未返回历史错误记录。")}</p>
+      ) : (
+        <div className="health-attributes">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("错误计数")}</th>
+                <th>SCT / SC</th>
+                <th>{t("命名空间（NSID）")}</th>
+                <th>{t("设备报告的 LBA")}</th>
+                <th>{t("提交队列 / 命令 ID")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {log.entries.map((entry, index) => (
+                <tr key={`${entry.count}-${index}`}>
+                  <td>{entry.count}</td>
+                  <td className="health-raw">
+                    {statusCode(entry.statusType, entry.statusCode)}
+                    {entry.doNotRetry && " · DNR"}
+                  </td>
+                  <td>{entry.namespaceId ?? "—"}</td>
+                  <td>{entry.lba ?? "—"}</td>
+                  <td>
+                    {entry.queueId ?? "—"} / {entry.commandId ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+function NvmeSelfTestHistory({ log }: { log: SelfTestLog }) {
+  const { t } = useLocale();
+  const test = (code: number) =>
+    code === 1
+      ? t("短自检")
+      : code === 2
+        ? t("扩展自检")
+        : t("测试类型 0x{code}", { code: code.toString(16).toUpperCase() });
+  const outcome = (code: number) => {
+    const label =
+      code === 0
+        ? t("自检完成")
+        : code === 6 || code === 7
+          ? t("自检报告故障")
+          : (code >= 1 && code <= 5) || code === 8 || code === 9
+            ? t("自检中止")
+            : t("未知");
+    return `${label} (0x${code.toString(16).toUpperCase()})`;
+  };
+  return (
+    <>
+      <p className="health-note">
+        {log.completionPercent === null
+          ? t("当前没有正在运行的自检。")
+          : t("正在运行 {operation} · {percent}%", {
+              operation: test(log.currentOperation),
+              percent: log.completionPercent,
+            })}
+      </p>
+      {log.entries.length === 0 ? (
+        <p className="health-note">{t("本次未返回历史自检结果。")}</p>
+      ) : (
+        <div className="health-attributes">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("测试")}</th>
+                <th>{t("结果")}</th>
+                <th>
+                  {t("通电时间")} ({t("小时")})
+                </th>
+                <th>{t("命名空间（NSID）")}</th>
+                <th>{t("故障 LBA")}</th>
+                <th>SCT / SC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {log.entries.map((entry, index) => (
+                <tr key={index}>
+                  <td>{test(entry.testCode)}</td>
+                  <td>{outcome(entry.outcome)}</td>
+                  <td>{entry.powerOnHours}</td>
+                  <td>{entry.namespaceId ?? "—"}</td>
+                  <td>{entry.failingLba ?? "—"}</td>
+                  <td className="health-raw">
+                    {statusCode(entry.statusType, entry.statusCode)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
 }
 
 export function HealthDialog({
@@ -141,6 +323,22 @@ export function HealthDialog({
                 <li key={w}>{catalogText(w)}</li>
               ))}
             </ul>
+          )}
+          {health.nvmeDiagnostics && (
+            <div className="health-diagnostics">
+              <DiagnosticLog
+                title={t("NVMe 错误记录")}
+                reading={health.nvmeDiagnostics.errorLog}
+              >
+                {(log) => <NvmeErrorHistory log={log} />}
+              </DiagnosticLog>
+              <DiagnosticLog
+                title={t("NVMe 自检记录")}
+                reading={health.nvmeDiagnostics.selfTestLog}
+              >
+                {(log) => <NvmeSelfTestHistory log={log} />}
+              </DiagnosticLog>
+            </div>
           )}
           <div className="health-metrics">
             {health.metrics.map((m) => (

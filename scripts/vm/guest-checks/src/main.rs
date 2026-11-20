@@ -663,6 +663,7 @@ fn main() {
                 | "Surface-Timeout-4Kn-Verify"
                 | "Surface-Repair-4Kn-Baseline"
                 | "Surface-Repair-4Kn-Verify"
+                | "Surface-Repair-4Kn-Reports"
                 | "Archive-Restore-4Kn-Prepare"
                 | "Archive-Restore-4Kn-Continue"
                 | "Archive-Restore-4Kn-Verify-Partition"
@@ -834,6 +835,7 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Surface-Timeout-4Kn-Verify") => sector_copy_checks::verify_surface_timeout(),
         Some("Surface-Repair-4Kn-Baseline") => sector_copy_checks::surface_repair_witness(false),
         Some("Surface-Repair-4Kn-Verify") => sector_copy_checks::surface_repair_witness(true),
+        Some("Surface-Repair-4Kn-Reports") => sector_copy_checks::verify_surface_reports(),
         Some("Surface-Parallel-512-Inspect") => sector_copy_checks::inspect_surface_parallel(),
         Some("Archive-Restore-4Kn-Prepare") => archive_restore_checks::prepare(false),
         Some("Archive-Restore-4Kn-Continue") => archive_restore_checks::prepare(true),

@@ -26,6 +26,7 @@ ext4-view = { path = "../vendor/ext4-view", default-features = false }
 zstd = "0.13"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 rfd = { version = "0.15", default-features = false }
+rust_xlsxwriter = { version = "0.103.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 cap-std = "4.0.3"

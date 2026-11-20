@@ -83,6 +83,7 @@ mod snapshot;
 mod storage;
 mod surface_checkpoint;
 mod surface_repair;
+mod surface_report;
 mod surface_scan;
 mod surface_tasks;
 mod table_archive;
@@ -699,6 +700,14 @@ async fn surface_prepare_repair(scan_id: String) -> Result<surface_repair::Previ
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
+async fn surface_prepare_range_repair(
+    request: surface_repair::RangeRequest,
+) -> Result<surface_repair::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || surface_repair::prepare_range(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn surface_execute_repair(token: String) -> Result<surface_repair::Outcome, String> {
     tauri::async_runtime::spawn_blocking(move || surface_repair::execute(token))
         .await
@@ -777,8 +786,11 @@ async fn surface_load_progress(
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-async fn surface_export(id: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || surface_tasks::export(id))
+async fn surface_export(
+    id: String,
+    format: Option<surface_report::ReportFormat>,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || surface_tasks::export(id, format.unwrap_or_default()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -977,6 +989,7 @@ fn main() {
             sector_discard_write,
             surface_start,
             surface_prepare_repair,
+            surface_prepare_range_repair,
             surface_execute_repair,
             surface_discard_repair,
             lost_partition_start,

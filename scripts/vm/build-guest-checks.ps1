@@ -32,7 +32,7 @@ try {
     if ((Get-Item -LiteralPath $diskStudioPayload).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload must not be a link' }
     if ($fixtureBatches) {
         $testEntrypoints = if ($SurfaceRepair) {
-            @('Surface-Repair-4Kn-Baseline.exe', 'Surface-Repair-4Kn-Verify.exe')
+            @('Surface-Repair-4Kn-Baseline.exe', 'Surface-Repair-4Kn-Verify.exe', 'Surface-Repair-4Kn-Reports.exe')
         } elseif ($SurfaceParallel) {
             @('Surface-Parallel-512-Inspect.exe')
         } elseif ($SurfaceTimeout) {
