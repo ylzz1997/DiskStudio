@@ -19,6 +19,7 @@ fn fixture() -> (Cursor<Vec<u8>>, used_space::Plan) {
         filesystem: "NTFS".into(),
         skipped_bytes: 12288,
         note: String::new(),
+        note_count: None,
     });
     (io, b.finish().unwrap())
 }

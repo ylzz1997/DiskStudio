@@ -3,6 +3,9 @@ use super::*;
 use cap_std::fs::{Dir, OpenOptions as CapOptions};
 use std::io::Cursor;
 
+#[path = "btrfs_exact_clone_checks.rs"]
+pub(crate) mod exact_clone;
+
 const FOLDER: &str = "DS-BtrfsRestore";
 const EARLIER: &str = "Earlier.dsbackup";
 const LATEST: &str = "Latest.dsbackup";
@@ -257,11 +260,15 @@ pub(in super::super) fn prepare(resume: bool) -> Result<String, String> {
 
 pub(in super::super) fn verify() -> Result<String, String> {
     let desktop = desktop()?;
+    verify_receipt(&desktop)
+}
+
+fn verify_receipt(desktop: &str) -> Result<String, String> {
     let disks = inventory()?;
     fat_sector_checks::confirm_4kn(&disks)?;
     target_entries()?;
     let baseline: Baseline = serde_json::from_reader(
-        File::open(receipt(&desktop))
+        File::open(receipt(desktop))
             .map_err(err)?
             .take(1024 * 1024),
     )

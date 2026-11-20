@@ -17,7 +17,18 @@ pub struct Part {
     pub name: String,
     pub start: u64,
     pub size: u64,
-    pub btrfs: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_format: Option<RestoreFormat>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreFormat {
+    Fat,
+    Exfat,
+    Ntfs,
+    Btrfs,
+    Ext,
 }
 
 #[cfg(test)]
@@ -229,7 +240,7 @@ impl Browser {
                 name: "备份分区".into(),
                 start: 0,
                 size,
-                btrfs: false,
+                restore_format: None,
             });
         } else {
             browser.index_disk(&mut tick)?;
@@ -239,7 +250,7 @@ impl Browser {
             tick(size, size)?;
             let mut extent =
                 Region::new(&mut content, part.start, part.size).map_err(|e| e.to_string())?;
-            part.btrfs = btrfs_candidate(&mut extent, part.size)?;
+            part.restore_format = restore_format(&mut extent, part.size)?;
         }
         tick(size, size)?;
         Ok(browser)
@@ -326,7 +337,8 @@ impl Browser {
             return Ok(());
         };
         if disk.sector_size != self.info.sector {
-            return Err("备份记录的扇区大小与分区表不一致".into());
+            self.info.table_issue = Some("备份记录的扇区大小与分区表不一致".into());
+            return Ok(());
         }
         self.info.warning =
             inspected
@@ -347,7 +359,7 @@ impl Browser {
                 name: p.name,
                 start: p.start,
                 size: p.size,
-                btrfs: false,
+                restore_format: None,
             })
             .collect();
         Ok(())
@@ -469,14 +481,29 @@ impl Browser {
 
 // Route only on bytes from a verified backup point. A Windows filesystem
 // can retain an older signature well past its current boot sector.
-fn btrfs_candidate(reader: &mut (impl Read + Seek), size: u64) -> Result<bool, String> {
-    if !disk_core::btrfs::has_magic(reader, size)? {
-        return Ok(false);
-    }
+fn restore_format(
+    reader: &mut (impl Read + Seek),
+    size: u64,
+) -> Result<Option<RestoreFormat>, String> {
     let mut boot = [0; 512];
+    if size < boot.len() as u64 {
+        return Ok(None);
+    }
     reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     reader.read_exact(&mut boot).map_err(|e| e.to_string())?;
-    Ok(&boot[3..11] != b"NTFS    "
-        && !crate::bitlocker::boot_marker(&boot)
-        && !crate::recovery::fat_boot(&boot))
+    if crate::bitlocker::boot_marker(&boot) {
+        Ok(None)
+    } else if &boot[3..11] == b"NTFS    " {
+        Ok(Some(RestoreFormat::Ntfs))
+    } else if crate::recovery::fat_boot(&boot) {
+        Ok(Some(if &boot[3..11] == b"EXFAT   " {
+            RestoreFormat::Exfat
+        } else {
+            RestoreFormat::Fat
+        }))
+    } else if disk_core::btrfs::has_magic(reader, size)? {
+        Ok(Some(RestoreFormat::Btrfs))
+    } else {
+        Ok(crate::ext_allocation::has_magic(reader, size)?.then_some(RestoreFormat::Ext))
+    }
 }

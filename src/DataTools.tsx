@@ -316,7 +316,13 @@ export function DataTools({
             ? destinationDisk.hardware?.offline != null && part.role === "Linux 数据"
             : !part.hidden && part.role === "数据分区") &&
           (cloningFiles || part.size !== sourceSize)
-        : part.size === sourceSize),
+        : part.size === sourceSize &&
+          (linuxSource
+            ? destinationDisk.scheme === "GPT" &&
+              destinationDisk.sectorSize === disk?.sectorSize &&
+              destinationDisk.hardware?.offline != null &&
+              part.role === "Linux 数据" && !part.system
+            : true)),
   ) ?? [];
   const matchingProgress = progressMatches(
     recoveryProgress,
@@ -561,7 +567,7 @@ export function DataTools({
         };
       else
         request = {
-          type: "clone",
+          type: linuxSource ? "cloneLinuxPartition" : "clone",
           mode: copyMode,
           source: selection(disk, partition),
           destination: selection(destinationDisk, destinationPartition),
@@ -1196,7 +1202,13 @@ export function DataTools({
                   )}
                 </fieldset>
               )}
-              {task !== "restore" && !specialClone && copyMode === "usedSpace" && (
+              {task === "clone" && linuxSource && !specialClone && (
+                <p className="copy-mode-note">
+                  {t("同容量克隆要求可核对的 Ext2/3/4 或单设备 Btrfs。Linux 数据分区的文件系统在预览时核对。")}
+                  {copyMode === "usedSpace" && ` ${t("保持源分区布局，目标空闲区不会被清除。")}`}
+                </p>
+              )}
+              {task !== "restore" && !(task === "clone" && linuxSource) && !specialClone && copyMode === "usedSpace" && (
                 <p className="copy-mode-note">
                   {t(
                     "检查 NTFS、FAT、exFAT、Ext2/3/4 和单设备 Btrfs 的分配信息。多设备 Btrfs 和未识别的文件系统完整保留。",
@@ -1906,7 +1918,7 @@ export function DataTools({
             setError("");
             setBackupRestore(null);
           }}
-          onPrepare={(targetDisk, targetPartition, resize) => void action(async () => {
+          onPrepare={(targetDisk, targetPartition, mode) => void action(async () => {
             const next = await invoke<DataPlan | null>("data_prepare", {
               request: {
                 type: "restoreBackupPoint",
@@ -1914,7 +1926,8 @@ export function DataTools({
                 point: backupInfo.selectedPoint,
                 partition: backupRestore.partition,
                 destination: selection(targetDisk, targetPartition),
-                resize,
+                resize: mode === "resize",
+                byFiles: mode === "files",
               },
             });
             if (next) {

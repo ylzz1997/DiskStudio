@@ -5,6 +5,8 @@ import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { formatSize, type Disk } from "./types";
 
+type RestoreMode = "original" | "resize" | "files";
+
 export function BackupRestoreDialog({
   backup,
   partition,
@@ -20,13 +22,17 @@ export function BackupRestoreDialog({
   busy: boolean;
   error: string;
   onClose: () => void;
-  onPrepare: (disk: Disk, targetPart: string, resize: boolean) => void;
+  onPrepare: (disk: Disk, targetPart: string, mode: RestoreMode) => void;
 }) {
   const { t, catalogText } = useLocale();
   const [target, setTarget] = useState("");
   const [targetPart, setTargetPart] = useState("");
-  const [resize, setResize] = useState(false);
+  const [mode, setMode] = useState<RestoreMode>("original");
   const sourcePart = backup.partitions.find((part) => part.id === partition);
+  const format = sourcePart?.restoreFormat;
+  const btrfs = format === "btrfs";
+  const ext = format === "ext";
+  const fat = format === "fat" || format === "exfat";
   const point = backup.points.find(
     (point) => point.id === backup.selectedPoint,
   );
@@ -36,10 +42,11 @@ export function BackupRestoreDialog({
       (part) =>
         part.number !== undefined &&
         !part.system &&
-        (sourcePart?.btrfs
+        (btrfs || ext
           ? part.role === "Linux 数据" && disk.hardware?.offline != null
           : part.role === "数据分区" && !part.hidden) &&
-        (resize ? part.size !== size : part.size === size),
+        (mode === "files" ||
+          (mode === "resize" ? part.size !== size : part.size === size)),
     );
   const eligible = disks.filter((disk) => {
     const hardware = disk.hardware;
@@ -82,7 +89,7 @@ export function BackupRestoreDialog({
             disabled={busy || !canPreview}
             onClick={() => {
               if (selected && canPreview)
-                onPrepare(selected, targetPart, resize);
+                onPrepare(selected, targetPart, mode);
             }}
           >
             {busy ? t("正在核对目标…") : t("预览还原")}
@@ -108,21 +115,28 @@ export function BackupRestoreDialog({
           <label>
             <span>
               <strong>{t("还原方式")}</strong>
-              <small>{sourcePart.btrfs
-                ? t("预览会核对单设备 Btrfs，目标须为普通 GPT Linux 数据分区。")
-                : t("调整容量适用于 FAT12/16/32 和 exFAT。")}</small>
+              {btrfs && <small>{t("预览会核对单设备 Btrfs，目标须为普通 GPT Linux 数据分区。")}</small>}
+              {ext && <small>{t("预览会核对干净卸载的 Ext2/3/4，目标须为同容量的普通 GPT Linux 数据分区。")}</small>}
+              {mode === "files" && (
+                <small>{t("按活动文件和目录重建目标文件系统。")}</small>
+              )}
             </span>
             <select
-              value={resize ? "resize" : "original"}
+              value={mode}
               disabled={busy}
               onChange={(event) => {
-                setResize(event.target.value === "resize");
+                setMode(event.target.value as RestoreMode);
                 setTarget("");
                 setTargetPart("");
               }}
             >
               <option value="original">{t("原尺寸还原")}</option>
-              <option value="resize">{t("调整容量还原")}</option>
+              {(btrfs || fat) && (
+                <option value="resize">{t("调整容量还原")}</option>
+              )}
+              {(format === "ntfs" || fat) && (
+                <option value="files">{t("按文件还原")}</option>
+              )}
             </select>
           </label>
         )}
@@ -155,7 +169,11 @@ export function BackupRestoreDialog({
               onChange={(event) => setTargetPart(event.target.value)}
             >
               <option value="">
-                {resize ? t("选择不同容量") : t("选择同容量")}
+                {mode === "files"
+                  ? t("选择接收分区")
+                  : mode === "resize"
+                    ? t("选择不同容量")
+                    : t("选择同容量")}
               </option>
               {parts.map((part) => (
                 <option key={part.id} value={part.number}>

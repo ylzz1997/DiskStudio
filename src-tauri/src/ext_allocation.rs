@@ -47,6 +47,17 @@ fn power(mut n: u64, p: u64) -> bool {
     }
     n == 1
 }
+
+pub(crate) fn has_magic(r: &mut (impl Read + Seek), size: u64) -> Result<bool, String> {
+    if size < 2048 {
+        return Ok(false);
+    }
+    r.seek(SeekFrom::Start(1024 + 0x38)).map_err(err)?;
+    let mut magic = [0; 2];
+    r.read_exact(&mut magic).map_err(err)?;
+    Ok(magic == [0x53, 0xef])
+}
+
 pub fn inspect(r: &mut (impl Read + Seek), cancel: &AtomicBool) -> Result<Allocation, String> {
     let size = r.seek(SeekFrom::End(0)).map_err(err)?;
     let s = at(r, 1024, 1024)?;
@@ -227,7 +238,8 @@ pub fn inspect(r: &mut (impl Read + Seek), cancel: &AtomicBool) -> Result<Alloca
         return Err("Ext 超级块与块组空闲计数不一致。".into());
     }
     if uninit > 0 {
-        map.note = format!("{uninit} 个未初始化块组完整保留，未推测其隐式位图。");
+        map.note = "完整保留未初始化的块组，数量为 {count}。".into();
+        map.note_count = Some(uninit);
     }
     map.validate()?;
     Ok(map)

@@ -18,15 +18,19 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore'];
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy'];
 function profileDisks(fourKn, fixture) {
   const base = fourKn ? fourKnDisks : disks;
-  return fixture ? base.map(disk => disk.controller ? {
-    ...disk, name: disk.name.replace('-4kn.qcow2', `-${fixture}-4kn.qcow2`),
+  return fixture ? base.map(disk => disk.bus === 'nvme' ? {
+    ...disk, name: disk.name.replace(/(?:-4kn)?\.qcow2$/, `-${fixture}${fourKn ? '-4kn' : ''}.qcow2`),
   } : disk) : base;
 }
 const stateFixture = state => state.fixture ?? (state.wholeClone === true ? 'whole-clone' : undefined);
 function validateFixtureProfile(fourKn, sectorFault, fixture) {
+  if (fixture === 'ext-copy') {
+    if (fourKn || sectorFault) throw new Error('Ext copy fixture requires its own separate 512-byte profile');
+    return;
+  }
   if (fixture !== undefined && (!fixtureProfiles.includes(fixture) || !fourKn || sectorFault)) {
     throw new Error('Clone fixture requires its own separate 4Kn profile');
   }
@@ -150,6 +154,7 @@ function checkIso(filename) {
 export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, fixture } = {}) {
   if (!['whpx', 'tcg'].includes(accelerator)) throw new Error('Unsupported accelerator');
   if (fourKn && (setup || network)) throw new Error('4Kn acceptance uses the installed offline guest');
+  if (fixture && (setup || network)) throw new Error('Dedicated fixtures use the installed offline guest');
   if (sectorFault && (!fourKn || accelerator !== 'tcg')) throw new Error('Sector fault fixture requires 4Kn TCG');
   validateFixtureProfile(fourKn, sectorFault, fixture);
   const args = [
@@ -170,7 +175,7 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
     // During Windows Setup, expose only the OS disk. Test disks are attached later.
     if (setup && disk.id !== 'os') continue;
     const image = { driver: 'qcow2', 'node-name': disk.id, file: { driver: 'file', filename: diskPath(disk) } };
-    if (fixture && disk.controller) {
+    if (fixture && disk.bus === 'nvme') {
       image.discard = 'unmap';
       image['detect-zeroes'] = 'unmap';
     }
@@ -290,7 +295,7 @@ async function start(options) {
   // Validate the fixed profile before creating its two independent images.
   const args = buildArgs(options);
   for (const disk of profileDisks(options.fourKn, options.fixture)) {
-    if (disk.controller) {
+    if (disk.controller || (options.fixture && disk.bus === 'nvme')) {
       const filename = safePath(diskPath(disk), root, false);
       if (!fs.existsSync(filename)) tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
     }
@@ -465,9 +470,13 @@ async function preflight() {
     if (state.sectorFault) console.log(`Read fault restricted to Test A 4Kn LBA ${sectorCopyFaultLba}.`);
     if (stateFixture(state) === 'whole-clone') console.log('Whole-disk cloning uses its independent A/B pair.');
     if (stateFixture(state) === 'btrfs-clone') console.log('Btrfs capacity cloning uses its independent A/B pair.');
+    if (stateFixture(state) === 'btrfs-exact-clone') console.log('Btrfs same-size cloning uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'mixed-clone') console.log('Mixed-filesystem cloning uses its independent A/B pair.');
     if (stateFixture(state) === 'btrfs-restore') console.log('Btrfs backup restoration uses its independent A/B pair.');
     if (stateFixture(state) === 'archive-restore') console.log('Encrypted disk backup restoration uses its independent A/B pair.');
+    if (stateFixture(state) === 'capacity-restore') console.log('Capacity and file-based restoration uses its independent A/B pair.');
+    if (stateFixture(state) === 'fat-restore') console.log('FAT variant restoration uses its independent A/B pair.');
+    if (stateFixture(state) === 'ext-copy') console.log('Ext copy and restoration uses its independent 512-byte A/B pair.');
     console.log('Partition tests may target ONLY DS-TEST-A-0001 and DS-TEST-B-0001 (16 GiB each), never the 80 GiB OS disk.');
   } finally { qmp.close(); }
 }
@@ -550,6 +559,10 @@ async function main() {
     console.log('start --4kn --mixed-clone: use the dedicated mixed-filesystem clone fixtures');
     console.log('start --4kn --btrfs-restore: use the dedicated Btrfs backup restore fixtures');
     console.log('start --4kn --archive-restore: use the dedicated encrypted disk backup restore fixtures');
+    console.log('start --4kn --btrfs-exact-clone: use the copied, independently verified Btrfs restore pair');
+    console.log('start --4kn --capacity-restore: use the dedicated capacity and file-based restore fixtures');
+    console.log('start --4kn --fat-restore: use the dedicated FAT variant restore fixtures');
+    console.log('start --ext-copy: use the dedicated 512-byte Ext copy and restore fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     process.exitCode = command ? 1 : 0; return;

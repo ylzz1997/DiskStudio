@@ -92,11 +92,11 @@ fn btrfs_restore_hint_follows_the_selected_point_and_respects_windows_boot() {
     bytes[3..11].copy_from_slice(b"NTFS    ");
     let latest = Archive::from_reader(Cursor::new(archive(&bytes, "partition", 4096, Some(&previous)))).unwrap();
     let browser = Browser::from_chain(previous.prepend(latest).unwrap(), "test.dsbackup".into(), |_, _| Ok(())).unwrap();
-    assert!(!browser.info.partitions[0].btrfs);
+    assert_eq!(browser.info.partitions[0].restore_format, Some(RestoreFormat::Ntfs));
     let older = browser.select_point(&earlier, |_, _| Ok(())).unwrap();
-    assert!(older.info.partitions[0].btrfs);
+    assert_eq!(older.info.partitions[0].restore_format, Some(RestoreFormat::Btrfs));
     bytes[3..11].copy_from_slice(b"-FVE-FS-");
-    assert!(!btrfs_candidate(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap());
+    assert_eq!(restore_format(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap(), None);
 }
 
 #[test]
@@ -296,14 +296,23 @@ fn gpt_backup_geometry_is_validated_before_partitions_are_available() {
             .read_to_end(&mut restored)
             .unwrap();
         assert_eq!(restored, damaged);
-        if sector == 4096 {
-            assert!(Browser::from_chain(
-                chain(archive(&disk, "disk", 512, None)),
-                "mismatch".into(),
-                |_, _| Ok(())
-            )
-            .is_err());
-        }
+
+        let archive_sector = if sector == 4096 { 512 } else { 4096 };
+        let mismatched = browse(&disk, "disk", archive_sector);
+        assert_eq!(mismatched.info.sector, archive_sector);
+        assert_eq!(
+            mismatched.info.table_issue.as_deref(),
+            Some("备份记录的扇区大小与分区表不一致")
+        );
+        assert!(mismatched.info.partitions.is_empty());
+        assert!(mismatched.restore_reader(Some(0)).is_err());
+        restored.clear();
+        mismatched
+            .restore_reader(None)
+            .unwrap()
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, disk);
     }
 }
 
@@ -409,6 +418,7 @@ fn ext_files_remain_extractable_through_compressed_archive_random_access() {
         zstd::stream::decode_all(&include_bytes!("../../tests/fixtures/test_disk1.bin.zst")[..])
             .unwrap();
     let browser = browse(&disk, "partition", 512);
+    assert_eq!(browser.info.partitions[0].restore_format, Some(RestoreFormat::Ext));
     let (files, _) = scan(&browser, 0);
     let file = files
         .iter()

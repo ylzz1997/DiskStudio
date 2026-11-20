@@ -1795,6 +1795,11 @@ pub enum Request {
         #[serde(default)]
         mode: crate::used_space::Mode,
     },
+    CloneLinuxPartition {
+        source: Selection,
+        destination: Selection,
+        mode: crate::used_space::Mode,
+    },
     ResizeClone {
         source: Selection,
         destination: Selection,
@@ -1842,6 +1847,8 @@ pub enum Request {
         partition: Option<u32>,
         destination: Selection,
         resize: bool,
+        #[serde(default, rename = "byFiles")]
+        by_files: bool,
     },
     Recover {
         scan_id: String,
@@ -2183,11 +2190,12 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         },
                     )
                 }
-                request @ (Request::ResizeClone { .. } | Request::FileClone { .. }) => {
+                request @ (Request::ResizeClone { .. } | Request::FileClone { .. } | Request::CloneLinuxPartition { .. }) => {
                     use resize_clone::Method;
                     let (source, destination, method) = match request {
                         Request::ResizeClone { source, destination } => (source, destination, Method::Resize),
                         Request::FileClone { source, destination } => (source, destination, Method::files()),
+                        Request::CloneLinuxPartition { source, destination, mode } => (source, destination, Method::LinuxExact(mode)),
                         _ => unreachable!(),
                     };
                     let title = method.title();
@@ -2325,7 +2333,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     partition,
                     destination,
                     resize,
+                    by_files,
                 } => {
+                    let mode = match (resize, by_files) {
+                        (false, false) => retained_restore::Mode::Original,
+                        (true, false) => retained_restore::Mode::Resize,
+                        (false, true) => retained_restore::Mode::Files,
+                        (true, true) => return Err("请选择一种还原方式。".into()),
+                    };
                     let opened = state()
                         .opened_backup
                         .as_ref()
@@ -2336,9 +2351,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         .cloned()
                         .ok_or("备份还原点已变化，请重新选择。")?;
                     let (work, source, target, bytes, warning) =
-                        retained_restore::Restore::prepare(opened, partition, destination, resize, &locale)?;
+                        retained_restore::Restore::prepare(opened, partition, destination, mode, &locale)?;
                     (
-                        if resize { "调整容量还原" } else { "还原所选备份还原点" },
+                        mode.title(),
                         source,
                         target,
                         bytes,
@@ -3155,9 +3170,43 @@ fn allocation_notes(
         .iter()
         .filter(|v| !v.note.is_empty())
         .take(16)
-        .map(|v| format!(" {} · {}", v.filesystem, locale.text(&v.note)))
+        .map(|v| {
+            let note = match v.note_count {
+                Some(count) => locale.format(&v.note, &[("count", &count.to_string())]),
+                None => locale.text(&v.note).to_owned(),
+            };
+            format!(" {} · {note}", v.filesystem)
+        })
         .collect()
 }
+#[cfg(windows)]
+fn allocated_progress(
+    id: &str,
+    cancel: &AtomicBool,
+    phase: crate::used_space::Phase,
+    done: u64,
+    total: u64,
+) -> Result<(), String> {
+    let stage = match phase {
+        crate::used_space::Phase::Copying => "复制已用范围",
+        crate::used_space::Phase::Verifying => "回读校验已复制范围",
+    };
+    progress(id, cancel, stage, done, total)
+}
+
+#[cfg(windows)]
+fn allocated_summary(
+    plan: &crate::used_space::Plan,
+    locale: &crate::native_locale::Locale,
+) -> String {
+    let mut summary = locale.format(
+        "按已用空间克隆完成，复制 {copied} B，跳过 {skipped} B。已复制范围及分配计划通过 SHA-256 完整回读校验；目标空闲区未清除。目标磁盘保持脱机，未修改分区容量或重复 GPT 标识。",
+        &[("copied", &plan.copied().to_string()), ("skipped", &plan.skipped.to_string())],
+    );
+    summary.push_str(&allocation_notes(plan, locale));
+    summary
+}
+
 #[cfg(windows)]
 fn write_allocated(
     id: &str,
@@ -3182,26 +3231,10 @@ fn write_allocated(
             &mut target,
             cancel.clone(),
             |t| t.inner_mut().sync_all().map_err(|e| e.to_string()),
-            |phase, n, total| {
-                progress(
-                    id,
-                    cancel,
-                    match phase {
-                        crate::used_space::Phase::Copying => "复制已用范围",
-                        crate::used_space::Phase::Verifying => "回读校验已复制范围",
-                    },
-                    n,
-                    total,
-                )
-            },
+            |phase, n, total| allocated_progress(id, cancel, phase, n, total),
         )?;
         plan.proof.verify(source, cancel)?;
-        let mut summary = locale.format(
-            "按已用空间克隆完成，复制 {copied} B，跳过 {skipped} B。已复制范围及分配计划通过 SHA-256 完整回读校验；目标空闲区未清除。目标磁盘保持脱机，未修改分区容量或重复 GPT 标识。",
-            &[("copied", &plan.copied().to_string()), ("skipped", &plan.skipped.to_string())],
-        );
-        summary.push_str(&allocation_notes(plan, &locale));
-        Ok((summary, Some(hash)))
+        Ok((allocated_summary(plan, &locale), Some(hash)))
     })();
     result.map_err(|e: String| {
         locale.format(

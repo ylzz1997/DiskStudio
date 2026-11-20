@@ -19,7 +19,7 @@ use disk_core::btrfs;
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    sync::atomic::AtomicBool,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 #[path = "disk_file_clone_windows.rs"]
@@ -41,25 +41,45 @@ pub(crate) struct Clone {
 enum ClonePlan {
     Resize([u8; 32]),
     BtrfsResize { resize: String, allocation: String },
-    FatFiles { fingerprint: [u8; 32], serial: u32 },
-    NtfsFiles(Box<ntfs::Plan>),
+    LinuxExact { proof: String, mode: used_space::Mode },
+    Files(FilePlan),
+}
+
+pub(super) enum FilePlan {
+    Fat { fingerprint: [u8; 32], serial: u32 },
+    Ntfs(Box<ntfs::Plan>),
+}
+
+pub(super) fn file_serial() -> u64 {
+    (uuid::Uuid::new_v4().as_u128() as u64).max(1)
+}
+
+fn check_plan(before: [u8; 32], after: [u8; 32]) -> Result<(), String> {
+    if before == after {
+        Ok(())
+    } else {
+        Err("源文件系统分配计划已变化，请重新预览。".into())
+    }
 }
 
 pub(super) enum Method {
     Resize,
+    LinuxExact(used_space::Mode),
     Files { serial: u64 },
 }
 
 impl Method {
     pub(super) fn files() -> Self {
         Self::Files {
-            serial: (uuid::Uuid::new_v4().as_u128() as u64).max(1),
+            serial: file_serial(),
         }
     }
 
     pub(super) fn title(&self) -> &'static str {
         match self {
             Self::Resize => "调整容量克隆",
+            Self::LinuxExact(used_space::Mode::AllSectors) => "逐扇区克隆",
+            Self::LinuxExact(used_space::Mode::UsedSpace) => "按已用空间克隆",
             Self::Files { .. } => "按文件克隆",
         }
     }
@@ -104,7 +124,7 @@ fn source_context(
         || part.offset != source.offset
         || part.size != source.size
     {
-        return Err("不同容量克隆需要选择两个普通 GPT 数据分区。".into());
+        return Err("克隆需要选择两个普通 GPT 数据分区。".into());
     }
     let kind = match part.gpt_type.as_deref().map(policy::guid).as_deref() {
         Some(policy::BASIC_DATA)
@@ -119,7 +139,7 @@ fn source_context(
         {
             PartitionType::Linux
         }
-        _ => return Err("不同容量克隆需要选择两个普通 GPT 数据分区。".into()),
+        _ => return Err("克隆需要选择两个普通 GPT 数据分区。".into()),
     };
     Ok((context, kind))
 }
@@ -159,7 +179,7 @@ fn capture_destination(
     kind: PartitionType,
 ) -> Result<Archive, String> {
     let table = maintenance::capture_write_table(ctx, file, &selection.target, range, true)?
-        .ok_or("不同容量克隆需要选择两个普通 GPT 数据分区。")?;
+        .ok_or("请选择普通 GPT 数据分区作为目标。")?;
     let layout = table_restore::archive_layout(&table)?;
     let first = range.offset / range.sector;
     if first < layout.first || first + range.size / range.sector - 1 > layout.last {
@@ -193,7 +213,7 @@ fn check_linux_native(
             && entry.attributes == 0
             && !protected.contains(&entry.guid)
     }) {
-        return Err("Btrfs 克隆需要无保护属性的普通 GPT Linux 数据分区。".into());
+        return Err("需要无保护属性且无 Windows 卷关联的普通 GPT Linux 数据分区。".into());
     }
     Ok(())
 }
@@ -218,7 +238,7 @@ fn protect_destination(
                 && policy::linux_clone_candidate(disk, &parts, part)
         })
     {
-        return Err("Btrfs 克隆需要无保护属性的普通 GPT Linux 数据分区。".into());
+        return Err("需要无保护属性且无 Windows 卷关联的普通 GPT Linux 数据分区。".into());
     }
     Ok(())
 }
@@ -244,7 +264,7 @@ impl PartitionTarget {
         Self::prepare_kind(destination, sector, locale, PartitionType::Windows)
     }
 
-    pub(super) fn prepare_btrfs(
+    pub(super) fn prepare_linux(
         destination: &Selection,
         sector: u64,
         locale: &Locale,
@@ -396,6 +416,36 @@ pub(super) fn resized_plan(reader: &mut (impl Read + Seek), range: Range) -> Res
     clone::prepare(reader, range.sector, range.size, range.offset)
 }
 
+pub(super) fn linux_copy_plan(
+    reader: &mut (impl Read + Seek),
+    range: Range,
+    cancel: &AtomicBool,
+    ext_only: bool,
+) -> Result<used_space::Plan, String> {
+    let plan = used_space::inspect(reader, range.size, range.sector, None, cancel)?;
+    let [volume] = plan.volumes.as_slice() else {
+        return Err("需要可核对的 Ext2/3/4 或单设备 Btrfs 文件系统。".into());
+    };
+    match volume.filesystem.as_str() {
+        "Ext2" | "Ext3" | "Ext4" => {
+            let mut log_block_size = [0; 4];
+            reader.seek(SeekFrom::Start(1024 + 0x18)).map_err(device::err)?;
+            reader.read_exact(&mut log_block_size).map_err(device::err)?;
+            let block_size = 1024u64.checked_shl(u32::from_le_bytes(log_block_size));
+            if block_size.is_none_or(|bytes| bytes < range.sector) {
+                return Err("Ext 块大小不能小于目标逻辑扇区。".into());
+            }
+        }
+        "Btrfs" if !ext_only => {
+            let mut fs = btrfs::open(&mut *reader, || used_space::stop(cancel))?;
+            fs.verify_view(|| used_space::stop(cancel))?;
+        }
+        _ => return Err("需要可核对的 Ext2/3/4 或单设备 Btrfs 文件系统。".into()),
+    }
+    plan.proof.verify(reader, cancel)?;
+    Ok(plan)
+}
+
 pub(super) fn resized_view<'a, R: Read + Seek>(
     plan: &'a Plan,
     reader: R,
@@ -421,6 +471,73 @@ pub(super) fn resize_detail(locale: &Locale, plan: &Plan) -> String {
             ("count", &plan.moved_clusters().to_string()),
         ],
     )
+}
+
+impl FilePlan {
+    pub(super) fn prepare(
+        reader: &mut (impl Read + Seek),
+        range: Range,
+        serial: u64,
+        cancel: &AtomicBool,
+        locale: &Locale,
+    ) -> Result<(Self, String), String> {
+        if ntfs::is_ntfs(reader)? {
+            let plan = ntfs::Plan::prepare(reader, range, serial, cancel)?;
+            let detail = locale.format(
+                "NTFS → NTFS · {files} 个文件名，{directories} 个子目录，{bytes} B 数据流。重建 DISKCLONE 卷，保留文件数据、硬链接、时间、权限、8.3 短名和扩展属性。写后检查完整目录与 SHA-256，目标 GPT 保持原样。",
+                &[("files", &plan.files.to_string()), ("directories", &plan.directories.to_string()),
+                    ("bytes", &plan.bytes.to_string())],
+            );
+            return Ok((Self::Ntfs(Box::new(plan)), detail));
+        }
+
+        let serial = (serial as u32).max(1);
+        let plan = file_clone::prepare(reader, range.sector, range.size, range.offset, serial, cancel)?;
+        let detail = locale.format(
+            "{from} → {to} · {files} 个文件，{directories} 个子目录。目标将生成 DISKCLONE 卷，连续分配活动文件，保留文件名、时间和属性，其余区域写零。目标 GPT 保持原样。",
+            &[("from", plan.source_format), ("to", plan.destination_format),
+                ("files", &plan.files.to_string()), ("directories", &plan.directories.to_string())],
+        );
+        Ok((Self::Fat { fingerprint: plan.fingerprint(), serial }, detail))
+    }
+
+    pub(super) fn write(
+        &self,
+        target: &PartitionTarget,
+        id: &str,
+        cancel: &AtomicBool,
+        mut reader: impl Read + Seek + Send,
+        validate_source: impl Fn() -> Result<(), String>,
+    ) -> Result<String, String> {
+        let range = target.range;
+        match self {
+            Self::Fat { fingerprint, serial } => {
+                let plan = file_clone::prepare(
+                    &mut reader, range.sector, range.size, range.offset, *serial, cancel,
+                )?;
+                check_plan(*fingerprint, plan.fingerprint())?;
+                target.write(
+                    id, cancel, &mut plan.reader(reader), None,
+                    |check| plan.verify(check), validate_source,
+                )
+            }
+            Self::Ntfs(plan) => {
+                plan.revalidate(&mut reader, cancel)?;
+                let engine = ntfs::Plan::engine()?;
+                target.overwrite(
+                    id, cancel,
+                    |output| {
+                        plan.write(
+                            &engine, &mut reader, output,
+                            |view| view.inner_mut().sync_all(), cancel,
+                            |stage, now, total| progress(id, cancel, stage, now, total),
+                        )
+                    },
+                    |check| plan.verify(check, cancel), validate_source,
+                )
+            }
+        }
+    }
 }
 
 pub(super) fn btrfs_view<R: Read + Seek>(
@@ -460,12 +577,18 @@ impl Clone {
     ) -> Result<(Self, String, String, u64, String), String> {
         validate_pair(&source, &destination)?;
         if source.partition.is_none() {
-            return Err("不同容量克隆需要选择两个普通 GPT 数据分区。".into());
+            return Err("克隆需要选择两个普通 GPT 数据分区。".into());
         }
         let before = device::resolve(&source, true, false)?;
         let sector = before.disk.logical_sector_size.ok_or("扇区大小缺失")?;
-        let (source_ctx, kind) =
-            source_context(&source, &before, matches!(method, Method::Resize))?;
+        let (source_ctx, kind) = source_context(
+            &source,
+            &before,
+            matches!(method, Method::Resize | Method::LinuxExact(_)),
+        )?;
+        if matches!(method, Method::LinuxExact(_)) && kind != PartitionType::Linux {
+            return Err("需要无保护属性且无 Windows 卷关联的普通 GPT Linux 数据分区。".into());
+        }
         let (target, destination_label) =
             PartitionTarget::prepare_kind(&destination, sector, locale, kind)?;
         if before.disk.number == target.number {
@@ -474,6 +597,9 @@ impl Clone {
         let range = target.range;
         if matches!(method, Method::Resize) && range.size == before.size {
             return Err("选择不同容量的目标分区，或改用同容量克隆方式。".into());
+        }
+        if matches!(method, Method::LinuxExact(_)) && range.size != before.size {
+            return Err("保持布局的克隆要求源与目标容量、逻辑扇区大小完全一致。".into());
         }
         let file = device::device(&before, false)?;
         let (table, _) = capture_source(&source_ctx, &file, &source)?;
@@ -493,6 +619,35 @@ impl Clone {
         let mut reader = input(&file, &before, kind)?;
         let cancel = AtomicBool::new(false);
         let (plan, detail) = match method {
+            Method::LinuxExact(mode) => {
+                let allocation = linux_copy_plan(&mut reader, range, &cancel, false)?;
+                let filesystem = locale.format(
+                    "文件系统为 {filesystem}。",
+                    &[("filesystem", &allocation.volumes[0].filesystem)],
+                );
+                let used_space = if mode == used_space::Mode::UsedSpace {
+                    locale.format(
+                        "预计复制 {copied} B，跳过 {skipped} B。",
+                        &[
+                            ("copied", &allocation.copied().to_string()),
+                            ("skipped", &allocation.skipped.to_string()),
+                        ],
+                    )
+                } else {
+                    String::new()
+                };
+                let detail = locale.sentences(&[
+                    &filesystem,
+                    &used_space,
+                    "副本保留原文件系统 UUID，请与原卷分别挂载。",
+                    if mode == used_space::Mode::UsedSpace {
+                        "只跳过确认空闲的区域。目标空闲区保持原样，已复制范围完整回读并核对 SHA-256。目标 GPT 保持原样。"
+                    } else {
+                        "逐扇区复制所选分区。完整回读并核对 SHA-256，目标 GPT 保持原样。"
+                    },
+                ]);
+                (ClonePlan::LinuxExact { proof: allocation.digest, mode }, detail)
+            }
             Method::Resize if kind == PartitionType::Linux => {
                 let filesystem = btrfs::plan_resize(&mut reader, range.size)?;
                 let (_, allocation) = btrfs_view(reader, &filesystem, range, &cancel)?;
@@ -520,37 +675,9 @@ impl Clone {
                     resize_detail(locale, &filesystem),
                 )
             }
-            Method::Files { serial } if ntfs::is_ntfs(&mut reader)? => {
-                let plan = ntfs::Plan::prepare(&mut reader, range, serial, &cancel)?;
-                let detail = locale.format(
-                    "NTFS → NTFS · {files} 个文件名，{directories} 个子目录，{bytes} B 数据流。重建 DISKCLONE 卷，保留文件数据、硬链接、时间、权限、8.3 短名和扩展属性。写后检查完整目录与 SHA-256，目标 GPT 保持原样。",
-                    &[("files", &plan.files.to_string()), ("directories", &plan.directories.to_string()),
-                        ("bytes", &plan.bytes.to_string())],
-                );
-                (ClonePlan::NtfsFiles(Box::new(plan)), detail)
-            }
             Method::Files { serial } => {
-                let serial = serial as u32;
-                let filesystem = file_clone::prepare(
-                    &mut reader,
-                    range.sector,
-                    range.size,
-                    range.offset,
-                    serial,
-                    &cancel,
-                )?;
-                let detail = locale.format(
-                    "{from} → {to} · {files} 个文件，{directories} 个子目录。目标将生成 DISKCLONE 卷，连续分配活动文件，保留文件名、时间和属性，其余区域写零。目标 GPT 保持原样。",
-                    &[("from", filesystem.source_format), ("to", filesystem.destination_format),
-                        ("files", &filesystem.files.to_string()), ("directories", &filesystem.directories.to_string())],
-                );
-                (
-                    ClonePlan::FatFiles {
-                        fingerprint: filesystem.fingerprint(),
-                        serial,
-                    },
-                    detail,
-                )
+                let (plan, detail) = FilePlan::prepare(&mut reader, range, serial, &cancel, locale)?;
+                (ClonePlan::Files(plan), detail)
             }
         };
         let detail = locale.sentences(&[&detail, PARTITION_OVERWRITE_WARNING]);
@@ -576,7 +703,7 @@ impl Clone {
     pub(super) fn execute(
         self,
         id: &str,
-        cancel: &AtomicBool,
+        cancel: &Arc<AtomicBool>,
     ) -> Result<(String, Option<String>), String> {
         let range = self.target.range;
         progress(id, cancel, "检查文件系统分配信息", 0, range.size)?;
@@ -625,17 +752,49 @@ impl Clone {
         }
         validate_source()?;
         let mut reader = input(&file, &source, kind)?;
-        let check_plan = |before, after| {
-            if before == after {
-                Ok(())
-            } else {
-                Err("源文件系统分配计划已变化，请重新预览。".to_owned())
-            }
-        };
         let files_message = "按文件克隆完成，目标文件系统及完整 SHA-256 已核对。目标磁盘保持脱机。";
         let resized_message =
             "调整容量克隆完成，目标文件系统及完整 SHA-256 已核对。目标磁盘保持脱机。";
         let (digest, message) = match self.plan {
+            ClonePlan::LinuxExact { proof, mode } => {
+                let plan = linux_copy_plan(&mut reader, range, cancel, false)?;
+                if plan.digest != proof {
+                    return Err("源文件系统分配计划已变化，请重新预览。".into());
+                }
+                let verify_copy = |check: &mut Region<&File>| {
+                    let actual = linux_copy_plan(check, range, cancel, false)?;
+                    if actual.digest == proof {
+                        Ok(())
+                    } else {
+                        Err("目标文件系统分配信息与源不一致。".into())
+                    }
+                };
+                let validate_source = || {
+                    validate_source()?;
+                    plan.proof.verify(&mut input(&file, &source, kind)?, cancel)
+                };
+                if mode == used_space::Mode::UsedSpace {
+                    let digest = self.target.overwrite(
+                        id,
+                        cancel,
+                        |output| {
+                            plan.copy_verified(
+                                &mut reader,
+                                output,
+                                cancel.clone(),
+                                |t| t.inner_mut().sync_all().map_err(device::err),
+                                |phase, n, total| super::allocated_progress(id, cancel, phase, n, total),
+                            )
+                        },
+                        verify_copy,
+                        validate_source,
+                    )?;
+                    return Ok((super::allocated_summary(&plan, &crate::native_locale::current()), Some(digest)));
+                }
+                reader.seek(SeekFrom::Start(0)).map_err(device::err)?;
+                let digest = self.target.write(id, cancel, &mut reader, None, verify_copy, validate_source)?;
+                (digest, "逐扇区克隆完成，完整读回 SHA-256 一致。目标磁盘保持脱机。")
+            }
             ClonePlan::Resize(fingerprint) => {
                 let plan = resized_plan(&mut reader, range)?;
                 check_plan(fingerprint, plan.fingerprint())?;
@@ -667,50 +826,10 @@ impl Clone {
                 )?;
                 (digest, resized_message)
             }
-            ClonePlan::FatFiles {
-                fingerprint,
-                serial,
-            } => {
-                let plan = file_clone::prepare(
-                    &mut reader,
-                    range.sector,
-                    range.size,
-                    range.offset,
-                    serial,
-                    cancel,
-                )?;
-                check_plan(fingerprint, plan.fingerprint())?;
-                let digest = self.target.write(
-                    id,
-                    cancel,
-                    &mut plan.reader(reader),
-                    None,
-                    |check| plan.verify(check),
-                    validate_source,
-                )?;
-                (digest, files_message)
-            }
-            ClonePlan::NtfsFiles(plan) => {
-                plan.revalidate(&mut reader, cancel)?;
-                let engine = ntfs::Plan::engine()?;
-                let digest = self.target.overwrite(
-                    id,
-                    cancel,
-                    |output| {
-                        plan.write(
-                            &engine,
-                            &mut reader,
-                            output,
-                            |view| view.inner_mut().sync_all(),
-                            cancel,
-                            |stage, now, total| progress(id, cancel, stage, now, total),
-                        )
-                    },
-                    |check| plan.verify(check, cancel),
-                    validate_source,
-                )?;
-                (digest, files_message)
-            }
+            ClonePlan::Files(plan) => (
+                plan.write(&self.target, id, cancel, reader, validate_source)?,
+                files_message,
+            ),
         };
         Ok((
             crate::native_locale::current().text(message).into(),
@@ -725,6 +844,38 @@ mod tests {
     use disk_core::MIB;
     use sha2::{Digest, Sha256};
     use std::{io::Cursor, os::windows::fs::MetadataExt};
+
+    #[test]
+    fn linux_copy_rechecks_ext_allocation_in_both_sector_geometries() {
+        let cancel = AtomicBool::new(false);
+        for (name, source) in [
+            ("Ext2", &include_bytes!("../../tests/fixtures/test_disk_ext2.bin.zst")[..]),
+            ("Ext3", &include_bytes!("../../tests/fixtures/test_disk_ext3.bin.zst")[..]),
+            ("Ext4", &include_bytes!("../../tests/fixtures/test_disk1.bin.zst")[..]),
+        ] {
+            let bytes = zstd::stream::decode_all(source).unwrap();
+            for sector in [512, 4096] {
+                let range = Range { offset: MIB, size: bytes.len() as u64, sector };
+                let mut input = Cursor::new(&bytes);
+                let proof = linux_copy_plan(&mut input, range, &cancel, true);
+                let block_size = 1024u64 << u32::from_le_bytes(bytes[1048..1052].try_into().unwrap());
+                if block_size < sector {
+                    assert_eq!(proof.err().as_deref(), Some("Ext 块大小不能小于目标逻辑扇区。"));
+                    continue;
+                }
+                let proof = proof.unwrap();
+                assert_eq!(proof.volumes[0].filesystem, name);
+                assert!(proof.skipped > 0);
+                let mut normalized = proof.masked(Cursor::new(&bytes));
+                let restored = linux_copy_plan(&mut normalized, range, &cancel, true).unwrap();
+                assert_eq!(restored.digest, proof.digest);
+            }
+            let mut dirty = bytes;
+            dirty[1024 + 0x3a..1024 + 0x3c].fill(0);
+            let range = Range { offset: MIB, size: dirty.len() as u64, sector: 4096 };
+            assert!(linux_copy_plan(&mut Cursor::new(dirty), range, &cancel, true).is_err());
+        }
+    }
 
     fn files(stream: &mut (impl Read + Seek)) -> ([u8; 32], usize) {
         let mut volume = btrfs::open(stream, || Ok(())).unwrap();
@@ -765,6 +916,13 @@ mod tests {
         let contents = files(&mut source);
         assert_eq!(contents.1, 27_430_912);
         let cancel = AtomicBool::new(false);
+        let same_range = Range { offset: MIB, size: 384 * MIB, sector: 4096 };
+        let exact = linux_copy_plan(&mut source, same_range, &cancel, false).unwrap();
+        assert_eq!(exact.volumes[0].filesystem, "Btrfs");
+        assert!(exact.skipped > 0);
+        let mut normalized = exact.masked(&mut source);
+        assert_eq!(linux_copy_plan(&mut normalized, same_range, &cancel, false).unwrap().digest, exact.digest);
+        assert_eq!(files(&mut normalized), contents);
         for (size, moved) in [(192 * MIB, 80 * MIB), (448 * MIB, 0)] {
             let plan = btrfs::plan_resize(&mut source, size).unwrap();
             assert_eq!(plan.relocation_bytes(), moved);

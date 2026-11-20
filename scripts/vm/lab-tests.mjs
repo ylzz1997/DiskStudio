@@ -77,7 +77,7 @@ test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () 
 });
 test('clone and restore fixtures use independent NVMe images and start paused', () => {
   assert.throws(() => buildArgs({ fourKn: true, fixture: '../other' }), /separate 4Kn/);
-  for (const fixture of ['whole-clone', 'btrfs-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore']) {
+  for (const fixture of ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore']) {
     assert.throws(() => buildArgs({ fixture }), /separate 4Kn/);
     assert.throws(() => buildArgs({ fourKn: true, fixture, sectorFault: true }), /separate 4Kn/);
     const args = buildArgs({ fourKn: true, fixture });
@@ -93,6 +93,13 @@ test('clone and restore fixtures use independent NVMe images and start paused', 
       assert.equal(block['detect-zeroes'], 'unmap');
     }
   }
+  assert.throws(() => buildArgs({ fourKn: true, fixture: 'ext-copy' }), /separate 512-byte/);
+  assert.throws(() => buildArgs({ network: true, fixture: 'ext-copy' }), /installed offline guest/);
+  const args = buildArgs({ fixture: 'ext-copy' });
+  const blocks = args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
+  assert.ok(args.includes('-S'));
+  assert.deepEqual(blocks.filter(b => b.driver === 'qcow2').map(b => b.file.filename),
+    ['system.qcow2', 'test-a-ext-copy.qcow2', 'test-b-ext-copy.qcow2'].map(file => path.join(root, 'windows', file)));
 });
 test('running-test preflight rejects replaced disks, wrong capacities and extra devices', () => {
   const args = buildArgs();

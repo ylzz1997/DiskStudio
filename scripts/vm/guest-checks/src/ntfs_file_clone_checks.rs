@@ -251,13 +251,13 @@ fn contents() -> Vec<u8> {
         .collect()
 }
 
-fn seed(
+pub(super) fn seed(
     selected: &Selection,
     source: &data_windows::Resolved,
     drive_letter: Option<&str>,
 ) -> Result<(), String> {
     let [volume] = source.volumes.as_slice() else {
-        return Err("Expected one A fixture volume".into());
+        return Err("Expected one source fixture volume".into());
     };
     let path = PathBuf::from(match drive_letter {
         Some(letter) if letter.len() == 1 && letter.as_bytes()[0].is_ascii_alphabetic() => {
@@ -419,7 +419,7 @@ fn metadata_sample(catalogue: &partitions::merge::Catalogue) -> Result<(), Strin
     })
 }
 
-fn sample(catalogue: &partitions::merge::Catalogue) -> Result<(), String> {
+pub(super) fn sample(catalogue: &partitions::merge::Catalogue) -> Result<(), String> {
     let path = |parts: &[&str]| {
         parts
             .iter()

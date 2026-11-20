@@ -524,6 +524,40 @@ Prepare 只接受两块空 RAW 盘和匹配 SHA-256 的来宾载荷。它在 A �
 
 构建 `6fe9c432…` 的隔离验收通过。旧点的 8 MiB 分区和最新点的 16 GiB 整盘均完成独立 SHA-256 回读，B 保持脱机。QMP 记录两次写入各自恰好覆盖所确认的目标容量。首次整盘作业在写入前校验期间遇到来宾关机。重新启动后先用 Verify-Partition 核对 B 仍是上一次单分区写入后的状态，再重新打开归档和确认整盘预览。截图、摘要和 I/O 计数见 `.vm/archive-restore-status.json`。
 
+### 按文件与变容量还原验收
+
+运行 `node scripts/vm/lab.mjs start --4kn --capacity-restore`，加载独立 A/B 测试盘。完成正式构建后，运行 `build-guest-checks.ps1 -CapacityRestore`，用 `make-tools-iso.ps1 -Live` 选择 `Capacity-Restore-4Kn-Prepare.exe`、`Capacity-Restore-4Kn-After-Ntfs.exe`、`Capacity-Restore-4Kn-After-Fat32.exe` 和 `Capacity-Restore-4Kn-Verify.exe`。通过预检后运行 Prepare。它验证两盘为空 RAW，在 A 的 NTFS 数据卷写入三份备份，在 B 准备物理 NTFS 源分区和三个目标分区。NTFS 归档由锁定的 B 分区写到 A。FAT32 和 exFAT 归档由合成卷生成。
+
+在「浏览备份」依次打开 Prepare 显示的三份归档。NTFS 96→48 MiB 和 exFAT 8→6 MiB 选择「按文件还原」，FAT32 268→260 MiB 选择「调整容量还原」。确认窗应显示 FAT32 搬移一个簇。核对 B 的完整序列号、分区号和容量后逐项确认。每次作业结束时 B 脱机，Windows 可能在这一状态下省略目标保护属性。NTFS 完成后执行 After-Ntfs，FAT32 完成后执行 After-Fat32。两者先在脱机状态独立回读整个目标、核对源归档、相邻扇区、A/B GPT 和系统盘布局，再分别单次联机 B，为下一项准备。刷新正式程序磁盘列表后再预览下一项。exFAT 写完后 Verify 核对三项样本及还原容量，汇总各次脱机 SHA-256，并保持 B 脱机。
+
+首轮准备在 48 MiB 目标的 NTFS 格式化预览处停止。遇到该已核对的状态时，用 `Capacity-Restore-4Kn-Continue.exe` 核对三个源归档、B 的既有布局和空白分区。它以 FAT16 格式化已经创建的 48 MiB 目标，并从尚未执行的后续步骤继续。
+
+正式构建 `73d7e744…` 通过 828 项项目检查、501 项来宾工具合成测试和载荷 SHA-256 核对。三项作业均通过原生界面验收，独立脱机回读的完整摘要与界面一致。FAT32 的活动簇由 68443 搬到 3。最后一次独立回读期间 A/B 无新增写入，B 保持脱机。记录见 `.vm/capacity-restore-status.json`。
+
+后续 FAT 变体验收使用 `node scripts/vm/lab.mjs start --4kn --fat-restore`。用 `build-guest-checks.ps1 -FatRestore` 和相同桌面程序生成只读工具光盘，选择 `FAT-Restore-4Kn-Prepare.exe` 与 `FAT-Restore-4Kn-Verify.exe`。预检后 Prepare 只在两块专用空 RAW 盘上建立夹具。先在正式界面打开 `Geometry.dsbackup`。其归档记录为 4Kn，里面的 GPT 使用 512 字节扇区。应能校验归档字节并显示扇区大小冲突，界面仅提供整盘还原入口。本用例只检查入口，不确认写入。
+
+依 Prepare 输出的顺序验收 FAT12 8→4 MiB、FAT16 48→24 MiB、FAT32 268→8 MiB 按文件还原，以及 FAT16 48→32 MiB 和 exFAT 8→6 MiB 缩容还原。FAT32 按文件还原到 FAT12。两项缩容预览应各显示搬移一个簇。每次写入后运行 Verify，核对文件、目标格式与容量、卷标识、簇搬移和完整 SHA-256；同时检查源归档、GPT、相邻扇区和来宾系统盘布局。Verify 只在这一次离线读回通过后保存记录，前四次会为下一项单次联机 B，最后一次保持 B 脱机。
+
+正式构建 `f86db157…` 通过全部五项原生还原验收及扇区大小冲突的界面检查。FAT16 将簇 12272 搬到 2，exFAT 将簇 2009 搬到 4。五个目标的独立脱机 SHA-256 均与界面一致，两盘 GPT 和相邻扇区通过复核。记录见 `.vm/fat-restore-status.json`。
+
+### Ext 分区还原和同容量克隆验收
+
+使用 `node scripts/vm/lab.mjs start --ext-copy` 启动专用 512 字节 A/B 盘。用 `build-guest-checks.ps1 -ExtCopy` 和匹配的正式程序生成只读光盘，选入 `Ext-Copy-Prepare.exe`、`Ext-Copy-Verify-Restores.exe` 和 `Ext-Copy-Verify-Clones.exe`。通过预检后运行 Prepare，它只在两盘均为空 RAW 时准备数据。在 A 的 NTFS 数据卷保存 Ext2、Ext3 和 Ext4 按已用空间归档，在 B 建立三个普通 GPT Linux 目标，并在 A 新建两个 64 MiB Linux 目标。
+
+先在「浏览备份」打开三个归档，依报告分别原尺寸还原到 B。Verify-Restores 在 B 脱机期间核对三个目标的完整 SHA-256、样本文件、UUID、两盘 GPT、相邻扇区、A 上的三个归档和来宾系统盘布局。关闭已打开的归档以释放 A 上的文件句柄。保持 B 脱机，从正式界面的「磁盘与分区克隆」选择已还原的 B Ext4，分别按已用空间和逐扇区克隆到 A 的两处分区。Verify-Clones 核对两盘均脱机、全部五个分区的文件与字节、两种克隆摘要、两盘 GPT、相邻扇区和系统盘布局。QMP 记录目标盘总写入量，并与作业报告的复制量对照。
+
+正式构建 `9556a106…` 通过原生验收。Ext2 和 Ext3 各还原 96 MiB，Ext4 还原 64 MiB。Ext4 按已用空间克隆复制 29,628,416 字节，跳过 37,480,448 字节。逐扇区克隆复制 64 MiB。按已用空间作业期间 A 全盘计数比复制量多 184,320 字节，来源尚未独立确认。三个还原作业及逐扇区克隆的目标写入计数增量与计划容量一致。最终独立读回期间 A/B 均无新增写入，两盘保持脱机。记录见 `.vm/ext-copy-status.json`。
+
+### Btrfs 同容量克隆验收
+
+在 Windows 与 Ubuntu 测试虚拟机均关闭时，将已验收的 `test-a-btrfs-restore-4kn.qcow2` 和 `test-b-btrfs-restore-4kn.qcow2` 分别复制为 `.vm/windows/test-a-btrfs-exact-clone-4kn.qcow2` 和 `.vm/windows/test-b-btrfs-exact-clone-4kn.qcow2`，核对复制前后的 SHA-256。运行 `node scripts/vm/lab.mjs start --4kn --btrfs-exact-clone` 和 `preflight`。用 `build-guest-checks.ps1 -BtrfsExactClone` 绑定已核对 SHA-256 的正式程序。只读工具光盘选入 `Btrfs-Exact-Clone-4Kn-Prepare.exe` 和 `Btrfs-Exact-Clone-4Kn-Verify.exe`。
+
+准备阶段需要读取 A 上的历史归档。若来宾启动后 A 脱机，先在正式界面的「更改设备状态」预览中核对 A 的完整序列号、16 GiB 容量和两个原有分区，然后单次确认联机。B 保持脱机。
+
+Prepare 复核此前的 Btrfs 还原验收记录及 B 上的三个已还原分区。在 A 的两处未分配空间建立 384 MiB 的普通 GPT Linux 分区，确认两个范围全零后，把一个 4 KiB 标记写入第一目标中对应源卷已核对的空闲扇区，保持 A/B 脱机。按 Prepare 输出选择源 B/2 和两个目标。使用「按已用空间」时核对预计复制和跳过的范围大小，使用「逐扇区」时核对整分区容量。Verify 复核两个完整目标的 SHA-256、已复制范围的摘要、51 个样本文件、卷 UUID、空闲扇区标记、两盘 GPT、相邻扇区和来宾系统盘布局。用 QMP 分别记录两个克隆和独立读回期间的 A/B 写入计数。
+
+正式构建 `a10c64a1…` 通过 829 项项目检查、503 项来宾工具合成测试、载荷一致性核对及两项原生克隆验收。按已用空间克隆复制 112,365,568 字节，跳过 290,287,616 字节并保留 4 KiB 标记。逐扇区克隆复制完整 384 MiB。QMP 记录的 A 写入增量分别与两项计划一致，B 无新增写入。独立回读通过，两盘均保持脱机，后验期间未新增 A/B 写入。记录见 `.vm/btrfs-exact-clone-status.json`。
+
 ### 整盘按文件克隆验收
 
 混合克隆使用 `node scripts/vm/lab.mjs start --4kn --mixed-clone` 的独立 A/B 盘。以匹配的正式程序运行 `build-btrfs.ps1 -MixedClone`，再通过 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Mixed-File-Clone-4Kn-Prepare.exe` 和 `Mixed-File-Clone-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。两块盘为空 RAW 时，Prepare 在 A 生成 384 MiB Btrfs、32 MiB 不透明数据和 96 MiB NTFS 分区，保留 A 联机及 B 空白。整盘按文件克隆的原生预览应显示 Btrfs 384→192 MiB 并搬移 80 MiB 条带、32 MiB 分区原位置逐扇区复制及 NTFS 96→48 MiB 按文件重建。独立 Verify 核对两盘布局、Btrfs 的 51 个文件和卷 UUID、NTFS 样本、32 MiB 全范围、清零区和整盘 SHA-256。对已经完整准备且 B 仍为空 RAW 的夹具，可用匹配载荷中的 `Mixed-File-Clone-4Kn-Resume.exe` 复核源内容并建立验收基线。

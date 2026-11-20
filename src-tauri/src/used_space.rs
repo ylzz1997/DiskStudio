@@ -49,6 +49,8 @@ pub struct VolumeReport {
     pub filesystem: String,
     pub skipped_bytes: u64,
     pub note: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_count: Option<u64>,
 }
 #[derive(Clone)]
 pub struct Mark {
@@ -352,6 +354,7 @@ pub struct Plan {
 pub struct Allocation {
     pub filesystem: String,
     pub note: String,
+    pub note_count: Option<u64>,
     pub free: Vec<Span>,
     required: Vec<Span>,
     size: u64,
@@ -361,6 +364,7 @@ impl Allocation {
         Self {
             filesystem: filesystem.into(),
             note: String::new(),
+            note_count: None,
             free: vec![],
             required: vec![],
             size,

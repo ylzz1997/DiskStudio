@@ -674,6 +674,7 @@
   "检查 NTFS、FAT、exFAT、Ext2/3/4 和单设备 Btrfs 的分配信息。多设备 Btrfs 和未识别的文件系统完整保留。": "Vérifie l’allocation de NTFS, FAT, exFAT, Ext2/3/4 et Btrfs à un seul périphérique. Les systèmes inconnus et Btrfs à plusieurs périphériques sont conservés intégralement.",
   "备份中的空闲区按零保存，不保留这些区域的已删除内容。": "La sauvegarde stocke les zones libres sous forme de zéros. Le contenu supprimé de ces zones est omis.",
   "保持源分区布局，目标空闲区不会被清除。": "La disposition source est conservée. L’espace libre de la cible reste intact.",
+  "同容量克隆要求可核对的 Ext2/3/4 或单设备 Btrfs。Linux 数据分区的文件系统在预览时核对。": "Le clonage à taille identique prend en charge Ext2/3/4 et Btrfs sur un seul périphérique, après vérification du système de fichiers de la partition Linux dans l’aperçu.",
   "源与目标容量、逻辑扇区大小必须一致。整个目标磁盘会保持脱机，避免副本中的重复标识自动挂载。": "La source et la cible doivent avoir la même capacité et la même taille de secteur logique. Le disque cible reste hors ligne pour éviter le montage automatique d’identifiants en double.",
   "选择另一块磁盘上的保存位置": "Choisir un emplacement sur un autre disque",
   "打开 DiskStudio 的 .dsbackup 备份文件": "Ouvrir un fichier .dsbackup de DiskStudio",
@@ -1840,6 +1841,7 @@
   "还原方式": "Mode de restauration",
   "调整容量适用于 FAT12/16/32 和 exFAT。": "Le redimensionnement prend en charge FAT12/16/32 et exFAT.",
   "预览会核对单设备 Btrfs，目标须为普通 GPT Linux 数据分区。": "L’aperçu vérifie le Btrfs à un seul périphérique. Choisissez une partition GPT de données Linux ordinaire.",
+  "预览会核对干净卸载的 Ext2/3/4，目标须为同容量的普通 GPT Linux 数据分区。": "L’aperçu vérifie le démontage correct du volume Ext2/3/4. Choisissez une partition de données Linux GPT ordinaire de même taille.",
   "锁定源卷": "Verrouiller les volumes source",
   "原尺寸还原": "Restaurer à la taille d’origine",
   "调整容量还原": "Redimensionner lors de la restauration",
@@ -1864,5 +1866,15 @@
   "还原点内容已校验。": "Contenu du point de restauration vérifié.",
   "还原点校验通过。请重新读取此还原点中的目录。": "Point de restauration vérifié. Relisez son répertoire.",
   "无法校验分区表。此还原点仅支持整盘还原。": "Impossible de vérifier la table de partitions. Ce point permet uniquement de restaurer le disque entier.",
-  "此还原点的分区表无法解析或未通过校验。整盘还原会保留归档中的分区表原始状态。": "Impossible de lire ou de vérifier la table de partitions de ce point. La restauration du disque entier conserve les octets de la table contenus dans l’archive."
+  "备份记录的扇区大小与分区表不一致": "La taille de secteur enregistrée dans la sauvegarde ne correspond pas à celle de la table de partitions.",
+  "此还原点的分区表无法解析或未通过校验。整盘还原会保留归档中的分区表原始状态。": "Impossible de lire ou de vérifier la table de partitions de ce point. La restauration du disque entier conserve les octets de la table contenus dans l’archive.",
+  "按文件还原": "Restaurer par fichiers",
+  "按活动文件和目录重建目标文件系统。": "Reconstruire le système de fichiers de destination à partir des fichiers et répertoires actifs.",
+  "按文件还原支持可验证的 NTFS、FAT12/16/32 和 exFAT。": "La restauration par fichiers prend en charge les volumes NTFS, FAT12/16/32 et exFAT vérifiables.",
+  "从备份重建活动文件和目录，生成新的卷标识和文件系统布局。": "La restauration reconstruit les fichiers et répertoires actifs avec un nouvel identifiant de volume et une nouvelle disposition du système de fichiers.",
+  "按文件还原完成，目标文件系统及完整 SHA-256 已核对。目标磁盘保持脱机。": "Restauration par fichiers terminée. Le système de fichiers de destination et son SHA-256 complet ont été vérifiés. Le disque de destination reste hors ligne.",
+  "整盘还原完成，目标全部字节已通过 SHA-256 校验。分区表字节沿用归档内容，目标磁盘保持脱机。": "Restauration du disque entier terminée. Tous les octets de destination ont passé la vérification SHA-256. La destination conserve les octets de la table de partitions de l’archive et reste hors ligne.",
+  "备份密码不正确，或加密内容已损坏。": "Mot de passe de sauvegarde incorrect ou données chiffrées endommagées.",
+  "还原范围须匹配。调整容量和按文件还原仅适用于单个分区。": "Les périmètres de la source et de la destination doivent correspondre. Le redimensionnement et la restauration par fichiers exigent une seule partition.",
+  "请选择一种还原方式。": "Choisissez un mode de restauration."
 }

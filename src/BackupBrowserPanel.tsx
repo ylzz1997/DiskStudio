@@ -14,7 +14,13 @@ export type BackupInfo = {
   layers: number;
   points: { id: string; label: string; ordinal?: number }[];
   selectedPoint: string;
-  partitions: { id: number; name: string; start: number; size: number; btrfs?: boolean }[];
+  partitions: {
+    id: number;
+    name: string;
+    start: number;
+    size: number;
+    restoreFormat?: "fat" | "exfat" | "ntfs" | "btrfs" | "ext";
+  }[];
   warning: string;
   tableIssue?: string;
   allocationSkippedBytes?: number;

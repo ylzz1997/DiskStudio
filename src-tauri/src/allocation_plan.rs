@@ -90,12 +90,7 @@ pub fn inspect<R: Read + Seek>(
             {
                 crate::fat_recovery::allocation::inspect(&mut audit, cancel)?
             } else {
-                let mut magic = [0; 2];
-                if range.size() >= 2048 {
-                    audit.seek(SeekFrom::Start(1024 + 0x38)).map_err(err)?;
-                    audit.read_exact(&mut magic).map_err(err)?;
-                }
-                if magic == [0x53, 0xef] {
+                if crate::ext_allocation::has_magic(&mut audit, range.size())? {
                     crate::ext_allocation::inspect(&mut audit, cancel)?
                 } else if disk_core::btrfs::has_magic(&mut audit, range.size())? {
                     use disk_core::btrfs::{allocation_for_copy, CopyAllocation};
@@ -132,6 +127,7 @@ pub fn inspect<R: Read + Seek>(
             filesystem: map.filesystem,
             skipped_bytes: after - before,
             note: map.note,
+            note_count: map.note_count,
         });
     }
     builder.finish()

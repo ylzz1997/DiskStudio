@@ -42,6 +42,7 @@ mod ext4_checks;
 #[path = "../../../../src-tauri/src/ext_allocation.rs"]
 mod ext_allocation;
 mod ext_checks;
+mod ext_copy_checks;
 #[path = "../../../../src-tauri/src/ext_recovery.rs"]
 mod ext_recovery;
 mod ext_resume_checks;
@@ -133,6 +134,8 @@ mod recovery_tree;
 mod resize_clone_checks;
 mod retained_restore_checks;
 mod archive_restore_checks;
+mod capacity_restore_checks;
+mod fat_restore_checks;
 #[path = "../../../../src-tauri/src/sector_copy.rs"]
 mod sector_copy;
 mod sector_copy_checks;
@@ -645,10 +648,19 @@ fn main() {
                 | "Btrfs-Restore-4Kn-Prepare"
                 | "Btrfs-Restore-4Kn-Resume"
                 | "Btrfs-Restore-4Kn-Verify"
+                | "Btrfs-Exact-Clone-4Kn-Prepare"
+                | "Btrfs-Exact-Clone-4Kn-Verify"
                 | "Archive-Restore-4Kn-Prepare"
                 | "Archive-Restore-4Kn-Continue"
                 | "Archive-Restore-4Kn-Verify-Partition"
                 | "Archive-Restore-4Kn-Verify-Disk"
+                | "Capacity-Restore-4Kn-Prepare"
+                | "Capacity-Restore-4Kn-Continue"
+                | "Capacity-Restore-4Kn-After-Ntfs"
+                | "Capacity-Restore-4Kn-After-Fat32"
+                | "Capacity-Restore-4Kn-Verify"
+                | "FAT-Restore-4Kn-Prepare"
+                | "FAT-Restore-4Kn-Verify"
                 | "Btrfs-Lab-4Kn-Move-Prepare"
                 | "Btrfs-Lab-4Kn-Move-Inspect"
                 | "Btrfs-Lab-4Kn-Move-Reuse"
@@ -797,10 +809,28 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Btrfs-Restore-4Kn-Prepare") => btrfs_checks::backup_restore::prepare(false),
         Some("Btrfs-Restore-4Kn-Resume") => btrfs_checks::backup_restore::prepare(true),
         Some("Btrfs-Restore-4Kn-Verify") => btrfs_checks::backup_restore::verify(),
+        Some("Btrfs-Exact-Clone-4Kn-Prepare") => btrfs_checks::backup_restore::exact_clone::prepare(),
+        Some("Btrfs-Exact-Clone-4Kn-Verify") => btrfs_checks::backup_restore::exact_clone::verify(),
         Some("Archive-Restore-4Kn-Prepare") => archive_restore_checks::prepare(false),
         Some("Archive-Restore-4Kn-Continue") => archive_restore_checks::prepare(true),
         Some("Archive-Restore-4Kn-Verify-Partition") => archive_restore_checks::verify(false),
         Some("Archive-Restore-4Kn-Verify-Disk") => archive_restore_checks::verify(true),
+        Some("Capacity-Restore-4Kn-Prepare") => capacity_restore_checks::prepare(false),
+        Some("Capacity-Restore-4Kn-Continue") => capacity_restore_checks::prepare(true),
+        Some("Capacity-Restore-4Kn-After-Ntfs") => {
+            capacity_restore_checks::verify(capacity_restore_checks::Stage::Ntfs)
+        }
+        Some("Capacity-Restore-4Kn-After-Fat32") => {
+            capacity_restore_checks::verify(capacity_restore_checks::Stage::Fat32)
+        }
+        Some("Capacity-Restore-4Kn-Verify") => {
+            capacity_restore_checks::verify(capacity_restore_checks::Stage::Exfat)
+        }
+        Some("FAT-Restore-4Kn-Prepare") => fat_restore_checks::prepare(),
+        Some("FAT-Restore-4Kn-Verify") => fat_restore_checks::verify(),
+        Some("Ext-Copy-Prepare") => ext_copy_checks::prepare(),
+        Some("Ext-Copy-Verify-Restores") => ext_copy_checks::verify(false),
+        Some("Ext-Copy-Verify-Clones") => ext_copy_checks::verify(true),
         Some("Btrfs-Lab-4Kn-Create") => btrfs_checks::create(),
         Some("Btrfs-Lab-4Kn-Inspect") => btrfs_checks::inspect(),
         Some("Btrfs-Lab-4Kn-Online") => btrfs_checks::online_fixture(),
