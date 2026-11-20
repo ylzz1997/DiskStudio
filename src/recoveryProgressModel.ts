@@ -11,6 +11,8 @@ export type RecoveryProgress = {
     kinds: SignatureKind[];
     start: number;
     length: number | null;
+    freeOnly?: boolean;
+    sectorAligned?: boolean;
   } | null;
   done: number;
   total: number;
@@ -38,6 +40,8 @@ export function settingsFromProgress(p: RecoveryProgress): SignatureSettings {
     throw Error("此进度不是签名扫描");
   return {
     kinds: [...p.options.kinds],
+    freeOnly: p.options.freeOnly === true,
+    sectorAligned: p.options.sectorAligned === true,
     customRange: p.options.start !== 0 || p.options.length !== null,
     start: (p.options.start / 1024 ** 2).toFixed(9),
     end:

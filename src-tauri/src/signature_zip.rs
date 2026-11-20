@@ -30,15 +30,13 @@ impl Budget {
     }
     pub(crate) fn resume(remaining: u64) -> std::result::Result<Self, String> {
         if remaining > 64 * 1024 * 1024 * 1024 {
-            return Err("ZIP 扫描预算越界".into());
+            return Err("签名候选检查预算越界。".into());
         }
         Ok(Self { remaining })
     }
-    fn charge(&mut self, n: u64) -> Result<()> {
+    pub(crate) fn charge(&mut self, n: u64) -> std::result::Result<(), String> {
         self.remaining = self.remaining.checked_sub(n).ok_or_else(|| {
-            Error::Failed(
-                "ZIP 候选检查达到 64 GiB 累计工作量上限，扫描停止；请缩小范围后继续。".into(),
-            )
+            "签名候选检查达到 64 GiB 累计工作量上限。请缩小范围并开始新扫描。".to_owned()
         })?;
         Ok(())
     }
@@ -79,7 +77,7 @@ impl<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>> Probe<'_, R,
                     .checked_add(n as u64)
                     .is_some_and(|e| e <= self.range.end),
         )?;
-        self.budget.charge(n as u64)?;
+        self.budget.charge(n as u64).map_err(Error::Failed)?;
         (self.tick)().map_err(Error::Failed)?;
         self.reader
             .seek(SeekFrom::Start(at))
@@ -369,7 +367,7 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
         }
     }
     let kind = office_kind(&xml, &names).unwrap_or(Kind::Zip);
-    p.budget.charge(end - start)?;
+    p.budget.charge(end - start).map_err(Error::Failed)?;
     let digest = hash_range(p.reader, start, end - start, &mut p.tick).map_err(Error::Failed)?;
     let header = p.read(start, usize::try_from((end - start).min(30)).unwrap())?;
     let footer = p.read(end - 16, 16)?;
@@ -395,7 +393,7 @@ fn content<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
     let mut absorb = |b: &[u8], budget: &mut Budget| -> Result<()> {
         written += b.len() as u64;
         require(written <= e.unpacked)?;
-        budget.charge(b.len() as u64)?;
+        budget.charge(b.len() as u64).map_err(Error::Failed)?;
         crc.update(b);
         if capture {
             saved.extend_from_slice(b);
@@ -448,7 +446,7 @@ pub fn hash_range<R: Read + Seek>(
     mut tick: impl FnMut() -> std::result::Result<(), String>,
 ) -> std::result::Result<[u8; 32], String> {
     if size > MAX_FILE || start.checked_add(size).is_none() {
-        return Err("归档范围无效。".into());
+        return Err("签名候选范围无效。".into());
     }
     reader
         .seek(SeekFrom::Start(start))

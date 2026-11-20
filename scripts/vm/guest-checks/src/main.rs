@@ -43,6 +43,7 @@ mod ext4_checks;
 mod ext_allocation;
 mod ext_checks;
 mod ext_copy_checks;
+mod signature_scope_checks;
 #[path = "../../../../src-tauri/src/ext_recovery.rs"]
 mod ext_recovery;
 mod ext_resume_checks;
@@ -650,6 +651,10 @@ fn main() {
                 | "Btrfs-Restore-4Kn-Verify"
                 | "Btrfs-Exact-Clone-4Kn-Prepare"
                 | "Btrfs-Exact-Clone-4Kn-Verify"
+                | "Signature-Scope-4Kn-Prepare"
+                | "Signature-Scope-4Kn-Verify"
+                | "Signature-Formats-4Kn-Prepare"
+                | "Signature-Formats-4Kn-Verify"
                 | "Archive-Restore-4Kn-Prepare"
                 | "Archive-Restore-4Kn-Continue"
                 | "Archive-Restore-4Kn-Verify-Partition"
@@ -811,6 +816,10 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Btrfs-Restore-4Kn-Verify") => btrfs_checks::backup_restore::verify(),
         Some("Btrfs-Exact-Clone-4Kn-Prepare") => btrfs_checks::backup_restore::exact_clone::prepare(),
         Some("Btrfs-Exact-Clone-4Kn-Verify") => btrfs_checks::backup_restore::exact_clone::verify(),
+        Some("Signature-Scope-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Pdf),
+        Some("Signature-Scope-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Pdf),
+        Some("Signature-Formats-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Formats),
+        Some("Signature-Formats-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Formats),
         Some("Archive-Restore-4Kn-Prepare") => archive_restore_checks::prepare(false),
         Some("Archive-Restore-4Kn-Continue") => archive_restore_checks::prepare(true),
         Some("Archive-Restore-4Kn-Verify-Partition") => archive_restore_checks::verify(false),

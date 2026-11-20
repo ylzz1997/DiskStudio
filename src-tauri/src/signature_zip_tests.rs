@@ -185,6 +185,34 @@ fn inspect_bytes(bytes: &[u8]) -> Option<Archive> {
 }
 
 #[test]
+fn sector_alignment_checks_the_archive_start_not_the_end_record() {
+    let archive = build(&[("sample", b"payload")], false, 0, false, false, b"");
+    let mut input = vec![0; 4 * 4096];
+    input[4096..][..archive.len()].copy_from_slice(&archive);
+    input[8209..][..archive.len()].copy_from_slice(&archive);
+    let options = Options {
+        kinds: vec![Kind::Zip],
+        start: 1,
+        sector_aligned: true,
+        ..Default::default()
+    };
+    let mut found = Vec::new();
+    signature_scan::continue_scan_scoped(
+        &mut Cursor::new(&input),
+        input.len() as u64,
+        &options,
+        &mut signature_scan::Checkpoint::default(),
+        4096,
+        None,
+        |_, _| Ok(()),
+        |file| found.push(file),
+    )
+    .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "recovered_0000000000001000.zip");
+}
+
+#[test]
 fn zip_stored_deflate_exact_archive_export_and_changed_middle_rejected() {
     for deflate in [false, true] {
         let payload = vec![0x42; 180_000];
@@ -288,7 +316,7 @@ fn zip_and_empty_zip64_candidates_survive_progress_serialization() {
             let record: signature_scan::StoredCandidate =
                 serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
             let restored = record
-                .candidate(0, 0..bytes.len() as u64, &Options::default())
+                .candidate(0, 0..bytes.len() as u64, &Options::default(), None)
                 .unwrap();
             assert_eq!(restored.size, bytes.len() as u64);
             assert!(matches!(
@@ -439,6 +467,7 @@ fn zip_source_bounds_eocd_chunk_boundaries_and_unclosed_other_signature() {
                 kinds: vec![Kind::Zip],
                 start: range.start,
                 length: Some(range.end - range.start),
+                ..Default::default()
             },
             |_, _| Ok(()),
             |c| found.push(c),

@@ -1,4 +1,9 @@
 {
+  "仅扫描可核对的空闲簇": "Escanear solo clústeres libres verificados",
+  "文件起点按逻辑扇区对齐": "Alinear inicios de archivos a sectores lógicos",
+  "空闲簇扫描需要选择一个未加密的实体分区。": "Seleccione una partición física sin cifrar para escanear clústeres libres.",
+  "核对分区分配信息，只列出完整位于空闲范围内的连续候选。": "Comprueba el mapa de asignación y enumera candidatos contiguos que están íntegramente en espacio libre.",
+  "核对空闲簇": "Comprobando clústeres libres",
   "核对干净卸载的单设备 Btrfs，并适配目标分区容量": "Verificar un sistema Btrfs de un solo dispositivo desmontado correctamente y ajustarlo a la partición de destino",
   "整盘按文件克隆": "Clonar todo el disco por archivos",
   "在空目标盘重建 GPT，按文件复制或逐扇区保留数据分区": "Reconstruir la GPT en un disco vacío y copiar las particiones de datos por archivos o sectores",
@@ -704,7 +709,7 @@
   "文件预览": "Vista previa del archivo",
   "仅显示文件开头，内容已截断。": "La vista previa muestra el inicio del archivo. El contenido está truncado.",
   "非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。": "Otros tipos muestran una vista previa hexadecimal. Exporta el archivo y verifícalo con una aplicación adecuada.",
-  "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。": "Admite los 11 tipos anteriores. BMP debe estar sin comprimir y WAV debe ser RIFF/WAVE. ZIP y Office requieren un solo volumen sin cifrar, Stored o Deflate y comprobación CRC por entrada. Los formatos antiguos de Office y la detección de macros no están disponibles. Límite de 256 MiB por archivo. Los archivos fragmentados no son compatibles.",
+  "支持上列 文件类型；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。": "Admite los tipos anteriores. BMP debe estar sin comprimir y WAV debe ser RIFF/WAVE. ZIP y Office requieren un solo volumen sin cifrar, Stored o Deflate y comprobación CRC por entrada. Los formatos antiguos de Office y la detección de macros no están disponibles. Límite de 256 MiB por archivo. Los archivos fragmentados no son compatibles.",
   "NTFS、FAT、exFAT 支持现存/删除候选；Ext2/3/4 支持干净卸载卷的现存文件，不重放日志。": "NTFS, FAT y exFAT admiten archivos existentes y candidatos eliminados. Ext2/3/4 admite archivos existentes en volúmenes desmontados correctamente, sin reproducir el registro.",
   "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。": "Admite NTFS con compresión LZNT1 estándar y flujos con nombre en archivos normales, además de FAT12/16/32 y exFAT. Los flujos se exportan como archivos separados. EFS, WOF y marcadores de nube aún no son compatibles. El contenido eliminado puede haberse sobrescrito.",
   "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区；系统迁移、按文件缩小克隆及 DiskGenius 专有备份格式尚不支持。": "La copia usa paralelismo limitado, escritura ordenada y verificación por lectura completa. VSS solo admite particiones de datos NTFS. La migración del sistema, la clonación por archivos a destinos menores y las copias propietarias de DiskGenius no están disponibles.",

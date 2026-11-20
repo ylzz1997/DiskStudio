@@ -124,4 +124,8 @@ describe("saved signature scope", () => {
       p.options,
     );
   });
+  it("keeps saved free-cluster and sector alignment settings in the request", () => {
+    const p = { ...saved, options: { ...saved.options!, freeOnly: true, sectorAligned: true } };
+    expect(signatureRequest(settingsFromProgress(p), 2 ** 43)).toEqual(p.options);
+  });
 });

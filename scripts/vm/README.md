@@ -558,6 +558,18 @@ Prepare 复核此前的 Btrfs 还原验收记录及 B 上的三个已还原分�
 
 正式构建 `a10c64a1…` 通过 829 项项目检查、503 项来宾工具合成测试、载荷一致性核对及两项原生克隆验收。按已用空间克隆复制 112,365,568 字节，跳过 290,287,616 字节并保留 4 KiB 标记。逐扇区克隆复制完整 384 MiB。QMP 记录的 A 写入增量分别与两项计划一致，B 无新增写入。独立回读通过，两盘均保持脱机，后验期间未新增 A/B 写入。记录见 `.vm/btrfs-exact-clone-status.json`。
 
+### 按空闲簇和扇区对齐的签名恢复验收
+
+使用 `node scripts/vm/lab.mjs start --4kn --signature-scope` 和 `preflight`。用 `build-guest-checks.ps1 -SignatureScope` 绑定正式程序的 SHA-256，工具光盘选入 `Signature-Scope-4Kn-Prepare.exe` 和 `Signature-Scope-4Kn-Verify.exe`。Prepare 只在两块专用盘均为空 RAW 时准备夹具。A 的 NTFS 卷提供输出目录，B 的专用 8 MiB 分区包含一个已分配的对齐 PDF，一个空闲区未对齐 PDF 和一个空闲区对齐 PDF，准备结束后 B 保持脱机。
+
+在正式界面选择来宾报告中的 B 分区，启用 PDF 一种类型。全范围预期 3 个候选，开启扇区对齐预期 2 个，同时开启仅空闲簇预期 1 个。将最终进度保存为报告目录内的 `Scope.dsrecover`，加载后预览并平面导出余下的 PDF。Verify 核对完整源分区、相邻扇区、两盘 GPT、来宾系统盘布局、保存的进度选项及候选、导出的内容和清单 SHA-256。用 QMP 记录扫描、保存加载、导出与核对期间的 A/B 写入计数。
+
+正式构建 `c6f23377…` 的三个原生扫描、进度保存与加载、46 字节候选预览和导出均通过。独立工具第一次将原候选名作为平面输出名，未计入编号前缀。更正独立工具后，只读复核原有输出及清单通过。正式桌面程序摘要一致，源 B 从完成夹具准备到后验均无新增写入，整个 8 MiB 源分区逐字节一致。英文载入结果仍有一条中文提示。记录见 `.vm/signature-scope-status.json`。
+
+7z 与 SQLite 使用独立的 `node scripts/vm/lab.mjs start --4kn --signature-formats` 测试盘和 `build-guest-checks.ps1 -SignatureFormats` 生成的两项入口。普通文件样本来自 Windows `tar.exe` 的 7zip 写入及 `winsqlite3.dll` 建立的 512 字节页数据库。建样时分别解出文本，以及运行 SQLite `PRAGMA integrity_check` 并回读行。Prepare 将两个样本放进脱机 B 的两个对齐空闲簇，保留原 PDF 对照。仅选择 7z 和 SQLite，同时开启空闲簇与扇区对齐。检查两个候选的大小、保存进度、加载提示和两个十六进制预览。将两份候选平面导出到 A 的同一测试目录。Verify 核对完整源、两个导出、清单 SHA-256、相邻扇区、GPT 和来宾系统盘布局。
+
+正式构建 `f129a432…` 通过上述验收。两个导出的原始大小为 184 字节与 1,024 字节，清单摘要均与独立样本相符。B 保持脱机，准备完成后无新增写入。英文界面的进度加载状态和提示均显示英文。记录见 `.vm/signature-formats-status.json`。
+
 ### 整盘按文件克隆验收
 
 混合克隆使用 `node scripts/vm/lab.mjs start --4kn --mixed-clone` 的独立 A/B 盘。以匹配的正式程序运行 `build-btrfs.ps1 -MixedClone`，再通过 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Mixed-File-Clone-4Kn-Prepare.exe` 和 `Mixed-File-Clone-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。两块盘为空 RAW 时，Prepare 在 A 生成 384 MiB Btrfs、32 MiB 不透明数据和 96 MiB NTFS 分区，保留 A 联机及 B 空白。整盘按文件克隆的原生预览应显示 Btrfs 384→192 MiB 并搬移 80 MiB 条带、32 MiB 分区原位置逐扇区复制及 NTFS 96→48 MiB 按文件重建。独立 Verify 核对两盘布局、Btrfs 的 51 个文件和卷 UUID、NTFS 样本、32 MiB 全范围、清零区和整盘 SHA-256。对已经完整准备且 B 仍为空 RAW 的夹具，可用匹配载荷中的 `Mixed-File-Clone-4Kn-Resume.exe` 复核源内容并建立验收基线。

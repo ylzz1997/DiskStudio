@@ -176,6 +176,26 @@ impl ScanSource {
     }
 
     #[cfg(windows)]
+    fn verify_signature_ranges(
+        &self,
+        locks: &[platform::StableRead],
+        files: &[Candidate],
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        if !files.iter().any(free_signature) {
+            return Ok(());
+        }
+        let (Self::Disk(Selection { partition: Some(_), .. }), [lock]) = (self, locks) else {
+            return Err("仅空闲簇扫描需要已核对的分区分配信息。".into());
+        };
+        let bound = lock.resolved()?;
+        let sector = bound.disk.logical_sector_size.ok_or("逻辑扇区未知")?;
+        let mut reader = platform::reader(&bound)?;
+        let plan = crate::used_space::inspect(&mut reader, bound.size, sector, None, cancel)?;
+        crate::signature_scan::verify_free_candidates(&plan, files)
+    }
+
+    #[cfg(windows)]
     fn extraction_readers(
         &self,
         locks: &[platform::StableRead],
@@ -400,6 +420,11 @@ impl ScanSource {
         }
         Ok(result.unwrap())
     }
+}
+
+#[cfg(windows)]
+fn free_signature(c: &Candidate) -> bool {
+    matches!(c.locator, recovery::Locator::Signature { allocation_digest: Some(_), .. })
 }
 
 enum RecoveryReaders {
@@ -1754,8 +1779,9 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
                     .clone(),
             )
         };
-        let locked = source.lock_sources(matches!(c.locator, recovery::Locator::Btrfs(_)))?;
+        let locked = source.lock_sources(free_signature(&c) || matches!(c.locator, recovery::Locator::Btrfs(_)))?;
         let cancel = Arc::new(AtomicBool::new(false));
+        source.verify_signature_ranges(&locked, std::slice::from_ref(&c), &cancel)?;
         let readers = source.extraction_readers(&locked, &cancel)?;
         let extension = c.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         let limit = if ["png", "jpg", "jpeg", "gif", "bmp", "webp"].contains(&extension.as_str()) {
@@ -3017,7 +3043,7 @@ pub(crate) fn run(
             let locked = source.lock_sources(
                 files
                     .iter()
-                    .any(|c| matches!(c.locator, recovery::Locator::Btrfs(_)))
+                    .any(|c| free_signature(c) || matches!(c.locator, recovery::Locator::Btrfs(_)))
                     || export.folders.iter().any(|folder| {
                         folder.source.as_ref().is_some_and(|d| {
                             matches!(
@@ -3027,6 +3053,7 @@ pub(crate) fn run(
                         })
                     }),
             )?;
+            source.verify_signature_ranges(&locked, &files, cancel)?;
             if let ScanSource::Lvm(lvm) = &source {
                 if Some(lvm.provenance(Some(&locked))?) != export.physical_lvm_source {
                     return Err("LVM2 导出来源范围已变化，请重新准备。".into());

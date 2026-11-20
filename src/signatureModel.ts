@@ -26,6 +26,16 @@ export const signatureTypes = [
     label: "PPTX",
     detail: "PowerPoint Open XML 包；不含旧版 PPT、加密或宏类型",
   },
+  {
+    id: "sevenZip",
+    label: "7z",
+    detail: "核对 7z 文件头 CRC 和容量。压缩内容和加密状态未验证。",
+  },
+  {
+    id: "sqlite",
+    label: "SQLite",
+    detail: "核对 SQLite 主数据库容量和首页。WAL 单独保存，无法随此候选还原。",
+  },
 ] as const;
 export type SignatureKind = (typeof signatureTypes)[number]["id"];
 export type SignatureSettings = {
@@ -33,12 +43,16 @@ export type SignatureSettings = {
   customRange: boolean;
   start: string;
   end: string;
+  freeOnly: boolean;
+  sectorAligned: boolean;
 };
 export const defaultSignatureSettings: SignatureSettings = {
   kinds: signatureTypes.map((t) => t.id),
   customRange: false,
   start: "0",
   end: "",
+  freeOnly: false,
+  sectorAligned: false,
 };
 export function signatureRequest(
   settings: SignatureSettings,
@@ -70,6 +84,8 @@ export function signatureRequest(
     kinds: settings.kinds,
     start,
     length: end === sourceSize ? null : end - start,
+    ...(settings.freeOnly && { freeOnly: true }),
+    ...(settings.sectorAligned && { sectorAligned: true }),
   };
 }
 export function previewImageMime(name: string): string | null {

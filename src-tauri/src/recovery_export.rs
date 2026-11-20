@@ -779,6 +779,7 @@ mod tests {
             directory_note: String::new(),
             locator: Locator::Signature {
                 content_hash: None,
+                allocation_digest: None,
                 offset: 0,
                 header: b"hello".to_vec(),
                 footer: b"hello".to_vec(),

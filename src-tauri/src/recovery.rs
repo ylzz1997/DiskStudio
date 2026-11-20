@@ -66,6 +66,7 @@ pub enum Locator {
         header: Vec<u8>,
         footer: Vec<u8>,
         content_hash: Option<[u8; 32]>,
+        allocation_digest: Option<String>,
     },
 }
 fn err(e: impl std::fmt::Display) -> String {
@@ -366,11 +367,12 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
             header,
             footer,
             content_hash,
+            ..
         } => {
             if let Some(expected) = content_hash {
                 let actual = crate::signature_zip::hash_range(reader, *offset, c.size, || tick(0))?;
                 if &actual != expected {
-                    return Err("归档内容已变化，请重新扫描。".into());
+                    return Err("候选内容已变化，请重新扫描。".into());
                 }
             }
             let mut check = vec![0; header.len()];

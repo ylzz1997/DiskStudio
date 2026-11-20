@@ -284,6 +284,7 @@ mod tests {
                 header: vec![],
                 footer: vec![],
                 content_hash: None,
+                allocation_digest: None,
             },
         }
     }

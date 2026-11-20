@@ -139,6 +139,10 @@ fn launch(
         let options = if mode == ScanMode::Signatures {
             let o = options.unwrap_or_default();
             o.range(resolved.size)?;
+            o.alignment(resolved.disk.logical_sector_size.unwrap_or(0))?;
+            if o.free_only && source.partition.is_none() {
+                return Err("仅空闲簇扫描需要选择实体分区。".into());
+            }
             Some(o)
         } else {
             None
@@ -222,7 +226,16 @@ fn launch(
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         return Err("扫描已停止，尚未打开设备".into());
                     }
-                    let r = platform::resolve(&source, false, false)?;
+                    let locked = options
+                        .as_ref()
+                        .is_some_and(|options| options.free_only)
+                        .then(|| platform::StableRead::lock(&source))
+                        .transpose()?;
+                    let r = if let Some(lock) = &locked {
+                        lock.resolved()?
+                    } else {
+                        platform::resolve(&source, false, false)?
+                    };
                     let sector = r.disk.logical_sector_size.ok_or("逻辑扇区未知")?;
                     let mut reader = crate::ext_recovery::scan_progress::SharedReader::new(
                         platform::reader(&r)?,
@@ -297,14 +310,39 @@ fn launch(
                     let directory = |d| state().directories.insert(d);
                     let message = match &mut cursor {
                         Some(Cursor::Signatures { options, cursor }) => {
-                            crate::signature_scan::continue_scan(
+                            let allocation = if options.free_only {
+                                let range = options.range(r.size)?;
+                                super::progress(
+                                    &work_id,
+                                    &cancel,
+                                    "核对空闲簇",
+                                    cursor.consumed,
+                                    range.end - range.start,
+                                )?;
+                                Some(crate::used_space::inspect(
+                                    &mut reader,
+                                    r.size,
+                                    sector,
+                                    None,
+                                    &cancel,
+                                )?)
+                            } else {
+                                None
+                            };
+                            let message = crate::signature_scan::continue_scan_scoped(
                                 &mut reader,
                                 r.size,
                                 options,
                                 cursor,
+                                sector,
+                                allocation.as_ref(),
                                 tick,
                                 found,
-                            )?
+                            )?;
+                            if let Some(plan) = allocation {
+                                plan.proof.verify(&mut reader, &cancel)?;
+                            }
+                            message
                         }
                         Some(Cursor::Ntfs { mode, cursor }) => crate::ntfs_scan::continue_scan(
                             &mut reader,
@@ -371,7 +409,11 @@ fn launch(
                         .as_ref()
                         .ok_or("恢复游标缺失")?
                         .verify_owned(reader.clone(), r.size)?;
-                    platform::resolve(&source, false, false)?;
+                    if let Some(lock) = &locked {
+                        lock.verify()?;
+                    } else {
+                        platform::resolve(&source, false, false)?;
+                    }
                     Ok((message, None))
                 },
             ))
@@ -440,19 +482,37 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             return Ok(None);
         };
         let progress = recovery_checkpoint::decode(&bytes, &source)?; // identity/scope before raw open
-        let r = platform::resolve(&source, false, false)?;
+        let (files, tree) = progress.validate(&source)?;
+        let scoped = match &progress.cursor {
+            Cursor::Signatures { options, cursor } if options.free_only => Some((options, cursor)),
+            _ => None,
+        };
+        let locked = scoped
+            .is_some()
+            .then(|| platform::StableRead::lock(&source))
+            .transpose()?;
+        let r = if let Some(lock) = &locked {
+            lock.resolved()?
+        } else {
+            platform::resolve(&source, false, false)?
+        };
         let mut reader =
             crate::ext_recovery::scan_progress::SharedReader::new(platform::reader(&r)?);
-        progress.binding.verify(
-            &mut reader,
-            r.size,
-            r.offset,
-            r.disk.logical_sector_size.ok_or("逻辑扇区未知")?,
-        )?;
+        let sector = r.disk.logical_sector_size.ok_or("逻辑扇区未知")?;
+        progress
+            .binding
+            .verify(&mut reader, r.size, r.offset, sector)?;
         progress.verify_owned(reader.clone(), r.size)?;
-        platform::resolve(&source, false, false)?;
+        if let (Some((options, cursor)), Some(lock)) = (scoped, &locked) {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let plan = crate::used_space::inspect(&mut reader, r.size, sector, None, &cancel)?;
+            cursor.verify_scope(options, &plan)?;
+            crate::signature_scan::verify_free_candidates(&plan, &files)?;
+            lock.verify()?;
+        } else {
+            platform::resolve(&source, false, false)?;
+        }
         drop(reader);
-        let (files, tree) = progress.validate(&source)?;
         let id = uuid::Uuid::new_v4().to_string();
         let c = &progress.cursor;
         let sealed = c.sealed();

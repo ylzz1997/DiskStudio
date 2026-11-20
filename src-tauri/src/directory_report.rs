@@ -417,6 +417,7 @@ mod tests {
         ];
         files[3].locator = Locator::Signature {
             content_hash: None,
+            allocation_digest: None,
             offset: 987654321,
             header: vec![],
             footer: vec![],

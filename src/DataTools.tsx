@@ -331,9 +331,11 @@ export function DataTools({
     partition ? Number(partition) : null,
   );
   let signatureError = "";
+  const canScanFree = !!selectedPart && !selectedPart.encryption;
+  const activeSignatureSettings = canScanFree ? signatureSettings : { ...signatureSettings, freeOnly: false };
   if (mode === "signatures" && sourceSize > 0) {
     try {
-      signatureRequest(signatureSettings, sourceSize);
+      signatureRequest(activeSignatureSettings, sourceSize);
     } catch (e) {
       signatureError = e instanceof Error ? e.message : String(e);
     }
@@ -342,6 +344,7 @@ export function DataTools({
     setSignatureSettings((old) => ({
       ...old,
       customRange: false,
+      freeOnly: false,
       start: "0",
       end: "",
     }));
@@ -484,7 +487,7 @@ export function DataTools({
             mode: scanMode,
             signatures:
               scanMode === "signatures"
-                ? signatureRequest(signatureSettings, sourceSize)
+                ? signatureRequest(activeSignatureSettings, sourceSize)
                 : null,
           });
       }
@@ -903,6 +906,7 @@ export function DataTools({
                         value={signatureSettings}
                         onChange={setSignatureSettings}
                         disabled={!!busy}
+                        canScanFree={canScanFree}
                       />
                       {signatureError && (
                         <FormError message={catalogText(signatureError)} />
@@ -913,7 +917,7 @@ export function DataTools({
                     {mode !== "reconstruct" && <span>
                       {mode === "signatures"
                         ? t(
-                            "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
+                            "支持上列 文件类型；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
                           )
                         : selectedPart?.encryption
                           ? t("请在 Windows 解锁已完成加密的 BitLocker NTFS 数据卷，再读取目录。")

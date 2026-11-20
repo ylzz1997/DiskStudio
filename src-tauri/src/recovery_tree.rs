@@ -536,6 +536,7 @@ mod tests {
         let mut signature = file.clone();
         signature.locator = Locator::Signature {
             content_hash: None,
+            allocation_digest: None,
             offset: 0,
             header: vec![],
             footer: vec![],

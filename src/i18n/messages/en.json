@@ -1,4 +1,9 @@
 {
+  "仅扫描可核对的空闲簇": "Scan verified free clusters only",
+  "文件起点按逻辑扇区对齐": "Align file starts to logical sectors",
+  "空闲簇扫描需要选择一个未加密的实体分区。": "Select a physical partition without encryption to scan free clusters.",
+  "核对分区分配信息，只列出完整位于空闲范围内的连续候选。": "Checks the allocation map and lists contiguous candidates contained entirely in free space.",
+  "核对空闲簇": "Checking free clusters",
   "核对干净卸载的单设备 Btrfs，并适配目标分区容量": "Verify a cleanly unmounted single-device Btrfs filesystem and fit it to the destination partition",
   "重建文件视图": "Reconstruct file view",
   "使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。": "Read files using redundant NTFS, FAT32, or exFAT metadata. DiskStudio checks the metadata again before extraction.",
@@ -680,7 +685,7 @@
   "文件预览": "File preview",
   "仅显示文件开头，内容已截断。": "This preview shows the beginning of the file. The content is truncated.",
   "非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。": "Other file types have a hexadecimal preview. Export the file and verify it with a suitable application.",
-  "支持上列 11 类；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。": "Supports the 11 types above. BMP must be uncompressed and WAV must be RIFF/WAVE. ZIP and Office require a single unencrypted volume using Stored or Deflate, with a CRC check per entry. Legacy Office and macro type detection are unavailable. The limit is 256 MiB per file. Fragmented files are unsupported.",
+  "支持上列 文件类型；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。": "Supports the file types above. BMP must be uncompressed and WAV must be RIFF/WAVE. ZIP and Office require a single unencrypted volume using Stored or Deflate, with a CRC check per entry. Legacy Office and macro type detection are unavailable. The limit is 256 MiB per file. Fragmented files are unsupported.",
   "NTFS、FAT、exFAT 支持现存/删除候选；Ext2/3/4 支持干净卸载卷的现存文件，不重放日志。": "NTFS, FAT and exFAT support existing files and deleted candidates. Ext2/3/4 supports existing files on cleanly unmounted volumes without journal replay.",
   "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。": "Supports NTFS, including standard LZNT1 compression and named streams on regular files, plus FAT12/16/32 and exFAT. Named streams export as separate regular files. EFS, WOF and cloud placeholders are currently unsupported. Deleted content may have been overwritten.",
   "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区；系统迁移、按文件缩小克隆及 DiskGenius 专有备份格式尚不支持。": "Copy uses bounded parallel processing with ordered writes and full readback verification. VSS supports NTFS data partitions only. System migration, file-based cloning to smaller targets and proprietary DiskGenius backups are unavailable.",

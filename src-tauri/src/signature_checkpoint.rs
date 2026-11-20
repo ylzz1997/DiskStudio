@@ -113,6 +113,7 @@ impl Progress {
             || !hex(&self.source.target.0)
             || !hex(&self.source.layout_key)
             || self.source.partition == Some(0)
+            || (self.options.free_only && self.source.partition.is_none())
             || self.records.len() > crate::recovery::MAX_RESULTS
             || self.records.len() != self.cursor.count as usize
         {
@@ -120,12 +121,23 @@ impl Progress {
         }
         self.binding.validate()?;
         let range = self.options.range(self.binding.size)?;
+        let alignment = self.options.alignment(self.binding.sector)?;
         self.cursor
             .validate(range.end - range.start, &self.options)?;
         self.records
             .iter()
             .enumerate()
-            .map(|(id, r)| r.candidate(id as u32, range.clone(), &self.options))
+            .map(|(id, r)| {
+                if !r.aligned(alignment) {
+                    return Err("保存的签名候选起点与对齐设置不一致。".into());
+                }
+                r.candidate(
+                    id as u32,
+                    range.clone(),
+                    &self.options,
+                    self.cursor.allocation_digest(),
+                )
+            })
             .collect()
     }
 }

@@ -18,7 +18,7 @@ function Harness() {
     >
       <h1>按文件签名扫描</h1>
       <p>内存 UI 验证 · 未连接任何磁盘</p>
-      <SignatureOptions value={value} onChange={setValue} disabled={busy} />
+      <SignatureOptions value={value} onChange={setValue} disabled={busy} canScanFree />
       <div className="dialog-actions">
         <button className="button" onClick={() => setBusy(!busy)}>
           切换忙碌状态

@@ -5,10 +5,12 @@ export function SignatureOptions({
   value,
   onChange,
   disabled,
+  canScanFree,
 }: {
   value: SignatureSettings;
   onChange: (value: SignatureSettings) => void;
   disabled: boolean;
+  canScanFree: boolean;
 }) {
   const { t, catalogText } = useLocale();
   return (
@@ -89,6 +91,27 @@ export function SignatureOptions({
           <span>{t("扫描所选磁盘或分区的全部范围")}</span>
         )}
       </div>
+      <div className="signature-range">
+        <label>
+          <input
+            type="checkbox"
+            disabled={!canScanFree}
+            checked={canScanFree && value.freeOnly}
+            onChange={(e) => onChange({ ...value, freeOnly: e.target.checked })}
+          />
+          {t("仅扫描可核对的空闲簇")}
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={value.sectorAligned}
+            onChange={(e) => onChange({ ...value, sectorAligned: e.target.checked })}
+          />
+          {t("文件起点按逻辑扇区对齐")}
+        </label>
+      </div>
+      {!canScanFree && <p>{t("空闲簇扫描需要选择一个未加密的实体分区。")}</p>}
+      {canScanFree && value.freeOnly && <p>{t("核对分区分配信息，只列出完整位于空闲范围内的连续候选。")}</p>}
       {value.customRange && (
         <p>{t("位置相对于上方所选磁盘或分区，结束位置不包含在扫描范围内。")}</p>
       )}
