@@ -215,7 +215,7 @@ fn issue(target: String, fingerprint: String, input: Input) -> Preview {
     preview
 }
 
-fn operation() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+fn operation() -> Result<crate::operation_gate::OperationGuard<'static>, String> {
     crate::OPERATION
         .try_lock()
         .map_err(|_| "另一项磁盘操作正在运行。".into())

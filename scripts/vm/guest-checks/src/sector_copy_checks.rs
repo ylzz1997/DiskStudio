@@ -26,6 +26,8 @@ const REJECTED: &str = "DiskStudio-LBA-0-1.bin";
 const FAULT_START: u64 = PARTITION_LBA + 4096;
 const FAULT_LBA: u64 = FAULT_START + 3;
 const FAULT_COUNT: u64 = 8;
+const REPAIR_START: u64 = 15 * GIB / SECTOR;
+const REPAIR_LBA: u64 = REPAIR_START + 3;
 const STRICT: &str = "ds-sector-strict.bin";
 const REVERSE: &str = "ds-sector-reverse.bin";
 const FORWARD: &str = "ds-sector-forward.bin";
@@ -153,15 +155,19 @@ pub(super) fn verify() -> Result<String, String> {
 }
 
 fn fault_reference(bound: &Selection) -> Result<(Vec<u8>, i32), String> {
+    fault_reference_at(bound, FAULT_START, FAULT_LBA)
+}
+
+fn fault_reference_at(bound: &Selection, start: u64, fault: u64) -> Result<(Vec<u8>, i32), String> {
     let resolved = data_windows::resolve(bound, false, false)?;
     let mut device = data_windows::device(&resolved, false)?;
     let mut bytes = vec![0; (FAULT_COUNT * SECTOR) as usize];
     let mut code = None;
     for (index, block) in bytes.chunks_exact_mut(SECTOR as usize).enumerate() {
-        let lba = FAULT_START + index as u64;
+        let lba = start + index as u64;
         device.seek(SeekFrom::Start(lba * SECTOR)).map_err(err)?;
         let read = device.read_exact(block);
-        if lba == FAULT_LBA {
+        if lba == fault {
             let error = read
                 .err()
                 .ok_or("The fixture LBA was unexpectedly readable")?;
@@ -231,6 +237,82 @@ pub(super) fn inspect_surface_refinement() -> Result<String, String> {
         "PASS: desktop {desktop}. {A} is offline. {B} is online. Both NVMe disks are 16 GiB, 4Kn. Only A LBA {FAULT_LBA} in the reference range returned Win32 code {code}. Save to {}.",
         folder.display()
     ))
+}
+
+pub(super) fn inspect_surface_parallel() -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let disks = inventory()?;
+    let describe = |serial: &str| -> Result<String, String> {
+        let disk = disks
+            .iter()
+            .find(|disk| disk.serial_number.as_deref().map(disk_identity::clean) == Some(serial))
+            .ok_or("Test disk missing")?;
+        let offline = disk.is_offline.ok_or("Test disk offline state missing")?;
+        Ok(format!(
+            "Disk {} · {serial} · 16 GiB · 512 B · {}",
+            disk.number,
+            if offline { "offline" } else { "online" }
+        ))
+    };
+    Ok(format!(
+        "PASS: desktop {desktop}. {}. {}.",
+        describe(A)?,
+        describe(B)?
+    ))
+}
+
+pub(super) fn surface_repair_witness(verify: bool) -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, bound_a, bound_b, snapshot) = fixture()?;
+    let table = quick_partition_checks::table(A)?;
+    let layout = table_restore::archive_layout(&table)?;
+    let offset = REPAIR_START * SECTOR;
+    let end = (REPAIR_START + FAULT_COUNT) * SECTOR;
+    if REPAIR_START < layout.first
+        || REPAIR_START + FAULT_COUNT - 1 > layout.last
+        || layout.entries.iter().any(|part| offset < part.offset + part.size && part.offset < end)
+    {
+        return Err("Surface repair fixture overlaps GPT metadata or an allocated partition".into());
+    }
+    let name = format!("DiskStudio-surface-repair-{REPAIR_LBA}-{desktop}.json");
+    let path = folder.join(&name);
+    let geometry = json!({
+        "desktop": desktop,
+        "layout": snapshot,
+        "faultLba": REPAIR_LBA,
+        "rangeStart": REPAIR_START,
+        "rangeCount": FAULT_COUNT,
+    });
+    if !verify {
+        let (reference, code) = fault_reference_at(&bound_a, REPAIR_START, REPAIR_LBA)?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
+        data_windows::FileBinding::validate_all(&[data_windows::FileBinding::new(
+            &file, &bound_b.target,
+        )?])?;
+        serde_json::to_writer(&mut file, &json!({
+            "geometry": geometry,
+            "expectedSha256": format!("{:x}", Sha256::digest(reference)),
+        })).map_err(err)?;
+        file.sync_all().map_err(err)?;
+        return Ok(format!("PASS: desktop {desktop}. {A} offline, {B} online. Unallocated LBA {REPAIR_LBA} returned Win32 {code}. Neighbor digest and GPT witness saved on B."));
+    }
+
+    let witness = surface_result(&folder, &bound_b, &name)?;
+    if witness["geometry"] != geometry {
+        return Err("A/B GPT, guest OS layout or fixture identity changed".into());
+    }
+    let resolved = data_windows::resolve(&bound_a, false, false)?;
+    let mut file = data_windows::device(&resolved, false)?;
+    let mut bytes = vec![0; (FAULT_COUNT * SECTOR) as usize];
+    file.seek(SeekFrom::Start(REPAIR_START * SECTOR)).map_err(err)?;
+    file.read_exact(&mut bytes).map_err(err)?;
+    let at = ((REPAIR_LBA - REPAIR_START) * SECTOR) as usize;
+    if bytes[at..at + SECTOR as usize].iter().any(|&b| b != 0)
+        || witness["expectedSha256"] != format!("{:x}", Sha256::digest(bytes))
+    {
+        return Err("Repaired sector or its neighbors differ from the expected bytes".into());
+    }
+    Ok(format!("PASS: desktop {desktop}. {A} remains offline. LBA {REPAIR_LBA} read back as zero, seven neighboring sectors match the baseline, and both GPTs and guest OS layout are unchanged."))
 }
 
 fn surface_result(folder: &Path, bound_b: &Selection, name: &str) -> Result<serde_json::Value, String> {

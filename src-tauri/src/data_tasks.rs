@@ -1093,7 +1093,7 @@ fn scan_source(
     reader: Box<dyn backup_archive::Source>,
     label: String,
     title: &str,
-    guard: std::sync::MutexGuard<'_, ()>,
+    guard: crate::operation_gate::OperationGuard<'_>,
 ) -> Result<String, String> {
     scan_source_mode(
         source,
@@ -1250,7 +1250,7 @@ fn scan_source_mode(
     label: String,
     title: &str,
     mode: ScanMode,
-    guard: std::sync::MutexGuard<'_, ()>,
+    guard: crate::operation_gate::OperationGuard<'_>,
 ) -> Result<String, String> {
     scan_source_input(source, reader.map_or(ScanInput::Resolve, ScanInput::Reader), label, title, mode, guard)
 }
@@ -1261,7 +1261,7 @@ fn scan_source_input(
     label: String,
     title: &str,
     mode: ScanMode,
-    guard: std::sync::MutexGuard<'_, ()>,
+    guard: crate::operation_gate::OperationGuard<'_>,
 ) -> Result<String, String> {
     let (id, cancel) = start(title)?;
     #[cfg(windows)]

@@ -168,11 +168,13 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex, OnceLock},
+    sync::{atomic::AtomicBool, Arc, OnceLock},
     time::Duration,
 };
 use wmi::WMIConnection;
-static OPERATION: Mutex<()> = Mutex::new(());
+#[path = "../../../../src-tauri/src/operation_gate.rs"]
+mod operation_gate;
+static OPERATION: operation_gate::OperationGate = operation_gate::OperationGate::new();
 static TEST_SECTOR: OnceLock<u64> = OnceLock::new();
 // MSFT_Disk preserves six padding spaces before the NVMe namespace suffix.
 const A: &str = "DS-TEST-A-0001      _00000001.";
@@ -659,6 +661,8 @@ fn main() {
                 | "Surface-Refinement-4Kn-Inspect"
                 | "Surface-Refinement-4Kn-Prepare"
                 | "Surface-Timeout-4Kn-Verify"
+                | "Surface-Repair-4Kn-Baseline"
+                | "Surface-Repair-4Kn-Verify"
                 | "Archive-Restore-4Kn-Prepare"
                 | "Archive-Restore-4Kn-Continue"
                 | "Archive-Restore-4Kn-Verify-Partition"
@@ -828,6 +832,9 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Surface-Refinement-4Kn-Inspect") => sector_copy_checks::inspect_surface_refinement(),
         Some("Surface-Refinement-4Kn-Prepare") => sector_copy_checks::prepare_surface_refinement(),
         Some("Surface-Timeout-4Kn-Verify") => sector_copy_checks::verify_surface_timeout(),
+        Some("Surface-Repair-4Kn-Baseline") => sector_copy_checks::surface_repair_witness(false),
+        Some("Surface-Repair-4Kn-Verify") => sector_copy_checks::surface_repair_witness(true),
+        Some("Surface-Parallel-512-Inspect") => sector_copy_checks::inspect_surface_parallel(),
         Some("Archive-Restore-4Kn-Prepare") => archive_restore_checks::prepare(false),
         Some("Archive-Restore-4Kn-Continue") => archive_restore_checks::prepare(true),
         Some("Archive-Restore-4Kn-Verify-Partition") => archive_restore_checks::verify(false),

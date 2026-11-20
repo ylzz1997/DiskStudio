@@ -165,3 +165,33 @@ test('actual QCOW2 snapshot restores written test sectors', () => {
   run(img, ['snapshot', '-a', 'blank', filename]);
   run(io, ['-f', 'qcow2', '-r', '-c', 'read -P 0x00 0 4096', filename]);
 });
+test('repair fault reads fail before a write and read back afterward', () => {
+  assert.throws(() => buildArgs({ fourKn: true, repairFault: true }), /fixed sector fault/);
+  const args = buildArgs({ fourKn: true, sectorFault: true, repairFault: true });
+  const backends = args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
+  const a = backends.find(item => item['node-name'] === 'test_a');
+  assert.deepEqual(a['inject-error'].map(rule => [rule.event, rule.iotype, rule.sector, rule.errno]), [
+    ['none', 'read', 3932163 * 8, 5], ['pwritev_done', 'read', 3932163 * 8, 0],
+  ]);
+  assert.ok(backends.filter(item => item['node-name'] !== 'test_a').every(item => !item['inject-error']));
+  const img = safePath(path.join(root, 'tools/qemu/qemu-img.exe'));
+  const io = safePath(path.join(root, 'tools/qemu/qemu-io.exe'));
+  const filename = safePath(path.join(folder, 'surface-repair.qcow2'), folder, false);
+  const made = spawnSync(img, ['create', '-f', 'qcow2', filename, '8M'], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert.equal(made.status, 0, made.stderr);
+  checkQcowHeader(filename, folder);
+  const rules = a['inject-error'].flatMap((rule, i) =>
+    Object.entries({ ...rule, sector: 8 }).map(([key, value]) => `inject-error.${i}.${key}=${value}`));
+  const options = ['driver=blkdebug', 'image.driver=qcow2', 'image.file.driver=file', `image.file.filename=${filename}`, ...rules].join(',');
+  const exercised = spawnSync(io, ['--image-opts',
+    '-c', 'read -P 0 4096 4096',
+    '-c', 'write -P 0xa5 4096 4096',
+    '-c', 'read -P 0xa5 4096 4096',
+    options,
+  ], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const output = exercised.stdout + exercised.stderr;
+  assert.equal(exercised.error, undefined, output);
+  assert.equal((output.match(/read failed/g) ?? []).length, 1, output);
+  assert.match(output, /wrote 4096\/4096 bytes/, output);
+  assert.match(output, /read 4096\/4096 bytes/, output);
+});

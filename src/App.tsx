@@ -620,9 +620,11 @@ function Workspace() {
       )}
       {modal === "surface" && disk && (
         <SurfaceScanDialog
-          disk={disk}
+          initialDisk={disk}
+          disks={disks}
           onClose={() => setModal(null)}
           onBusy={operationBusy}
+          onRefresh={refreshLocal}
         />
       )}
       {modal === "lostPartitions" && disk && (

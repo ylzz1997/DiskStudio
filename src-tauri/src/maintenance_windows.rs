@@ -248,6 +248,17 @@ pub(crate) fn capture_write_table(
     r: Range,
     protect_table: bool,
 ) -> Result<Option<table_archive::Archive>, String> {
+    let Some((archive, layout)) = write_table(ctx, file, identity)? else {
+        return Ok(None);
+    };
+    protect_write_range(&archive, &layout, r, protect_table)?;
+    Ok(Some(archive))
+}
+pub(crate) fn write_table(
+    ctx: &TableReadContext,
+    file: &mut File,
+    identity: &Target,
+) -> Result<Option<(table_archive::Archive, crate::table_restore::Layout)>, String> {
     let mut attributes = [0u8; 16];
     if device::control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut attributes)? != 16
         || u32::from_le_bytes(attributes[..4].try_into().unwrap()) != 16
@@ -293,6 +304,14 @@ pub(crate) fn capture_write_table(
     if !layout.agrees(&native) {
         return Err("原始 GPT 与 Windows 原生布局不一致。".into());
     }
+    Ok(Some((archive, layout)))
+}
+pub(crate) fn protect_write_range(
+    archive: &table_archive::Archive,
+    layout: &crate::table_restore::Layout,
+    r: Range,
+    protect_table: bool,
+) -> Result<(), String> {
     for entry in layout
         .entries
         .iter()
@@ -310,7 +329,7 @@ pub(crate) fn capture_write_table(
     {
         return Err("所选写入范围与分区表重叠。".into());
     }
-    Ok(Some(archive))
+    Ok(())
 }
 
 fn verify_empty_raw(
@@ -358,7 +377,7 @@ fn trim_capability(file: &File) -> Result<(), String> {
     }
     Ok(())
 }
-fn reserve<T>(
+pub(crate) fn reserve<T>(
     title: &str,
     f: impl FnOnce(&str, &AtomicBool) -> Result<T, String>,
 ) -> Result<T, String> {

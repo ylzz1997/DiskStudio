@@ -44,6 +44,45 @@ export interface SurfaceSnapshot {
     };
   };
 }
+
+export interface SurfaceStatus {
+  scans: {
+    target: string;
+    state: SurfaceSnapshot["report"]["state"];
+    checkedBytes: number;
+    size: number;
+    pausing: boolean;
+  }[];
+  selected: SurfaceSnapshot | null;
+  repairAvailable: boolean;
+}
+
+export interface SurfaceRepairBlock {
+  startLba: number;
+  sectorCount: number;
+  failed: { lba: number; code: number }[];
+  sha256: string;
+}
+
+export interface SurfaceRepairPreview {
+  token: string;
+  target: string;
+  logicalSectorSize: number;
+  physicalSectorSize: number;
+  excludedSectors: number;
+  nowReadableSectors: number;
+  blocks: SurfaceRepairBlock[];
+}
+
+export interface SurfaceRepairOutcome {
+  state: "completed" | "failed" | "canceled";
+  plannedBlocks: number;
+  attemptedBlocks: number;
+  verifiedBlocks: SurfaceRepairBlock[];
+  diskLeftOffline: boolean | null;
+  message: string;
+}
+
 export function surfaceCanResume(snapshot: SurfaceSnapshot | null) {
   return (
     !!snapshot &&

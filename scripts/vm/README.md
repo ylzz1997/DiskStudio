@@ -114,6 +114,24 @@ FAT32 和 exFAT 备用引导验收使用 `build-guest-checks.ps1 -FatReconstruct
 
 构建 `6c652c18…` 已通过这组 4Kn 测试。超时请求从绝对 LBA 2232704 开始，覆盖 128 扇区，界面记录了 0 字节已完成和零介质错误。进度加载期间 A 盘未发生读写，续扫读完 2 MiB。限速扫描、续扫和故障细查期间 A/B 写入计数均未增加。验收记录位于 `.vm/surface-timeout-status.json`。
 
+## 512 字节来宾的多盘并行坏道检测
+
+使用标准 `start` 和预检。以 `build-guest-checks.ps1 -SurfaceParallel` 制备 `Surface-Parallel-512-Inspect.exe`，将它与正式程序放在同一只读光盘。运行 Inspect，核对当前正式程序摘要以及 A/B 的磁盘号、序列号和 512 字节几何。
+
+从 A 打开坏道检测，添加 B。A 选整盘 LBA 4096 起 8192 个扇区，B 选整盘 LBA 8192 起 524288 个扇区，分别应用各自设置。使用 `surface-parallel-window` 限速，一次启动两项，结合 QMP 确认两盘都有读取。暂停 A，检查 B 继续。将 A 的读取超时改为 1 秒并续扫，观察超时、未完成块及零失败块。执行 `surface-parallel-clear` 后续扫 A，核对退出限速后的剩余读取范围、各盘最终结果和扫描阶段的写入计数。
+
+构建 `36472c98…` 已通过。A 在 3 MiB 暂停并在 512 字节扇区模式下触发超时，续扫只读余下的 1 MiB；B 持续读取并完成 256 MiB。扫描阶段 A/B 写入计数均未增加。重开窗口后，在 A 保存进度到 B 的 `DSBackup (D:)`，确认 B 无法加载 A 的进度，切回 A 可加载且两盘结果保留。验收记录位于 `.vm/surface-parallel-status.json`。
+
+## 坏道写入修复
+
+使用匹配的正式构建和 `build-guest-checks.ps1 -SurfaceRepair`，把 `Surface-Repair-4Kn-Baseline.exe`、`Surface-Repair-4Kn-Verify.exe` 装入同一只读光盘。用 `node scripts/vm/lab.mjs start --4kn --surface-repair-fault` 启动，预检确认注入点是 A 的 LBA 3932163。运行 Baseline，核对 A 已脱机、B 联机、指定范围完整位于未分配区、故障与相邻扇区的读取状态及完整 GPT，保存 B 上的基准。
+
+从 A 的 LBA 3932160 起检测 8 扇区并启用细查。预览修复应只列出 LBA 3932163。先检查取消预览时 A 没有写入，再重新预览并确认。校验正式程序的回读 SHA-256，记录 QMP 写入计数和 Verify 的独立回读。来宾仅对 A 的一个 4 KiB 扇区执行修复写入。QEMU 在 A 盘写入完成时撤销注入故障，用来核对应用的写入及回读路径。
+
+受保护范围回归使用 `start --4kn --sector-copy-fault`。在 A 的 LBA 2232320 起检测 8 扇区并细查。这里保留此前的受保护分区状态，预览应拒绝写入，QMP 的 A 盘写入计数不增加。
+
+正式构建 `211e0fca…` 通过 4Kn 客体验收。受保护范围拒绝写入，取消未分配区预览时 A/B 均无新增写入。确认后 A 只写入指定 LBA 一次，共 4096 字节，B 无新增写入。程序回读 SHA-256 核对通过，独立工具确认目标为零、七个邻区及两盘 GPT 一致，A 保持脱机。512e 相邻逻辑扇区保留由合成用例覆盖。完整记录见 `.vm/surface-repair-status.json`。
+
 ## FAT 与 exFAT 保留数据缩放
 
 `build-fat-resize.ps1` 只编译客体驱动，绑定已完成桌面程序的 SHA-256。只在通过身份、容量和隔离预检的 DiskStudio-Test 内运行 `Fat-Resize-Check.exe`。它用跨构建的单次标记保护八次操作，匹配 A 的四个已有测试卷并各建立独立文件，不删除或格式化分区。每次缩放后核对脱机状态、精确 GPT 几何、独立读取的 65,553 字节文件及 SHA-256。在后续扩容之前单独联机并确认 Windows 能识别缩容的卷。失败停止且不重试，结束时 A 保持脱机，B 只用于核对。

@@ -45,6 +45,7 @@ mod lvm_tasks;
 mod maintenance_io;
 mod maintenance_tasks;
 mod native_locale;
+mod operation_gate;
 mod ntfs_allocation;
 mod ntfs_checkpoint;
 #[cfg(all(test, windows))]
@@ -81,6 +82,7 @@ mod signature_zip;
 mod snapshot;
 mod storage;
 mod surface_checkpoint;
+mod surface_repair;
 mod surface_scan;
 mod surface_tasks;
 mod table_archive;
@@ -90,7 +92,7 @@ mod table_restore;
 mod table_restore_task;
 mod table_tasks;
 mod used_space;
-pub(crate) static OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static OPERATION: operation_gate::OperationGate = operation_gate::OperationGate::new();
 
 #[tauri::command]
 fn backup_password_status() -> Option<backup_secrets::Prompt> {
@@ -685,10 +687,26 @@ async fn image_inflate_grain(bytes: Vec<u8>, expected: usize) -> Result<Vec<u8>,
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-async fn surface_start(request: surface_tasks::Request) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || surface_tasks::start(request))
+async fn surface_start(requests: Vec<surface_tasks::Request>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || surface_tasks::start(requests))
         .await
         .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn surface_prepare_repair(scan_id: String) -> Result<surface_repair::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || surface_repair::prepare(scan_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn surface_execute_repair(token: String) -> Result<surface_repair::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || surface_repair::execute(token))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn surface_discard_repair(token: String) {
+    surface_repair::discard(token);
 }
 #[tauri::command]
 async fn lost_partition_start(request: lost_partition_tasks::Request) -> Result<String, String> {
@@ -731,15 +749,15 @@ async fn lost_partition_browse_btrfs(
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn surface_status() -> Option<surface_tasks::Snapshot> {
-    surface_tasks::status()
+fn surface_status(target: partitions::Target) -> surface_tasks::Status {
+    surface_tasks::status(&target)
 }
 #[tauri::command]
 fn surface_pause(id: String) -> Result<(), String> {
     surface_tasks::pause(id)
 }
 #[tauri::command]
-async fn surface_resume(id: String, read_timeout_seconds: Option<u16>) -> Result<String, String> {
+async fn surface_resume(id: String, read_timeout_seconds: Option<u16>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || surface_tasks::resume(id, read_timeout_seconds))
         .await
         .map_err(|e| e.to_string())?
@@ -909,7 +927,9 @@ fn main() {
     tauri::Builder::default()
         .on_window_event(|_, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if data_tasks::status().is_some_and(|j| j.state == "running") {
+                if OPERATION.surface_scanning()
+                    || data_tasks::status().is_some_and(|j| j.state == "running")
+                {
                     api.prevent_close();
                 }
             }
@@ -956,6 +976,9 @@ fn main() {
             sector_execute_write,
             sector_discard_write,
             surface_start,
+            surface_prepare_repair,
+            surface_execute_repair,
+            surface_discard_repair,
             lost_partition_start,
             lost_partition_status,
             lost_partition_browse,

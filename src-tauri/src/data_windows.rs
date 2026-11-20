@@ -649,7 +649,7 @@ pub fn benchmark_device(r: &Resolved, write: bool) -> Result<File, String> {
 fn verify_unbuffered_alignment(
     r: &Resolved,
     mut control: impl FnMut(u32, &[u8], &mut [u8]) -> Result<usize, String>,
-) -> Result<(), String> {
+) -> Result<(u64, u64), String> {
     let mut query = [0u8; 12];
     query[..4].copy_from_slice(&6u32.to_le_bytes()); // StorageAccessAlignmentProperty
     let mut descriptor = [0u8; 28];
@@ -663,7 +663,12 @@ fn verify_unbuffered_alignment(
     {
         return Err("无法确认无缓存读取的设备对齐要求。".into());
     }
-    Ok(())
+    let offset = u32::from_le_bytes(descriptor[24..28].try_into().unwrap());
+    Ok((u64::from(physical), u64::from(offset)))
+}
+
+pub(crate) fn physical_alignment(r: &Resolved, file: &File) -> Result<(u64, u64), String> {
+    verify_unbuffered_alignment(r, |code, input, output| control(file, code, input, output))
 }
 struct LockIdentity {
     disk: String,

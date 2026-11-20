@@ -1,9 +1,16 @@
 use crate::{
     data_tasks::{self, Selection},
+    partitions::Target,
     surface_scan::{self, Options, Report},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, MutexGuard, OnceLock,
+};
+
+const MAX_RETAINED: usize = 64;
+const MAX_ACTIVE: usize = 8;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -28,213 +35,369 @@ pub struct Snapshot {
     pub loaded: bool,
     pub resume_count: u32,
 }
-#[derive(Clone)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Overview {
+    target: String,
+    state: String,
+    checked_bytes: u64,
+    size: u64,
+    pausing: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    scans: Vec<Overview>,
+    selected: Option<Snapshot>,
+    repair_available: bool,
+}
+struct Active {
+    number: u32,
+    pause: Arc<AtomicBool>,
+}
 struct Saved {
     source: Selection,
     snapshot: Snapshot,
-    pause_requested: bool,
+    active: Option<Active>,
+    repair_used: bool,
 }
-fn state() -> std::sync::MutexGuard<'static, Option<Saved>> {
-    static STATE: OnceLock<Mutex<Option<Saved>>> = OnceLock::new();
+impl Saved {
+    fn can_repair(&self) -> bool {
+        self.active.is_none()
+            && !self.repair_used
+            && !self.snapshot.loaded
+            && self.snapshot.report.state == "completed"
+            && self
+                .snapshot
+                .report
+                .refinement
+                .as_ref()
+                .is_some_and(|refinement| {
+                    refinement.ranges.iter().any(|range| {
+                        range.resolution == surface_scan::FailureResolution::SectorReadFailed
+                    })
+                })
+    }
+}
+#[derive(Default)]
+struct Scans(Vec<Saved>);
+impl Scans {
+    fn result(&self, id: &str) -> Option<&Saved> {
+        self.0.iter().find(|s| s.snapshot.id == id)
+    }
+
+    fn stopped(&self, id: &str) -> Result<(Selection, Snapshot), String> {
+        let saved = self
+            .result(id)
+            .filter(|s| s.active.is_none())
+            .ok_or("检测进度不存在或仍在运行。")?;
+        Ok((saved.source.clone(), saved.snapshot.clone()))
+    }
+
+    fn worker(&mut self, id: &str) -> Option<&mut Saved> {
+        self.0
+            .iter_mut()
+            .find(|s| s.snapshot.id == id && s.active.is_some())
+    }
+
+    fn pause(&mut self, id: &str) -> Result<(), String> {
+        let active = self
+            .worker(id)
+            .and_then(|saved| saved.active.as_ref())
+            .ok_or("检测已结束。")?;
+        active.pause.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn can_start(&self, numbers: &[(u32, &Target)]) -> Result<(), String> {
+        let mut count = numbers.len();
+        for entry in &self.0 {
+            if let Some(active) = &entry.active {
+                if numbers.iter().any(|(number, target)| {
+                    *number == active.number || **target == entry.source.target
+                }) {
+                    return Err("同一块磁盘已有检测正在运行。".into());
+                }
+                count += 1;
+            }
+        }
+        if count > MAX_ACTIVE {
+            return Err("最多同时检测 8 块磁盘。".into());
+        }
+        Ok(())
+    }
+
+    fn insert(&mut self, saved: Saved) {
+        self.0.retain(|s| s.source.target != saved.source.target);
+        self.0.push(saved);
+        if self.0.len() > MAX_RETAINED {
+            // Insertion is limited to eight active jobs. The oldest stopped
+            // entry can always be replaced without touching an active reader.
+            if let Some(oldest) = self.0.iter().position(|s| s.active.is_none()) {
+                self.0.remove(oldest);
+            }
+        }
+    }
+}
+fn state() -> MutexGuard<'static, Scans> {
+    static STATE: OnceLock<Mutex<Scans>> = OnceLock::new();
     STATE
-        .get_or_init(|| Mutex::new(None))
+        .get_or_init(|| Mutex::new(Scans::default()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|err| err.into_inner())
 }
-pub fn status() -> Option<Snapshot> {
-    state().as_ref().map(|s| s.snapshot.clone())
+pub fn status(target: &Target) -> Status {
+    let scans = state();
+    let selected = scans.0.iter().find(|s| &s.source.target == target);
+    Status {
+        scans: scans
+            .0
+            .iter()
+            .map(|saved| Overview {
+                target: saved.snapshot.target.clone(),
+                state: saved.snapshot.report.state.clone(),
+                checked_bytes: saved.snapshot.report.checked_bytes,
+                size: saved.snapshot.report.size,
+                pausing: saved
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.pause.load(Ordering::Relaxed)),
+            })
+            .collect(),
+        selected: selected.map(|s| s.snapshot.clone()),
+        repair_available: selected.is_some_and(Saved::can_repair),
+    }
 }
-pub fn start(request: Request) -> Result<String, String> {
-    launch(request, None)
+
+#[cfg(windows)]
+pub(crate) fn repair_source(id: &str) -> Result<(Selection, Snapshot), String> {
+    let scans = state();
+    if !scans.result(id).is_some_and(Saved::can_repair) {
+        return Err("请先完成本次坏道检测并细查读取失败的扇区。".into());
+    }
+    scans.stopped(id)
 }
-fn launch(request: Request, resume: Option<Snapshot>) -> Result<String, String> {
-    surface_scan::validate_read_timeout(request.read_timeout_seconds)?;
+
+#[cfg(windows)]
+pub(crate) fn mark_repair_used(id: &str) {
+    if let Some(saved) = state().0.iter_mut().find(|s| s.snapshot.id == id) {
+        saved.repair_used = true;
+    }
+}
+pub fn start(requests: Vec<Request>) -> Result<(), String> {
+    launch(requests, None)
+}
+fn validate_requests(requests: &[Request]) -> Result<(), String> {
+    if requests.is_empty() || requests.len() > MAX_ACTIVE {
+        return Err("请选择 1 到 8 块磁盘进行检测。".into());
+    }
+    for (index, request) in requests.iter().enumerate() {
+        if requests[..index]
+            .iter()
+            .any(|other| request.source.target == other.source.target)
+        {
+            return Err("每块磁盘只能添加一次。".into());
+        }
+        surface_scan::validate_read_timeout(request.read_timeout_seconds)?;
+    }
+    Ok(())
+}
+fn launch(requests: Vec<Request>, resume: Option<Snapshot>) -> Result<(), String> {
+    validate_requests(&requests)?;
     #[cfg(not(windows))]
     {
-        let _ = (request, resume);
+        let _ = resume;
         Err("坏道检测当前仅支持 Windows。".into())
     }
     #[cfg(windows)]
     {
         use crate::data_windows as platform;
-        // Reserving the global job prevents parallel jobs and window closure.
-        let guard = crate::OPERATION
-            .try_lock()
-            .map_err(|_| "另一项磁盘操作正在运行。")?;
-        let resolved = platform::resolve(&request.source, false, false)?;
-        let range = request.options.range(
-            resolved.offset,
-            resolved.size,
-            resolved.disk.logical_sector_size.ok_or("扇区大小缺失")?,
-        )?;
-        let previous = if let Some(snapshot) = resume {
-            if state()
-                .as_ref()
-                .is_none_or(|saved| saved.snapshot.id != snapshot.id)
-            {
+        let permit = || {
+            crate::OPERATION
+                .try_surface_scan()
+                .map_err(|_| "另一项磁盘操作正在运行。")
+        };
+        let _batch = permit()?;
+        data_tasks::ensure_idle()?;
+
+        // Validate every requested scope before publishing or reading any job.
+        let mut prepared: Vec<(Request, Saved)> = Vec::with_capacity(requests.len());
+        for request in requests {
+            let resolved = platform::resolve(&request.source, false, false)?;
+            let number = resolved.disk.number;
+            if prepared.iter().any(|(_, saved)| {
+                saved
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.number == number)
+            }) {
+                return Err("每块磁盘只能添加一次。".into());
+            }
+            let range = request.options.range(
+                resolved.offset,
+                resolved.size,
+                resolved.disk.logical_sector_size.ok_or("扇区大小缺失")?,
+            )?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut snapshot = if let Some(previous) = &resume {
+                if previous.target != request.source.target.0
+                    || previous.report.range() != range
+                    || previous.options != request.options
+                    || previous.report.refinement.is_some() != request.refine_failures
+                    || previous.report.checked_bytes == range.size
+                    || previous.report.state == "running"
+                    || previous.resume_count >= 1024
+                {
+                    return Err("原检测范围已变化或检测已完成，不能续扫。".into());
+                }
+                previous.report.validate()?;
+                let mut snapshot = previous.clone();
+                snapshot.id = id;
+                snapshot.source = resolved.label;
+                snapshot.resume_count += 1;
+                snapshot
+            } else {
+                Snapshot {
+                    id,
+                    target: request.source.target.0.clone(),
+                    source: resolved.label,
+                    started_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    report: Report::new(range, request.refine_failures),
+                    partition: request.source.partition,
+                    options: request.options,
+                    loaded: false,
+                    resume_count: 0,
+                }
+            };
+            snapshot.report.state = "running".into();
+            snapshot.report.message.clear();
+            snapshot.report.read_timeout_seconds = request.read_timeout_seconds;
+            snapshot.report.timed_out_read = None;
+            let saved = Saved {
+                source: request.source.clone(),
+                snapshot,
+                active: Some(Active {
+                    number,
+                    pause: Arc::new(AtomicBool::new(false)),
+                }),
+                repair_used: false,
+            };
+            prepared.push((request, saved));
+        }
+
+        let mut scans = state();
+        if let Some(previous) = &resume {
+            if scans.result(&previous.id).is_none() {
                 return Err("检测进度已被替换，请重新选择。".into());
             }
-            if snapshot.report.range() != range
-                || snapshot.options != request.options
-                || snapshot.report.refinement.is_some() != request.refine_failures
-                || snapshot.report.checked_bytes == range.size
-                || snapshot.report.state == "running"
-                || snapshot.resume_count >= 1024
-            {
-                return Err("原检测范围已变化或检测已完成，不能续扫。".into());
+        }
+        let numbers = prepared
+            .iter()
+            .map(|(_, saved)| (saved.active.as_ref().unwrap().number, &saved.source.target))
+            .collect::<Vec<_>>();
+        scans.can_start(&numbers)?;
+        let mut ready = Vec::with_capacity(prepared.len());
+        for (request, saved) in prepared {
+            let id = saved.snapshot.id.clone();
+            let active = saved.active.as_ref().unwrap();
+            let number = active.number;
+            let pause = active.pause.clone();
+            let report = saved.snapshot.report.clone();
+            let reader_permit = permit()?;
+            std::thread::Builder::new()
+                .spawn(move || {
+                    let _permit = reader_permit;
+                    // Registration is committed only after every worker exists.
+                    // The startup lock prevents any early physical reads.
+                    let registered = state().worker(&id).is_some();
+                    if registered {
+                        run(id, request, number, report, pause);
+                    }
+                })
+                .map_err(|err| format!("无法启动检测线程：{err}"))?;
+            ready.push(saved);
+        }
+        for saved in ready {
+            scans.insert(saved);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn run(id: String, request: Request, number: u32, initial: Report, pause: Arc<AtomicBool>) {
+    use crate::data_windows as platform;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<Report, String> {
+            if pause.load(Ordering::Relaxed) {
+                let mut report = initial;
+                report.state = "canceled".into();
+                return Ok(report);
             }
-            snapshot.report.validate()?;
-            Some(snapshot)
-        } else {
-            None
-        };
-        let (id, cancel) = data_tasks::start("坏道检测")?;
-        let mut snapshot = if let Some(mut previous) = previous {
-            previous.id = id.clone();
-            previous.source = resolved.label;
-            previous.resume_count += 1;
-            previous
-        } else {
-            Snapshot {
-                id: id.clone(),
-                target: request.source.target.0.clone(),
-                source: resolved.label,
-                started_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                report: Report::new(range, request.refine_failures),
-                partition: request.source.partition,
-                options: request.options,
-                loaded: false,
-                resume_count: 0,
+            let resolved = platform::resolve(&request.source, false, false)?;
+            let range = request.options.range(
+                resolved.offset,
+                resolved.size,
+                resolved.disk.logical_sector_size.ok_or("扇区大小缺失")?,
+            )?;
+            if resolved.disk.number != number || initial.range() != range {
+                return Err("检测范围已变化，请重新选择。".into());
             }
-        };
-        snapshot.report.state = "running".into();
-        snapshot.report.message.clear();
-        snapshot.report.read_timeout_seconds = request.read_timeout_seconds;
-        snapshot.report.timed_out_read = None;
-        let initial_report = snapshot.report.clone();
-        *state() = Some(Saved {
-            source: request.source.clone(),
-            snapshot,
-            pause_requested: false,
-        });
-        drop(guard);
-        let work_id = id.clone();
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                || -> Result<Report, String> {
-                    let _guard = crate::OPERATION
-                        .try_lock()
-                        .map_err(|_| "另一项磁盘操作正在运行。")?;
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err("检测已取消，尚未读取设备。".into());
+            let (mut reader, limit) =
+                platform::surface_scan_device(&resolved, request.read_timeout_seconds)?;
+            let mut report =
+                surface_scan::continue_scan(&mut reader, initial, limit, &pause, |report| {
+                    if let Some(saved) = state().worker(&id) {
+                        saved.snapshot.report = report.clone();
+                        saved.snapshot.report.state = "running".into();
+                        saved.snapshot.report.message.clear();
                     }
-                    let resolved = platform::resolve(&request.source, false, false)?;
-                    let range = request.options.range(
-                        resolved.offset,
-                        resolved.size,
-                        resolved.disk.logical_sector_size.ok_or("扇区大小缺失")?,
-                    )?;
-                    if initial_report.range() != range {
-                        return Err("检测范围已变化，请重新选择。".into());
-                    }
-                    let (mut reader, limit) =
-                        platform::surface_scan_device(&resolved, request.read_timeout_seconds)?;
-                    let mut report = surface_scan::continue_scan(
-                        &mut reader,
-                        initial_report,
-                        limit,
-                        &cancel,
-                        |report| {
-                            data_tasks::record_progress(
-                                &work_id,
-                                "逐块读取",
-                                report.checked_bytes,
-                                report.size,
-                            );
-                            if let Some(saved) = &mut *state() {
-                                saved.snapshot.report = report.clone();
-                                saved.snapshot.report.state = "running".into();
-                                saved.snapshot.report.message.clear();
-                            }
-                        },
-                    )?;
-                    // Same selection/layout must still resolve. A changed layout cannot
-                    // be presented as a successful verification of the new target.
-                    if report.state == "completed" {
-                        if let Err(e) = platform::resolve(&request.source, false, false) {
-                            report.state = "failed".into();
-                            report.message = format!(
-                                "检测结束时设备或布局核对失败：{e}。结果仅对应已读取范围。"
-                            );
-                        }
-                    }
-                    Ok(report)
-                },
-            ))
-            .unwrap_or_else(|_| Err("检测线程异常结束；源磁盘未写入。".into()));
-            let mut saved = state();
-            let pause_requested = saved.as_ref().unwrap().pause_requested;
-            let report = &mut saved.as_mut().unwrap().snapshot.report;
-            match result {
-                Ok(final_report) => *report = final_report,
-                Err(e) => {
-                    report.state = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        "canceled"
-                    } else {
-                        "failed"
-                    }
-                    .into();
-                    report.message = e;
+                })?;
+            drop(reader);
+            if report.state == "completed" {
+                if let Err(err) = platform::resolve(&request.source, false, false) {
+                    report.state = "failed".into();
+                    report.message =
+                        format!("检测结束时设备或布局核对失败：{err}。结果仅对应已读取范围。");
                 }
             }
-            if pause_requested && report.state == "canceled" {
-                report.state = "paused".into();
-                report.message = "检测已暂停，可以保存进度或从未完成位置继续。".into();
-            }
-            let outcome = if report.state == "completed" {
-                Ok((report.message.clone(), None))
-            } else {
-                Err(report.message.clone())
-            };
-            data_tasks::finish(&work_id, outcome);
-            drop(saved);
-        });
-        Ok(id)
-    }
-}
-fn stopped(id: &str) -> Result<Saved, String> {
-    if data_tasks::status().is_some_and(|j| j.state == "running") {
-        return Err("请先暂停当前检测或等待任务结束。".into());
-    }
-    state()
-        .as_ref()
-        .filter(|s| s.snapshot.id == id && s.snapshot.report.state != "running")
-        .cloned()
-        .ok_or("检测进度不存在或仍在运行。".into())
-}
-pub fn pause(id: String) -> Result<(), String> {
-    let mut state = state();
-    let saved = state
-        .as_mut()
-        .filter(|s| s.snapshot.id == id && s.snapshot.report.state == "running")
-        .ok_or("检测已结束。")?;
-    data_tasks::cancel(id)?;
-    saved.pause_requested = true;
-    Ok(())
-}
-pub fn resume(id: String, read_timeout_seconds: Option<u16>) -> Result<String, String> {
-    let saved = stopped(&id)?;
-    launch(
-        Request {
-            source: saved.source,
-            options: saved.snapshot.options,
-            refine_failures: saved.snapshot.report.refinement.is_some(),
-            read_timeout_seconds,
+            Ok(report)
         },
-        Some(saved.snapshot),
+    ))
+    .unwrap_or_else(|_| Err("检测线程异常结束；源磁盘未写入。".into()));
+    if let Some(saved) = state().worker(&id) {
+        let report = &mut saved.snapshot.report;
+        match result {
+            Ok(final_report) => *report = final_report,
+            Err(err) => {
+                report.state = "failed".into();
+                report.message = err;
+            }
+        }
+        if pause.load(Ordering::Relaxed) && report.state == "canceled" {
+            report.state = "paused".into();
+            report.message = "检测已暂停，可以保存进度或从未完成位置继续。".into();
+        }
+        saved.active = None;
+    }
+}
+
+pub fn pause(id: String) -> Result<(), String> {
+    state().pause(&id)
+}
+pub fn resume(id: String, read_timeout_seconds: Option<u16>) -> Result<(), String> {
+    let (source, snapshot) = state().stopped(&id)?;
+    launch(
+        vec![Request {
+            source,
+            options: snapshot.options,
+            refine_failures: snapshot.report.refinement.is_some(),
+            read_timeout_seconds,
+        }],
+        Some(snapshot),
     )
 }
 pub fn save_progress(id: String) -> Result<Option<String>, String> {
@@ -248,14 +411,15 @@ pub fn save_progress(id: String) -> Result<Option<String>, String> {
         let _guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "另一项磁盘操作正在运行。")?;
-        let saved = stopped(&id)?;
+        data_tasks::ensure_idle()?;
+        let (source, snapshot) = state().stopped(&id)?;
         let bytes = crate::surface_checkpoint::encode(crate::surface_checkpoint::Progress {
-            source: saved.source.clone(),
-            options: saved.snapshot.options,
-            snapshot: saved.snapshot,
+            source: source.clone(),
+            options: snapshot.options,
+            snapshot,
         })?;
         save_file(
-            &saved.source,
+            &source,
             &bytes,
             "保存检测进度到另一块磁盘",
             "dsscan",
@@ -263,7 +427,7 @@ pub fn save_progress(id: String) -> Result<Option<String>, String> {
         )
     }
 }
-pub fn load_progress(target: crate::partitions::Target) -> Result<Option<Snapshot>, String> {
+pub fn load_progress(target: Target) -> Result<Option<Snapshot>, String> {
     #[cfg(not(windows))]
     {
         let _ = target;
@@ -282,9 +446,7 @@ pub fn load_progress(target: crate::partitions::Target) -> Result<Option<Snapsho
         let _guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "另一项磁盘操作正在运行。")?;
-        if data_tasks::status().is_some_and(|j| j.state == "running") {
-            return Err("请先暂停当前检测。".into());
-        }
+        data_tasks::ensure_idle()?;
         let Some(path) = rfd::FileDialog::new()
             .set_title(crate::native_locale::text("加载当前磁盘的检测进度"))
             .add_filter(
@@ -328,16 +490,14 @@ pub fn load_progress(target: crate::partitions::Target) -> Result<Option<Snapsho
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         let mut progress = crate::surface_checkpoint::decode(&bytes, &target)?;
-        if data_tasks::status().is_some_and(|j| j.state == "running") {
-            return Err("另一项任务已经开始，未加载进度。".into());
-        }
         progress.snapshot.id = uuid::Uuid::new_v4().to_string();
         progress.snapshot.loaded = true;
         let snapshot = progress.snapshot.clone();
-        *state() = Some(Saved {
+        state().insert(Saved {
             source: progress.source,
             snapshot: progress.snapshot,
-            pause_requested: false,
+            active: None,
+            repair_used: false,
         });
         Ok(Some(snapshot))
     }
@@ -353,20 +513,8 @@ pub fn export(id: String) -> Result<Option<String>, String> {
         let _guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "请等待当前任务完成。")?;
-        if data_tasks::status().is_some_and(|j| j.state == "running") {
-            return Err("请先结束检测再保存报告。".into());
-        }
-        let (source, snapshot) = {
-            let s = state();
-            let saved = s
-                .as_ref()
-                .filter(|s| s.snapshot.id == id)
-                .ok_or("检测结果已失效。")?;
-            if saved.snapshot.report.state == "running" {
-                return Err("检测仍在进行。".into());
-            }
-            (saved.source.clone(), saved.snapshot.clone())
-        };
+        data_tasks::ensure_idle()?;
+        let (source, snapshot) = state().stopped(&id)?;
         let limitations = if snapshot.report.refinement.is_some() {
             "耗时分布和失败块统计基于初读，平均速度包含细查时间。细查在初读失败的块内读取更小的范围，记录单扇区读取失败及预算用尽时尚未定位的范围。结果反映该次读取，不能判定介质健康。未锁定在线卷，内容可能变化。"
         } else {
@@ -449,4 +597,81 @@ fn save_file(
             .trim_start_matches("\\\\?\\")
             .to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(target: &str) -> Request {
+        Request {
+            source: Selection {
+                target: Target(target.into()),
+                layout_key: "layout".into(),
+                partition: None,
+            },
+            options: Options {
+                start_sector: 0,
+                sector_count: 4096,
+            },
+            refine_failures: false,
+            read_timeout_seconds: None,
+        }
+    }
+
+    fn saved(id: &str, target: &str, number: u32) -> Saved {
+        let request = request(target);
+        let range = request.options.range(0, 2097152, 512).unwrap();
+        Saved {
+            source: request.source,
+            snapshot: Snapshot {
+                id: id.into(),
+                target: target.into(),
+                source: target.into(),
+                started_at: 0,
+                report: Report::new(range, false),
+                partition: None,
+                options: request.options,
+                loaded: false,
+                resume_count: 0,
+            },
+            active: Some(Active {
+                number,
+                pause: Arc::new(AtomicBool::new(false)),
+            }),
+            repair_used: false,
+        }
+    }
+
+    #[test]
+    fn duplicate_targets_rejected_even_when_they_select_different_partitions() {
+        let mut second = request("disk-a");
+        second.source.partition = Some(2);
+        assert!(validate_requests(&[request("disk-a"), second]).is_err());
+        assert!(validate_requests(&[request("disk-a"), request("disk-b")]).is_ok());
+    }
+
+    #[test]
+    fn pausing_and_replacing_one_disk_leaves_other_reader_intact() {
+        let mut scans = Scans::default();
+        scans.insert(saved("first", "disk-a", 1));
+        scans.insert(saved("second", "disk-b", 2));
+        assert!(scans.can_start(&[(2, &Target("disk-c".into()))]).is_err());
+        assert!(scans.can_start(&[(3, &Target("disk-a".into()))]).is_err());
+        assert!(scans.can_start(&[(3, &Target("disk-c".into()))]).is_ok());
+        assert!(scans.stopped("first").is_err());
+        scans.pause("first").unwrap();
+        for (id, expected) in [("first", true), ("second", false)] {
+            let active = scans.result(id).unwrap().active.as_ref().unwrap();
+            assert_eq!(active.pause.load(Ordering::Relaxed), expected);
+        }
+        let first = scans.worker("first").unwrap();
+        first.active = None;
+        first.snapshot.report.state = "paused".into();
+        assert!(scans.stopped("first").is_ok());
+        scans.insert(saved("resumed", "disk-a", 1));
+        assert!(scans.pause("first").is_err());
+        assert!(scans.worker("second").is_some());
+        assert!(scans.worker("resumed").is_some());
+    }
 }

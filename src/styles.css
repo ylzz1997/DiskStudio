@@ -33,6 +33,93 @@
   --radius: 9px;
   font-size: 14px;
 }
+.surface-targets {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.surface-target-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+.surface-target-toolbar select {
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+}
+.surface-target-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 6px;
+  max-height: 152px;
+  margin: 10px 0 0;
+  padding: 1px 2px;
+  overflow-y: auto;
+  list-style: none;
+}
+.surface-target-list li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.surface-target-list li.selected {
+  border-color: var(--accent);
+}
+.surface-target-select {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.surface-target-select span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.surface-target-remove {
+  flex: none;
+  margin-right: 3px;
+}
+.surface-targets .surface-note {
+  margin-bottom: 0;
+}
+.surface-repair-sectors {
+  max-height: 220px;
+  overflow: auto;
+  margin: 12px 0;
+}
+.surface-repair-sectors table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.surface-repair-sectors th,
+.surface-repair-sectors td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.surface-repair-result {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
 .surface-options {
   display: grid;
   grid-template-columns: 1.6fr 1fr 1fr;

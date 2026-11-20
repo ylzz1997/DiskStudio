@@ -47,6 +47,7 @@ const payloadIso = path.join(root, 'media/diskstudio-tools.iso');
 const port = 49365;
 // One logical 4Kn sector in the known Test A data extent. blkdebug uses 512 B units.
 const sectorCopyFaultLba = 2232323;
+const surfaceRepairFaultLba = 3932163;
 const faultBaseNode = 'test_a_sector_copy_source';
 
 function readToolsManifest(name) {
@@ -151,10 +152,11 @@ function checkIso(filename) {
   if (magic.toString() !== 'CD001') throw new Error(`Invalid ISO 9660 media: ${filename}`);
 }
 
-export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, fixture } = {}) {
+export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, repairFault = false, fixture } = {}) {
   if (!['whpx', 'tcg'].includes(accelerator)) throw new Error('Unsupported accelerator');
   if (fourKn && (setup || network)) throw new Error('4Kn acceptance uses the installed offline guest');
   if (fixture && (setup || network)) throw new Error('Dedicated fixtures use the installed offline guest');
+  if (repairFault && !sectorFault) throw new Error('Repair fault requires the fixed sector fault profile');
   if (sectorFault && (!fourKn || accelerator !== 'tcg')) throw new Error('Sector fault fixture requires 4Kn TCG');
   validateFixtureProfile(fourKn, sectorFault, fixture);
   const args = [
@@ -181,8 +183,15 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
     }
     const backend = sectorFault && disk.id === 'test_a' ? {
       driver: 'blkdebug', 'node-name': disk.id, image: { ...image, 'node-name': faultBaseNode },
-      'inject-error': [{ event: 'none', iotype: 'read', sector: sectorCopyFaultLba * 8, errno: 5 }],
+      'inject-error': [{ event: 'none', iotype: 'read', sector: (repairFault ? surfaceRepairFaultLba : sectorCopyFaultLba) * 8, errno: 5 }],
     } : image;
+    if (repairFault && disk.id === 'test_a') {
+      // Replace the injected read error after a Test A guest write completes.
+      // The verifier checks the exact sector, preserved neighbors, and QMP bytes.
+      backend['inject-error'].push({
+        event: 'pwritev_done', iotype: 'read', sector: surfaceRepairFaultLba * 8, errno: 0,
+      });
+    }
     args.push('-blockdev', JSON.stringify(backend));
     args.push('-device', disk.bus === 'nvme'
       ? `nvme,drive=${disk.id},serial=${disk.serial}${fourKn ? `,id=${disk.controller},logical_block_size=4096,physical_block_size=4096` : ''}`
@@ -467,7 +476,8 @@ async function preflight() {
     await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
     console.log('PASS: DiskStudio-Test identity, three isolated QCOW2 disks, capacities and read-only tools CD verified.');
     if (state.fourKn) console.log('Both disposable NVMe controllers expose 4096-byte logical and physical sectors.');
-    if (state.sectorFault) console.log(`Read fault restricted to Test A 4Kn LBA ${sectorCopyFaultLba}.`);
+    if (state.sectorFault) console.log(`Read fault restricted to Test A 4Kn LBA ${state.repairFault ? surfaceRepairFaultLba : sectorCopyFaultLba}.`);
+    if (state.repairFault) console.log('Surface repair fixture clears the injected error on Test A write completion.');
     if (stateFixture(state) === 'whole-clone') console.log('Whole-disk cloning uses its independent A/B pair.');
     if (stateFixture(state) === 'btrfs-clone') console.log('Btrfs capacity cloning uses its independent A/B pair.');
     if (stateFixture(state) === 'btrfs-exact-clone') console.log('Btrfs same-size cloning uses its independent 4Kn A/B pair.');
@@ -541,40 +551,60 @@ async function moveStopWindow(enabled) {
   } finally { qmp.close(); }
 }
 
-async function surfaceReadWindow(enabled) {
+async function surfaceReadWindow(enabled, parallel = false) {
   const state = readState();
-  if (!isAlive(state?.pid) || state.fourKn !== true || state.network !== false || stateFixture(state)) {
-    throw new Error('Start the isolated standard 4Kn test profile first');
+  const fourKn = state?.fourKn === true;
+  if (!isAlive(state?.pid) || fourKn === parallel || state.network !== false || stateFixture(state)) {
+    throw new Error(parallel ? 'Start the isolated standard 512-byte test profile first' : 'Start the isolated standard 4Kn test profile first');
   }
   const fault = state.sectorFault === true;
+  const targets = new Map([['test_a', 128 * 1024]]);
+  if (parallel) targets.set('test_b', 2 * 1024 ** 2);
+  const fields = ['bps', 'bps_rd', 'bps_wr', 'iops', 'iops_rd', 'iops_wr', 'bps_max', 'bps_rd_max', 'bps_wr_max', 'iops_max', 'iops_rd_max', 'iops_wr_max', 'iops_size'];
+  const rateOf = (device, field) => Number(device?.inserted?.[field] ?? 0);
   const qmp = await connectQmp();
   try {
     const before = await qmp.execute('query-block');
-    await validateProfile(qmp, before, true, fault);
-    const source = before.find(b => b.inserted?.['node-name'] === 'test_a');
-    if (source.qdev !== fourKnDisks.find(d => d.id === 'test_a').controller && !source.qdev?.startsWith('/machine/')) {
-      throw new Error('Unable to bind the read limit to Test A');
-    }
-    const limit = 128 * 1024;
-    const fields = ['bps', 'bps_rd', 'bps_wr', 'iops', 'iops_rd', 'iops_wr', 'bps_max', 'bps_rd_max', 'bps_wr_max', 'iops_max', 'iops_rd_max', 'iops_wr_max', 'iops_size'];
-    const rateOf = (device, field) => Number(device?.inserted?.[field] ?? 0);
-    if (fields.some(field => ![0, field === 'bps_rd' ? limit : 0].includes(rateOf(source, field)))) {
-      throw new Error('Test A has another throttle configured');
-    }
-    const rate = enabled ? limit : 0;
-    await qmp.execute('block_set_io_throttle', {
-      id: source.qdev, group: 'diskstudio-test-a-surface',
-      bps: 0, bps_rd: rate, bps_wr: 0, iops: 0, iops_rd: 0, iops_wr: 0,
+    await validateProfile(qmp, before, fourKn, fault);
+    const sources = [...targets].map(([id, limit]) => {
+      const source = before.find(b => b.inserted?.['node-name'] === id);
+      const disk = (fourKn ? fourKnDisks : disks).find(d => d.id === id);
+      if (!source.qdev || (source.qdev !== disk.controller && !source.qdev.startsWith('/machine/'))) {
+        throw new Error(`Unable to bind the read limit to ${id}`);
+      }
+      return { id, limit, source, disk };
     });
-    const after = await qmp.execute('query-block');
-    await validateProfile(qmp, after, true, fault);
-    for (const previous of before.filter(b => b.inserted)) {
-      const current = after.find(b => b.inserted?.['node-name'] === previous.inserted['node-name']);
-      if (fields.some(field => rateOf(current, field) !== (previous === source && field === 'bps_rd' ? rate : rateOf(previous, field)))) {
-        throw new Error('Test A read limit could not be verified');
+    for (const { id, limit, source, disk } of sources) {
+      if (!fourKn) {
+        const controller = source.qdev.replace(/\/(?:nvme-ns[^/]*|legacy-ns)$/, '');
+        for (const [property, expected] of [['serial', disk.serial], ['logical_block_size', 512], ['physical_block_size', 512]]) {
+          if (await qmp.execute('qom-get', { path: controller, property }) !== expected) {
+            throw new Error(`Unexpected ${id} ${property}`);
+          }
+        }
+      }
+      if (fields.some(field => ![0, field === 'bps_rd' ? limit : 0].includes(rateOf(source, field)))) {
+        throw new Error(`${id} has another throttle configured`);
       }
     }
-    console.log(enabled ? 'Test A read limit: 128 KiB/s.' : 'Test A read limit cleared.');
+    for (const { id, limit, source } of sources) {
+      await qmp.execute('block_set_io_throttle', {
+        id: source.qdev, group: `diskstudio-${id}-surface`,
+        bps: 0, bps_rd: enabled ? limit : 0, bps_wr: 0, iops: 0, iops_rd: 0, iops_wr: 0,
+      });
+    }
+    const after = await qmp.execute('query-block');
+    await validateProfile(qmp, after, fourKn, fault);
+    for (const previous of before.filter(b => b.inserted)) {
+      const id = previous.inserted['node-name'];
+      const current = after.find(b => b.inserted?.['node-name'] === id);
+      if (fields.some(field => rateOf(current, field) !== (targets.has(id) && field === 'bps_rd' ? (enabled ? targets.get(id) : 0) : rateOf(previous, field)))) {
+        throw new Error('Surface scan read limits could not be verified');
+      }
+    }
+    console.log(enabled
+      ? (parallel ? 'Test A/B read limits: 128 KiB/s and 2 MiB/s.' : 'Test A read limit: 128 KiB/s.')
+      : (parallel ? 'Test A/B read limits cleared.' : 'Test A read limit cleared.'));
   } finally { qmp.close(); }
 }
 
@@ -588,11 +618,12 @@ async function main() {
     if (args.length !== 1 || !['2', '3'].includes(args[0])) throw new Error('Choose the 4Kn fixture sector count of 2 or 3');
     return fixtureNumberKeys(args[0]);
   }
-  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear', 'surface-read-window', 'surface-read-clear'].includes(command)) {
+  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear', 'surface-read-window', 'surface-read-clear', 'surface-parallel-window', 'surface-parallel-clear'].includes(command)) {
     console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
     console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
     console.log('start --4kn --sector-copy-fault: inject a read error at one fixed Test A LBA');
+    console.log('start --4kn --surface-repair-fault: inject the fixed Test A read error until a guest write completes');
     console.log('start --4kn --whole-clone: use the dedicated whole-disk clone fixtures');
     console.log('start --4kn --btrfs-clone: use the dedicated Btrfs resize clone fixtures');
     console.log('start --4kn --mixed-clone: use the dedicated mixed-filesystem clone fixtures');
@@ -607,10 +638,11 @@ async function main() {
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     console.log('surface-read-window|surface-read-clear: set or clear the fixed Test A 4Kn read limit');
+    console.log('surface-parallel-window|surface-parallel-clear: set or clear the fixed Test A/B 512-byte read limits');
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];
-  if (command === 'start') allowed.push('--4kn', '--sector-copy-fault', ...fixtureProfiles.map(name => `--${name}`));
+  if (command === 'start') allowed.push('--4kn', '--sector-copy-fault', '--surface-repair-fault', ...fixtureProfiles.map(name => `--${name}`));
   if (!['checkpoint', 'restore'].includes(command) && args.some(a => !allowed.includes(a))) throw new Error('Unsupported option; arbitrary paths/QEMU arguments are not accepted');
   if (['checkpoint', 'restore'].includes(command) && args.length !== 1) throw new Error('Provide exactly one checkpoint name');
   if (args.includes('--tcg') && args.includes('--whpx')) throw new Error('Choose only one accelerator');
@@ -619,6 +651,7 @@ async function main() {
   if (command === 'io-stats') return ioStats();
   if (['move-stop-window', 'move-stop-clear'].includes(command)) return moveStopWindow(command === 'move-stop-window');
   if (['surface-read-window', 'surface-read-clear'].includes(command)) return surfaceReadWindow(command === 'surface-read-window');
+  if (['surface-parallel-window', 'surface-parallel-clear'].includes(command)) return surfaceReadWindow(command === 'surface-parallel-window', true);
   if (['pause-vm', 'resume-vm'].includes(command)) {
     const state = readState();
     if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
@@ -653,7 +686,9 @@ async function main() {
     if (command === 'restore') return restore(args[0]);
     const fixtures = fixtureProfiles.filter(name => args.includes(`--${name}`));
     if (fixtures.length > 1) throw new Error('Choose one clone fixture');
-    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn'), sectorFault: args.includes('--sector-copy-fault'), fixture: fixtures[0] };
+    const repairFault = args.includes('--surface-repair-fault');
+    if (repairFault && args.includes('--sector-copy-fault')) throw new Error('Choose one sector fault mode');
+    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn'), sectorFault: repairFault || args.includes('--sector-copy-fault'), repairFault, fixture: fixtures[0] };
     if (options.accelerator === 'whpx') console.warn('Experimental WHPX: Windows startup/reset was unreliable on this host. Guest reboot exits QEMU; use start again.');
     if (command === 'smoke') {
       assertStopped();

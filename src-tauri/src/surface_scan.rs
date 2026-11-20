@@ -440,7 +440,7 @@ impl Report {
 #[repr(align(4096))]
 struct AlignedBlock([u8; BLOCK as usize]);
 
-fn media_error(code: i32) -> bool {
+pub(crate) fn media_error(code: i32) -> bool {
     matches!(code, 23 | 27 | 1117)
 }
 

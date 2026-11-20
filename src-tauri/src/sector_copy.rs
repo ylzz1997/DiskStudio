@@ -1129,7 +1129,7 @@ pub(crate) mod platform {
     }
 
     fn launch_resumed_file(
-        guard: std::sync::MutexGuard<'_, ()>,
+        guard: crate::operation_gate::OperationGuard<'_>,
         request: Request,
         before: Resolved,
         planned: Range,
@@ -1146,7 +1146,7 @@ pub(crate) mod platform {
     }
 
     fn launch_file(
-        guard: std::sync::MutexGuard<'_, ()>,
+        guard: crate::operation_gate::OperationGuard<'_>,
         request: Request,
         before: Resolved,
         planned: Range,
@@ -1166,7 +1166,7 @@ pub(crate) mod platform {
     }
 
     pub(super) fn launch_file_job(
-        guard: std::sync::MutexGuard<'_, ()>,
+        guard: crate::operation_gate::OperationGuard<'_>,
         done: u64,
         size: u64,
         run: impl FnOnce(&str, &AtomicBool) -> Result<(), String> + Send + 'static,
