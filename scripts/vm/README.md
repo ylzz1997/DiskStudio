@@ -662,6 +662,12 @@ Prepare 复核此前的 Btrfs 还原验收记录及 B 上的三个已还原分�
 
 正式构建 `f129a432…` 通过上述验收。两个导出的原始大小为 184 字节与 1,024 字节，清单摘要均与独立样本相符。B 保持脱机，准备完成后无新增写入。英文界面的进度加载状态和提示均显示英文。记录见 `.vm/signature-formats-status.json`。
 
+### 媒体签名恢复验收
+
+`tests/fixtures/signature-bmff-faststart.mp4`、`signature-bmff-tail.mov`、`signature-ogg-multiplex.ogg` 和 `signature-ogg-opus.ogg` 由 FFmpeg 的 `testsrc2` 和 `sine` 合成，分别覆盖 H.264/AAC、MPEG-4、Theora/Vorbis 和 Opus。四份文件都通过 FFmpeg 完整解码。桌面后端的合成测试核对断点、精确候选范围和完整提取，另测试损坏的媒体块索引、页校验、重复页和源内容变化。
+
+原生验收使用 `node scripts/vm/lab.mjs start --4kn --signature-media`。用 `build-guest-checks.ps1 -SignatureMedia` 构建验收入口，再用 `make-tools-iso.ps1 -Live -GuestTools Signature-Media-4Kn-Prepare.exe,Signature-Media-4Kn-Verify.exe` 制作只读工具光盘。先通过 QMP 预检，在来宾核对完整 A/B 标识、几何及正式载荷摘要，再运行一次 `Signature-Media-4Kn-Prepare.exe`。夹具将四个样本放进 B 的 FAT12 对齐空闲簇并保持 B 脱机。仅选择 MP4、MOV 和 Ogg，同时启用空闲簇与逻辑扇区对齐。核对四个结果、保存和加载 `Scope.dsrecover`，播放完整的 H.264/AAC MP4，按平面布局导出到 A 的 `DS-SignatureMedia` 文件夹。运行 `Signature-Media-4Kn-Verify.exe` 核对进度及全部导出摘要、源范围、相邻扇区和 GPT。正式构建 `1cea3f4c…` 在原生界面找到四个样本，保存并加载了进度，播放了 MP4，并跨盘导出全部 20,424 字节。来宾独立复核确认四份输出与原样本逐字节一致，清单 SHA-256 匹配，源范围、相邻扇区、A/B 的 GPT 与系统盘布局均一致。夹具准备完成后，源盘 B 的写入计数在扫描、导出和复核期间保持不变。构建、载荷与测试记录见 `.vm/signature-media-status.json`。
+
 ### 整盘按文件克隆验收
 
 混合克隆使用 `node scripts/vm/lab.mjs start --4kn --mixed-clone` 的独立 A/B 盘。以匹配的正式程序运行 `build-btrfs.ps1 -MixedClone`，再通过 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Mixed-File-Clone-4Kn-Prepare.exe` 和 `Mixed-File-Clone-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。两块盘为空 RAW 时，Prepare 在 A 生成 384 MiB Btrfs、32 MiB 不透明数据和 96 MiB NTFS 分区，保留 A 联机及 B 空白。整盘按文件克隆的原生预览应显示 Btrfs 384→192 MiB 并搬移 80 MiB 条带、32 MiB 分区原位置逐扇区复制及 NTFS 96→48 MiB 按文件重建。独立 Verify 核对两盘布局、Btrfs 的 51 个文件和卷 UUID、NTFS 样本、32 MiB 全范围、清零区和整盘 SHA-256。对已经完整准备且 B 仍为空 RAW 的夹具，可用匹配载荷中的 `Mixed-File-Clone-4Kn-Resume.exe` 复核源内容并建立验收基线。
@@ -760,7 +766,7 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 
 固定镜像的 18 个扇区均在两个成员上独立找到。Rust 按逻辑空间的直接分配记录重组逻辑字节，双盘、仅 A 或仅 B 的摘要均匹配 Windows 的 `e2c8ccaa…`。测试覆盖跨分配边界的连续读取、拒绝分配范围不完整的固定镜像、默认拒绝缺副本，并拒绝内容分歧的副本。用 `seed-storage-spaces-cache-complete-4kn` 和 `storage-spaces-cache-complete-4kn` 采集完整缓存目录，把提取结果设为 `DISKSTUDIO_SPACES_CACHE_CAPTURE` 后再运行同一测试。验收用的固定镜像缓存副本一致，1024 个槽位只有空槽和不含用户数据的控制记录。实现逐槽核对缓存目录，拒绝待回放或无法识别的记录。证据分别在 `.vm/storage-spaces-witness-1795275425251/manifest.json` 和 `.vm/storage-spaces-cache-complete-1795277977962/manifest.json`。
 
-精简空间可用 `seed-storage-spaces-witness-full-4kn` 和 `storage-spaces-witness-full-4kn` 在 Ubuntu 只读扫描两个池成员分区。提取结果后，将 `DISKSTUDIO_SPACES_FULL_CAPTURE` 指向捕获目录，执行 `cargo test -p disk-core --test storage_spaces_capture windows_thin_markers_extend_beyond_direct_allocations -- --ignored`。完整扫描找到精简空间的全部 18 个校验扇区，汇总 SHA-256 与 Windows 的 `8956dc0a…` 一致。逻辑偏移从 512 MiB 起的 6 个扇区位于直接分配范围之外。用 `seed-storage-spaces-internal-4kn` 和 `storage-spaces-internal-4kn` 采集内部记录，将提取路径设为 `DISKSTUDIO_SPACES_INTERNAL_CAPTURE`，运行同一测试文件的 `windows_thin_checkpoint_describes_cached_witnesses`。测试核对 `SPCACHE`、`SPSLOT`、`SPCHECK` 的归属及 CRC，并从检查点定位全部 6 个额外扇区。精简映射与缓存回放尚未实现。证据在 `.vm/storage-spaces-witness-full-1795275716269/manifest.json` 和 `.vm/storage-spaces-internal-1795277104183/manifest.json`。
+精简空间可用 `seed-storage-spaces-witness-full-4kn` 和 `storage-spaces-witness-full-4kn` 在 Ubuntu 只读扫描两个池成员分区。提取结果后，将 `DISKSTUDIO_SPACES_FULL_CAPTURE` 指向捕获目录，执行 `cargo test -p disk-core --test storage_spaces_capture windows_thin_markers_extend_beyond_direct_allocations -- --ignored`。完整扫描找到精简空间的全部 18 个校验扇区，汇总 SHA-256 与 Windows 的 `8956dc0a…` 一致。逻辑偏移从 512 MiB 起的 6 个扇区位于直接分配范围之外。用 `seed-storage-spaces-internal-4kn` 和 `storage-spaces-internal-4kn` 采集内部记录，将提取路径设为 `DISKSTUDIO_SPACES_INTERNAL_CAPTURE`，运行同一测试文件的 `windows_thin_checkpoint_describes_cached_witnesses`。生产读取器按 64 KiB 条带读取直接分配，核对 `SPCACHE`、`SPSLOT`、`SPCHECK` 的归属、CRC、序列和完整事务后覆盖检查点中的缓存页。重组后的 18 个扇区摘要与 Windows 一致。测试覆盖跨分配与缓存边界读取，以及拒绝缺列或损坏的检查点。证据在 `.vm/storage-spaces-witness-full-1795275716269/manifest.json` 和 `.vm/storage-spaces-internal-1795277104183/manifest.json`。
 
 ### 存储空间成员镜像文件恢复
 
@@ -769,3 +775,7 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 运行同一光盘上的正式可执行文件。在「文件恢复」中选择「浏览存储空间成员镜像」，选中 `S:\spaces` 中的两个镜像，打开固定镜像并读取现存文件与删除候选。浏览、预览后导出到 `R:\out`。在来宾执行 `stage-storage-spaces-recovery.ps1 -Verify`，独立复核两份成员镜像的夹具区段、两个导出文件的字节数及 SHA-256。
 
 2026-11-22 的正式构建 `3e8f0d28…` 在隔离 4Kn Windows 来宾打开 1 GiB 固定镜像并识别 64 MiB FAT16 分区，预览 `WITNESS.BIN`，将它和删除候选 `_RASED.BIN` 从 A 盘镜像导出到 B 盘。两个文件分别为 8,233 字节和 5,709 字节，程序回读和来宾独立复核的完整 SHA-256 均匹配。成员镜像夹具区段复核通过，确认到完成期间 A 盘无新增写入。导出清单记录了两个文件的时间或属性保留提示。证据在 `.vm/storage-spaces-recovery-status.json`。
+
+精简空间采用独立镜像和导出目录。执行 `node scripts/vm/build-storage-spaces-recovery-fixture.mjs <完整校验扇区捕获目录名> <精简缓存捕获目录名> --thin`。生成的 FAT16 夹具中，现存文件跨越直接分配和缓存，删除候选只存于缓存。把 `.vm/storage-spaces-recovery-thin.json` 的绝对路径设为 `DISKSTUDIO_SPACES_THIN_FIXTURE`，执行 `cargo test -p diskstudio --bin diskstudio thin_storage_space_browses_and_extracts_through_a_checkpoint -- --ignored`，用桌面后端核对分区表、文件分类和两份文件摘要。
+
+原生验收复用固定镜像场景中已准备好的 A/B 卷。挂载 `make-tools-iso.ps1 -Live -StorageSpacesThinRecovery` 生成的只读光盘并重新核对 QMP、来宾身份和载荷摘要。在来宾执行一次 `stage-storage-spaces-recovery.ps1 -Thin`。从 `S:\spaces-thin` 打开两个成员镜像，选择精简空间并读取 FAT16 分区，将文件导出到 `R:\thin-out`，再用 `stage-storage-spaces-recovery.ps1 -Thin -Verify` 独立复核。脚本验证两卷身份后只创建测试文件和目录。正式构建 `1cea3f4c…` 通过该流程。预览仅存于缓存的删除候选，将 8,233 字节的现存文件和 3,601 字节的删除候选从 A 跨盘导出到 B。两份完整 SHA-256 通过来宾独立核对，两个源成员区段一致，导出期间 A 无新增写入。证据见 `.vm/storage-spaces-thin-native-status.json`。

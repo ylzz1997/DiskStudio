@@ -5,13 +5,17 @@ use std::{
     io::{self, ErrorKind, Read, Seek, SeekFrom},
 };
 
+#[path = "storage_spaces_thin.rs"]
+mod thin;
+
 const SLAB: u64 = 256 * MIB;
 const RESERVED_SLABS: u64 = 2;
 const UNSUPPORTED: &str = "存储空间的逻辑布局超出当前重组支持范围。";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SpaceLayout {
-    capacity: u64,
+pub(super) enum SpaceLayout {
+    FixedMirror(u64),
+    ThinStripe(u64),
 }
 
 fn bytes(record: &mut Record<'_>, expected: &[u8]) -> Result<(), &'static str> {
@@ -21,27 +25,87 @@ fn bytes(record: &mut Record<'_>, expected: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-// The witnessed fixed two-copy, single-column layout has direct allocations
-// on the named space. Internal allocation objects describe different ranges.
 pub(super) fn space(mut record: Record<'_>) -> Result<SpaceLayout, &'static str> {
     bytes(&mut record, &[0, 0, 2])?;
     let capacity = record.number()?;
-    if capacity == 0 || capacity % 4096 != 0 || record.number()? != 0 {
+    if capacity == 0 || capacity % 4096 != 0 {
         return Err(UNSUPPORTED);
     }
-    bytes(&mut record, &[2])?;
-    if record.number()? != capacity {
-        return Err(UNSUPPORTED);
-    }
-    bytes(&mut record, &[0, 1, 0, 1, 0, 0, 2, 1, 1, 1, 2, 1, 1, 1, 1])?;
-    if !(12..=20).contains(&record.take(1)?[0]) || record.number()? != capacity {
-        return Err(UNSUPPORTED);
-    }
+    let layout = match record.number()? {
+        0 => {
+            fixed_mirror_fields(&mut record, capacity)?;
+            SpaceLayout::FixedMirror(capacity)
+        }
+        3 => {
+            bytes(&mut record, &[1])?;
+            if record.number()? != SLAB || capacity % (128 * 1024) != 0 {
+                return Err(UNSUPPORTED);
+            }
+            bytes(&mut record, &[0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 2, 16])?;
+            if record.number()? != capacity {
+                return Err(UNSUPPORTED);
+            }
+            SpaceLayout::ThinStripe(capacity)
+        }
+        _ => return Err(UNSUPPORTED),
+    };
     bytes(&mut record, &[0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0])?;
     if !record.0.is_empty() {
         return Err(UNSUPPORTED);
     }
-    Ok(SpaceLayout { capacity })
+    Ok(layout)
+}
+
+fn fixed_mirror_fields(record: &mut Record<'_>, capacity: u64) -> Result<(), &'static str> {
+    bytes(record, &[2])?;
+    if record.number()? != capacity {
+        return Err(UNSUPPORTED);
+    }
+    bytes(record, &[0, 1, 0, 1, 0, 0, 2, 1, 1, 1, 2, 1, 1, 1, 1])?;
+    if !(12..=20).contains(&record.take(1)?[0]) || record.number()? != capacity {
+        return Err(UNSUPPORTED);
+    }
+    Ok(())
+}
+
+pub(super) fn thin_cache_space(mut record: Record<'_>) -> Result<(u64, u64), &'static str> {
+    bytes(&mut record, &[0, 1, 11])?;
+    let capacity = record.number()?;
+    bytes(&mut record, &[1, 4, 2])?;
+    if record.number()? != SLAB {
+        return Err(UNSUPPORTED);
+    }
+    bytes(&mut record, &[2, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 2, 16])?;
+    if record.number()? != capacity {
+        return Err(UNSUPPORTED);
+    }
+    bytes(&mut record, &[0, 0, 0, 0, 1, 1])?;
+    let space_id = record.number()?;
+    if record.0 != [0; 4] || capacity == 0 || capacity % (2 * SLAB) != 0 || space_id == 0 {
+        return Err(UNSUPPORTED);
+    }
+    Ok((space_id, capacity))
+}
+
+pub(super) fn thin_cache_owner(mut record: Record<'_>) -> Result<(u64, u64), &'static str> {
+    bytes(&mut record, &[0, 0, 0, 0, 0, 0, 7, 2])?;
+    if record.number()? != SLAB {
+        return Err(UNSUPPORTED);
+    }
+    bytes(
+        &mut record,
+        &[2, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 2, 16, 0],
+    )?;
+    let cache_space = record.number()?;
+    bytes(
+        &mut record,
+        &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )?;
+    let size = u32::from_be_bytes(record.take(4)?.try_into().unwrap());
+    if !record.0.is_empty() || cache_space == 0 || size == 0 || u64::from(size) % (2 * SLAB) != 0 {
+        return Err(UNSUPPORTED);
+    }
+    Ok((cache_space, u64::from(size)))
 }
 
 /// Readers must represent stable images or verified offline member handles.
@@ -61,9 +125,30 @@ struct Run {
     copies: Vec<CopyLocation>,
 }
 
-struct Plan {
+struct MirrorPlan {
     capacity: u64,
     runs: BTreeMap<u64, Run>,
+}
+
+enum Plan {
+    Mirror(MirrorPlan),
+    Thin(thin::ThinPlan),
+}
+
+impl Plan {
+    fn capacity(&self) -> u64 {
+        match self {
+            Self::Mirror(plan) => plan.capacity,
+            Self::Thin(plan) => plan.capacity(),
+        }
+    }
+
+    fn degraded(&self) -> bool {
+        match self {
+            Self::Mirror(plan) => plan.runs.values().any(|run| run.copies.len() < 2),
+            Self::Thin(_) => false,
+        }
+    }
 }
 
 impl<R: Read + Seek> Group<R> {
@@ -92,7 +177,6 @@ impl<R: Read + Seek> Group<R> {
         allow_degraded: bool,
     ) -> Result<SpaceReader<&mut R>, String> {
         let plan = self.plan(space_id, allow_degraded)?;
-        self.check_cache(space_id, &plan)?;
         Ok(SpaceReader {
             readers: self.readers.iter_mut().collect(),
             plan,
@@ -103,9 +187,7 @@ impl<R: Read + Seek> Group<R> {
 
     pub fn availability(&mut self, space_id: u64) -> Result<(u64, bool), String> {
         let plan = self.plan(space_id, true)?;
-        self.check_cache(space_id, &plan)?;
-        let degraded = plan.runs.values().any(|run| run.copies.len() < 2);
-        Ok((plan.capacity, degraded))
+        Ok((plan.capacity(), plan.degraded()))
     }
 
     pub fn member_layouts(&self) -> Vec<(super::Guid, [u8; 32])> {
@@ -121,7 +203,6 @@ impl<R: Read + Seek> Group<R> {
         allow_degraded: bool,
     ) -> Result<SpaceReader<R>, String> {
         let plan = self.plan(space_id, allow_degraded)?;
-        self.check_cache(space_id, &plan)?;
         Ok(SpaceReader {
             readers: self.readers,
             plan,
@@ -130,14 +211,38 @@ impl<R: Read + Seek> Group<R> {
         })
     }
 
-    fn plan(&self, space_id: u64, allow_degraded: bool) -> Result<Plan, String> {
+    fn plan(&mut self, space_id: u64, allow_degraded: bool) -> Result<Plan, String> {
+        let layout = self
+            .metadata()
+            .spaces
+            .get(&space_id)
+            .filter(|space| !space.name.is_empty())
+            .and_then(|space| space.layout)
+            .ok_or(UNSUPPORTED)?;
+        match layout {
+            SpaceLayout::FixedMirror(capacity) => {
+                let plan = self.mirror_plan(space_id, capacity, allow_degraded)?;
+                self.check_cache(space_id, &plan)?;
+                Ok(Plan::Mirror(plan))
+            }
+            SpaceLayout::ThinStripe(capacity) => {
+                thin::ThinPlan::open(self, space_id, capacity).map(Plan::Thin)
+            }
+        }
+    }
+
+    fn mirror_plan(
+        &self,
+        space_id: u64,
+        capacity: u64,
+        allow_degraded: bool,
+    ) -> Result<MirrorPlan, String> {
         let metadata = self.metadata();
         let root = metadata
             .spaces
             .get(&space_id)
             .filter(|space| !space.name.is_empty())
             .ok_or(UNSUPPORTED)?;
-        let layout = root.layout.ok_or(UNSUPPORTED)?;
         let slots: BTreeMap<_, _> = self
             .members
             .iter()
@@ -164,7 +269,7 @@ impl<R: Read + Seek> Group<R> {
             }
         }
 
-        let last_slab = layout.capacity.div_ceil(SLAB);
+        let last_slab = capacity.div_ceil(SLAB);
         let mut next = 0;
         let mut runs = BTreeMap::new();
         let mut physical = Vec::new();
@@ -220,13 +325,10 @@ impl<R: Read + Seek> Group<R> {
         {
             return Err(INVALID.into());
         }
-        Ok(Plan {
-            capacity: layout.capacity,
-            runs,
-        })
+        Ok(MirrorPlan { capacity, runs })
     }
 
-    fn check_cache(&mut self, space_id: u64, plan: &Plan) -> Result<(), String> {
+    fn check_cache(&mut self, space_id: u64, plan: &MirrorPlan) -> Result<(), String> {
         let metadata = &self.members[0];
         let space = metadata.spaces.get(&space_id).ok_or(INVALID)?;
         let group = space.group;
@@ -305,7 +407,7 @@ impl<R> Seek for SpaceReader<R> {
         self.position = match position {
             SeekFrom::Start(position) => Some(position),
             SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
-            SeekFrom::End(offset) => self.plan.capacity.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.plan.capacity().checked_add_signed(offset),
         }
         .ok_or(ErrorKind::InvalidInput)?;
         Ok(self.position)
@@ -314,11 +416,18 @@ impl<R> Seek for SpaceReader<R> {
 
 impl<R: Read + Seek> Read for SpaceReader<R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() || self.position >= self.plan.capacity {
+        if output.is_empty() || self.position >= self.plan.capacity() {
             return Ok(0);
         }
-        let (start, run) = self
-            .plan
+        let plan = match &self.plan {
+            Plan::Mirror(plan) => plan,
+            Plan::Thin(plan) => {
+                let count = plan.read(&mut self.readers, self.position, output)?;
+                self.position += count as u64;
+                return Ok(count);
+            }
+        };
+        let (start, run) = plan
             .runs
             .range(..=self.position)
             .next_back()
@@ -329,7 +438,7 @@ impl<R: Read + Seek> Read for SpaceReader<R> {
             .checked_sub(within)
             .filter(|&count| count != 0)
             .ok_or(ErrorKind::InvalidData)?;
-        let count = (self.plan.capacity - self.position)
+        let count = (plan.capacity - self.position)
             .min(remaining)
             .min(MIB)
             .min(output.len() as u64) as usize;

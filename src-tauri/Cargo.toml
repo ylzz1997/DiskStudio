@@ -28,6 +28,9 @@ regex = { version = "1", default-features = false, features = ["std", "perf"] }
 rfd = { version = "0.15", default-features = false }
 rust_xlsxwriter = { version = "0.103.0", default-features = false }
 
+[dev-dependencies]
+base64 = "0.23.1"
+
 [target.'cfg(windows)'.dependencies]
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"

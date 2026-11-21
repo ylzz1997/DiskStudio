@@ -46,6 +46,7 @@ import {
   defaultSignatureSettings,
   signatureRequest,
   previewImageMime,
+  previewMediaMime,
 } from "./signatureModel";
 import {
   progressMatches,
@@ -200,7 +201,14 @@ export function DataTools({
   const [plan, setPlan] = useState<DataPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [previewUrl, setPreviewUrl] = useState("");
+  const [previewBlob, setPreviewBlob] = useState<{
+    source: Preview;
+    url: string;
+    mime: string;
+  } | null>(null);
+  const [previewError, setPreviewError] = useState<Preview | null>(null);
+  const displayedPreview =
+    previewBlob?.source === preview && previewError !== preview ? previewBlob : null;
   const [lvmOpen, setLvmOpen] = useState(false);
   const [lvmView, setLvmView] = useState<LvmView | null>(null);
   const [dynamicDiskOpen, setDynamicDiskOpen] = useState(false);
@@ -449,16 +457,19 @@ export function DataTools({
     fixedPartition,
   ]);
   useEffect(() => {
-    if (!preview || preview.truncated || !previewImageMime(preview.name)) {
-      setPreviewUrl("");
+    setPreviewError(null);
+    const mime = preview &&
+      (previewImageMime(preview.name) ?? previewMediaMime(preview.name));
+    if (!preview || preview.truncated || !mime) {
+      setPreviewBlob(null);
       return;
     }
     const url = URL.createObjectURL(
       new Blob([new Uint8Array(preview.bytes)], {
-        type: previewImageMime(preview.name)!,
+        type: mime,
       }),
     );
-    setPreviewUrl(url);
+    setPreviewBlob({ source: preview, url, mime });
     return () => URL.revokeObjectURL(url);
   }, [preview]);
   async function action(work: () => Promise<void>) {
@@ -2148,12 +2159,33 @@ export function DataTools({
               "预览只读取候选内容，不执行文件。显示正常也不能保证整个文件完整。",
             )}
           </Hint>
-          {previewUrl ? (
-            <img
-              className="recovery-preview-image"
-              src={previewUrl}
-              alt={preview.name}
-            />
+          {displayedPreview ? (
+            displayedPreview.mime.startsWith("image/") ? (
+              <img
+                className="recovery-preview-image"
+                src={displayedPreview.url}
+                alt={preview.name}
+                onError={() => setPreviewError(preview)}
+              />
+            ) : displayedPreview.mime.startsWith("audio/") ? (
+              <audio
+                className="recovery-preview-media"
+                src={displayedPreview.url}
+                controls
+                preload="metadata"
+                aria-label={preview.name}
+                onError={() => setPreviewError(preview)}
+              />
+            ) : (
+              <video
+                className="recovery-preview-media"
+                src={displayedPreview.url}
+                controls
+                preload="metadata"
+                aria-label={preview.name}
+                onError={() => setPreviewError(preview)}
+              />
+            )
           ) : (
             <pre className="recovery-preview-text">
               {/\.(txt|md|csv|json|log|xml|ini|yml|yaml)$/i.test(preview.name)
@@ -2166,13 +2198,15 @@ export function DataTools({
                     .join("")}
             </pre>
           )}
-          <p className="data-footnote">
-            {preview.truncated
-              ? t("仅显示文件开头，内容已截断。")
-              : t(
-                  "非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。",
-                )}
-          </p>
+          {!displayedPreview && (
+            <p className="data-footnote">
+              {preview.truncated
+                ? t("仅显示文件开头，内容已截断。")
+                : previewError === preview
+                  ? catalogText("无法显示媒体预览，请导出后使用兼容软件核对。")
+                  : t("非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。")}
+            </p>
+          )}
         </Dialog>
       )}
     </div>

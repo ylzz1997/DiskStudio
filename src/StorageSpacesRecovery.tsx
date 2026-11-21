@@ -19,7 +19,7 @@ export function StorageSpacesOpenDialog({ view, busy, error, onClose, onOpen }: 
   onClose: () => void;
   onOpen: (space: string, sector: number, allowDegraded: boolean) => void;
 }) {
-  const { t } = useLocale();
+  const { t, catalogText } = useLocale();
   const [choice, setChoice] = useState(() => view.spaces.find((space) => space.size !== null)?.id ?? "");
   const [sector, setSector] = useState(4096);
   const [allowDegraded, setAllowDegraded] = useState(false);
@@ -56,7 +56,7 @@ export function StorageSpacesOpenDialog({ view, busy, error, onClose, onOpen }: 
           {t("允许缺少镜像副本时降级读取")}
         </label>
       )}
-      <FormError message={error} />
+      <FormError message={catalogText(error)} />
       <div className="dialog-actions">
         <button className="button" disabled={busy} onClick={onClose}>{t("取消")}</button>
         <button className="button primary" disabled={busy || !openable} onClick={() => onOpen(choice, sector, allowDegraded)}>

@@ -4,14 +4,16 @@ import { createHash } from 'node:crypto';
 import { crc32, gunzipSync } from 'node:zlib';
 import { root, safePath } from './lab.mjs';
 
-const [captureName, cacheName] = process.argv.slice(2);
-if (process.argv.length !== 4 || !/^storage-spaces-witness(?:-full)?-\d+$/.test(captureName ?? '') ||
-    !/^storage-spaces-cache-complete-\d+$/.test(cacheName ?? '')) {
+const [captureName, cacheName, option] = process.argv.slice(2);
+const thin = option === '--thin';
+const cacheNamePattern = thin ? /^storage-spaces-internal-\d+$/ : /^storage-spaces-cache-complete-\d+$/;
+if ((!thin && process.argv.length !== 4) || (thin && process.argv.length !== 5) ||
+    !/^storage-spaces-witness(?:-full)?-\d+$/.test(captureName ?? '') || !cacheNamePattern.test(cacheName ?? '')) {
   throw Error('Expected the verified Storage Spaces witness and complete cache capture directories');
 }
 const capture = safePath(path.join(root, captureName));
 const cacheCapture = safePath(path.join(root, cacheName));
-const output = safePath(path.join(root, 'storage-spaces-recovery-clean-cache.json'), root, false);
+const output = safePath(path.join(root, thin ? 'storage-spaces-recovery-thin.json' : 'storage-spaces-recovery-clean-cache.json'), root, false);
 const manifest = JSON.parse(fs.readFileSync(safePath(path.join(capture, 'manifest.json')), 'utf8'));
 const cacheManifest = JSON.parse(fs.readFileSync(safePath(path.join(cacheCapture, 'manifest.json')), 'utf8'));
 if (!Array.isArray(manifest) || manifest.length !== 2 || manifest[0].slot !== 'A' || manifest[1].slot !== 'B') {
@@ -20,13 +22,14 @@ if (!Array.isArray(manifest) || manifest.length !== 2 || manifest[0].slot !== 'A
 const sector = 4096;
 const mib = 1024 ** 2;
 const logicalSize = 1024 * mib;
-const partitionStart = mib;
+const partitionStart = thin ? 512 * mib - 23 * sector : mib;
 const partitionSize = 64 * mib;
 const lastLba = logicalSize / sector - 1;
+const backupTable = lastLba - (thin ? 31 : 4);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
 // A FAT16 partition with one existing file and one unallocated deleted file.
-const fat = Buffer.alloc(32 * sector);
+const fat = Buffer.alloc((thin ? 48 : 32) * sector);
 fat.set([0xeb, 0x3c, 0x90]);
 fat.write('MSDOS5.0', 3, 'ascii');
 fat.writeUInt16LE(sector, 11);
@@ -65,7 +68,7 @@ function file(name, cluster, length, index, deleted) {
   return { bytes: length, sha256: sha256(bytes) };
 }
 const existing = file('WITNESS BIN', 2, 8233, 0, false);
-const deleted = file('ERASED  BIN', 6, 5709, 1, true);
+const deleted = thin ? file('ERASED  BIN', 20, 3601, 1, true) : file('ERASED  BIN', 6, 5709, 1, true);
 
 const table = Buffer.alloc(4 * sector);
 Buffer.from('a2a0d0ebe5b9334487c068b6b72699c7', 'hex').copy(table);
@@ -78,7 +81,7 @@ function header(own, other, entries) {
   data.write('EFI PART');
   data.writeUInt32LE(0x10000, 8);
   data.writeUInt32LE(92, 12);
-  for (const [offset, value] of [[24, own], [32, other], [40, 6], [48, lastLba - 5], [72, entries]]) {
+  for (const [offset, value] of [[24, own], [32, other], [40, 6], [48, backupTable - 1], [72, entries]]) {
     data.writeBigUInt64LE(BigInt(value), offset);
   }
   Buffer.from('7396a4ccc207014098248224d399af41', 'hex').copy(data, 56);
@@ -96,8 +99,47 @@ mbr.writeUInt16LE(0xaa55, 510);
 const extents = [
   [0, Buffer.concat([mbr, header(1, lastLba, 2), table])],
   [partitionStart, fat],
-  [logicalSize - 5 * sector, Buffer.concat([table, header(lastLba, 1, lastLba - 4)])],
+  [backupTable * sector, table],
+  [lastLba * sector, header(lastLba, 1, backupTable)],
 ];
+
+function thinSegments(index, capture, witnesses) {
+  // The source uses B/A order for the direct stripes and A/B for the cache.
+  const interleave = 64 * 1024;
+  const directBase = 0xe1000000;
+  const cacheBase = 0xc1000000;
+  const markerOffset = index === 0 ? interleave : 0;
+  if (!witnesses.some(item => item.kind === 2 && item.logical === markerOffset && item.offset === directBase)) {
+    throw Error('Unexpected thin data column mapping');
+  }
+  if (capture.length !== 4096 * 1024) throw Error('Unexpected capture of thin cache metadata');
+  const cache = Buffer.from(capture.subarray(0, (0x480000 / 2)));
+  const segments = [];
+  for (const [base, bytes] of extents) {
+    for (let offset = 0; offset < bytes.length; offset += sector) {
+      const logical = base + offset;
+      const page = bytes.subarray(offset, offset + sector);
+      if (!page.some(byte => byte !== 0)) continue;
+      const column = Math.floor(logical / interleave) % 2;
+      if (logical < 512 * mib) {
+        if (column !== index) segments.push([directBase + Math.floor(logical / (2 * interleave)) * interleave + logical % interleave, page]);
+        continue;
+      }
+      // The captured checkpoint maps these pages to cache slots 0 and 3.
+      const window = Math.floor(logical / (2 * interleave)) * 2 * interleave;
+      const slot = window === 512 * mib ? 0 : window === logicalSize - 2 * interleave ? 3 : -1;
+      const mask = slot === 0 ? 0x00010001 : slot === 3 ? 0x8001001f : 0;
+      const pageNumber = (logical - window) / sector;
+      if (((mask >>> pageNumber) & 1) === 0) throw Error('The synthetic sector lacks a validated cache slot');
+      if (column === index) segments.push([cacheBase + cache.length + slot * interleave + logical % interleave, page]);
+    }
+  }
+  for (let offset = 0; offset < cache.length; offset += sector) {
+    const page = cache.subarray(offset, offset + sector);
+    if (page.some(byte => byte !== 0)) segments.push([cacheBase + offset, page]);
+  }
+  return segments;
+}
 
 const members = manifest.map((member, index) => {
   const { slot, capacity, regions, witnesses } = member;
@@ -119,25 +161,35 @@ const members = manifest.map((member, index) => {
   if (cached?.slot !== slot || cached.capacity !== capacity || cached.sector !== sector ||
       cached.regions.length !== regions.length || !cached.regions.every((region, n) =>
         region.sha256 === regions[n].sha256 && region.offset === regions[n].offset && region.bytes === regions[n].bytes) ||
-      cached.internal.length !== 5) throw Error(`Cache ${slot} has a different member snapshot`);
+      cached.internal.length !== (thin ? 2 : 5)) throw Error(`Cache ${slot} has a different member snapshot`);
   const cacheBytes = fs.readFileSync(safePath(path.join(cacheCapture, `${slot}.gz`)));
   if (sha256(cacheBytes) !== cached.gzipSha256 || cacheBytes.length !== cached.gzipBytes) throw Error('Cache archive mismatch');
-  const cacheDecoded = gunzipSync(cacheBytes, { maxOutputLength: 8 * mib });
-  const nonzero = [];
-  for (const region of cached.internal) {
+  const cacheDecoded = gunzipSync(cacheBytes, { maxOutputLength: 10 * mib });
+  const cacheRegions = cached.internal.map(region => {
     const contents = cacheDecoded.subarray(position, position + region.bytes);
     position += region.bytes;
     if (contents.length !== region.bytes || sha256(contents) !== region.sha256) throw Error('Cache region mismatch');
-    for (let offset = 0; offset < contents.length; offset += sector) {
-      const page = contents.subarray(offset, offset + sector);
-      if (page.some(byte => byte !== 0)) nonzero.push([region.offset + offset, page]);
+    return contents;
+  });
+  if (position !== cacheDecoded.length) throw Error('Extra bytes in cache capture');
+  if (thin) {
+    if (cached.internal[0].offset !== 0xc1000000) throw Error('Unexpected thin cache allocation');
+    segments.push(...thinSegments(index, cacheRegions[0], witnesses));
+  } else {
+    const nonzero = [];
+    for (const [index, contents] of cacheRegions.entries()) {
+      for (let offset = 0; offset < contents.length; offset += sector) {
+        const page = contents.subarray(offset, offset + sector);
+        if (page.some(byte => byte !== 0)) nonzero.push([cached.internal[index].offset + offset, page]);
+      }
     }
+    if (nonzero.map(([offset]) => offset).join() !== [0x31000000, 0x41000000, 0x41002000, 0x41003000].join()) {
+      throw Error('The complete cache capture differs from the clean mirror fixture');
+    }
+    segments.push(...nonzero);
+    for (const [offset, data] of extents.slice(0, 2)) segments.push([primary[0].offset + offset, data]);
+    segments.push([primary[0].offset + backupTable * sector, Buffer.concat(extents.slice(2).map(([, data]) => data))]);
   }
-  if (position !== cacheDecoded.length || nonzero.map(([offset]) => offset).join() !== [0x31000000, 0x41000000, 0x41002000, 0x41003000].join()) {
-    throw Error('The complete cache capture differs from the clean mirror fixture');
-  }
-  segments.push(...nonzero);
-  for (const [offset, data] of extents) segments.push([primary[0].offset + offset, data]);
   return {
     slot, capacity,
     segments: segments.sort((a, b) => a[0] - b[0]).map(([offset, data]) => ({ offset, sha256: sha256(data), data: data.toString('base64') })),

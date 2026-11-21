@@ -42,6 +42,149 @@ fn extract(browser: &Browser, part: u32, candidate: &Candidate) -> Vec<u8> {
     .unwrap();
     bytes
 }
+
+#[test]
+#[ignore = "requires the generated thin Storage Spaces recovery fixture"]
+fn thin_storage_space_browses_and_extracts_through_a_checkpoint() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use disk_core::storage_spaces::Group;
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeMap;
+
+    #[derive(Deserialize)]
+    struct Segment {
+        offset: u64,
+        data: String,
+        sha256: String,
+    }
+    #[derive(Deserialize)]
+    struct Member {
+        capacity: u64,
+        segments: Vec<Segment>,
+    }
+    #[derive(Deserialize)]
+    struct Expected {
+        bytes: u64,
+        sha256: String,
+    }
+    #[derive(Deserialize)]
+    struct Fixture {
+        members: [Member; 2],
+        existing: Expected,
+        deleted: Expected,
+    }
+
+    #[derive(Clone)]
+    struct SparseImage {
+        size: u64,
+        position: u64,
+        segments: Arc<BTreeMap<u64, Vec<u8>>>,
+    }
+    impl Read for SparseImage {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let mut length =
+                (output.len() as u64).min(self.size.saturating_sub(self.position)) as usize;
+            if let Some((&start, bytes)) = self.segments.range(..=self.position).next_back() {
+                if let Some(remaining) = bytes
+                    .get((self.position - start) as usize..)
+                    .filter(|s| !s.is_empty())
+                {
+                    length = length.min(remaining.len());
+                    output[..length].copy_from_slice(&remaining[..length]);
+                    self.position += length as u64;
+                    return Ok(length);
+                }
+            }
+            if let Some((&next, _)) = self.segments.range(self.position..).next() {
+                length = length.min((next - self.position) as usize);
+            }
+            output[..length].fill(0);
+            self.position += length as u64;
+            Ok(length)
+        }
+    }
+    impl Seek for SparseImage {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.position = match position {
+                SeekFrom::Start(position) => Some(position),
+                SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+                SeekFrom::End(offset) => self.size.checked_add_signed(offset),
+            }
+            .ok_or(io::ErrorKind::InvalidInput)?;
+            Ok(self.position)
+        }
+    }
+
+    struct Factory(Vec<SparseImage>);
+    impl ReaderFactory for Factory {
+        fn reader(&self) -> Result<Box<dyn Source>, String> {
+            let group = Group::open(self.0.clone(), 4096)?;
+            let id = group
+                .metadata()
+                .spaces
+                .values()
+                .find(|space| space.name == "DS-TEST-THIN")
+                .unwrap()
+                .id;
+            Ok(Box::new(group.into_reader(id, false)?))
+        }
+    }
+
+    let path = std::env::var_os("DISKSTUDIO_SPACES_THIN_FIXTURE")
+        .expect("set thin directory fixture JSON");
+    let fixture: Fixture = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let members = fixture
+        .members
+        .into_iter()
+        .map(|member| SparseImage {
+            size: member.capacity,
+            position: 0,
+            segments: Arc::new(
+                member
+                    .segments
+                    .into_iter()
+                    .map(|segment| {
+                        let bytes = STANDARD.decode(&segment.data).unwrap();
+                        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), segment.sha256);
+                        (segment.offset, bytes)
+                    })
+                    .collect(),
+            ),
+        })
+        .collect();
+    let browser = Browser::from_factory(
+        Arc::new(Factory(members)),
+        "storage-space.raw".into(),
+        Options {
+            kind: Kind::Disk,
+            sector: 4096,
+        },
+        "Storage Spaces".into(),
+        vec![],
+        String::new(),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(browser.info.partitions.len(), 1);
+    let part = &browser.info.partitions[0];
+    assert_eq!(part.start, 512 * MIB as u64 - 23 * 4096);
+    let (files, _) = scan(&browser, part.id, ScanMode::AllFiles);
+    assert_eq!(files.len(), 2);
+    for (name, is_deleted, expected) in [
+        ("WITNESS.BIN", false, fixture.existing),
+        ("_RASED.BIN", true, fixture.deleted),
+    ] {
+        let file = files
+            .iter()
+            .find(|candidate| candidate.name == name)
+            .unwrap();
+        assert_eq!(file.deleted, is_deleted);
+        assert_eq!(file.size, expected.bytes);
+        let bytes = extract(&browser, part.id, file);
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), expected.sha256);
+    }
+}
+
 fn assert_ntfs(browser: &Browser) {
     let (files, catalog) = scan(browser, 0, ScanMode::Existing);
     let file = files.iter().find(|c| c.name == "file-with-12345").unwrap();

@@ -5,6 +5,11 @@
   "核对 SQLite 主数据库容量和首页。WAL 单独保存，无法随此候选还原。": "Checks the SQLite main database extent and first page. Any write-ahead log is stored separately.",
   "连续 7z 候选。已核对起始头和后续头的 CRC，未解压或验证文件内容。": "Contiguous 7z candidate. Both header CRCs passed. Compressed file contents remain unverified.",
   "连续 SQLite 主数据库候选。已核对文件头和首页结构，未验证其余数据库页或恢复 WAL。": "Contiguous SQLite main database candidate. The file header and first-page layout passed. Other pages and the separate WAL remain unverified.",
+  "连续电影容器候选。已核对媒体块的采样表与数据范围，未解码音频或视频。": "Contiguous movie container candidate with verified sample tables and media ranges. Audio and video streams remain undecoded.",
+  "连续 Ogg 候选。已核对各流的页序列、包边界与 CRC，未解码音频或视频。": "Contiguous Ogg candidate with verified page sequences, packet boundaries and CRCs for each stream. Audio and video streams remain undecoded.",
+  "核对独立 MP4/MOV 的媒体块与采样表。": "Checks media ranges and sample tables in standalone MP4/MOV files.",
+  "核对连续 Ogg 页的序列、包边界与 CRC。": "Checks page sequence, packet boundaries and CRCs in contiguous Ogg streams.",
+  "无法显示媒体预览，请导出后使用兼容软件核对。": "This media could not be previewed. Export it and check it with a compatible application.",
   "保存的签名候选容量与文件头不一致。": "The saved signature candidate size disagrees with its header.",
   "候选内容已变化，请重新扫描。": "The candidate contents have changed. Run a new scan.",
   "签名候选检查预算越界。": "The signature validation budget is out of bounds.",
@@ -382,5 +387,6 @@
   "存储空间镜像副本内容不一致。": "The Storage Spaces mirror copies disagree.",
   "请选择 1–64 个 RAW/IMG 成员镜像。": "Select 1–64 RAW/IMG member images.",
   "请选择 RAW/IMG 成员镜像。": "Select RAW/IMG member images.",
-  "存储空间缓存含待回放的记录或无法确认，请先通过 Windows 核对此空间。": "Storage Spaces has pending cache records or unknown cache state. Check the space in Windows first."
+  "存储空间缓存含待回放的记录或无法确认，请先通过 Windows 核对此空间。": "Storage Spaces has pending cache records or unknown cache state. Check the space in Windows first.",
+  "缺少精简存储空间所需的条带成员。": "A stripe member required by this thin storage space is missing."
 }

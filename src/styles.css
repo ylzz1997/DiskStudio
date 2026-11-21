@@ -1474,6 +1474,12 @@
   margin: 20px auto;
   object-fit: contain;
 }
+.recovery-preview-media {
+  display: block;
+  width: 100%;
+  max-height: min(58vh, 480px);
+  margin: 20px auto;
+}
 .recovery-preview-text {
   background: var(--surface);
   border: 1px solid var(--line);

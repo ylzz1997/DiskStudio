@@ -36,6 +36,9 @@ export const signatureTypes = [
     label: "SQLite",
     detail: "核对 SQLite 主数据库容量和首页。WAL 单独保存，无法随此候选还原。",
   },
+  { id: "mp4", label: "MP4", detail: "核对独立 MP4/MOV 的媒体块与采样表。" },
+  { id: "mov", label: "MOV", detail: "核对独立 MP4/MOV 的媒体块与采样表。" },
+  { id: "ogg", label: "Ogg", detail: "核对连续 Ogg 页的序列、包边界与 CRC。" },
 ] as const;
 export type SignatureKind = (typeof signatureTypes)[number]["id"];
 export type SignatureSettings = {
@@ -102,4 +105,16 @@ export function previewImageMime(name: string): string | null {
       } as Record<string, string>
     )[extension ?? ""] ?? null
   );
+}
+
+export function previewMediaMime(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return null;
+  const extension = name.slice(dot + 1).toLowerCase();
+  return ({
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    ogg: "application/ogg",
+    wav: "audio/wav",
+  } as Record<string, string>)[extension] ?? null;
 }

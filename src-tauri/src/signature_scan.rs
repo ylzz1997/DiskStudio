@@ -4,6 +4,9 @@ use crate::recovery::{Candidate, Locator, MAX_RESULTS};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 
+#[path = "signature_media.rs"]
+mod media;
+
 pub const MAX_FILE: u64 = 256 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 const MAX_PROBES: usize = 1_000_000;
@@ -27,8 +30,11 @@ pub enum Kind {
     Pptx,
     SevenZip,
     Sqlite,
+    Mp4,
+    Mov,
+    Ogg,
 }
-const ALL: [Kind; 13] = [
+const ALL: [Kind; 16] = [
     Kind::Png,
     Kind::Jpeg,
     Kind::Pdf,
@@ -42,6 +48,9 @@ const ALL: [Kind; 13] = [
     Kind::Pptx,
     Kind::SevenZip,
     Kind::Sqlite,
+    Kind::Mp4,
+    Kind::Mov,
+    Kind::Ogg,
 ];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -103,7 +112,11 @@ impl Kind {
     }
 
     fn requires_digest(self) -> bool {
-        self.zip_family() || matches!(self, Self::SevenZip | Self::Sqlite)
+        self.zip_family()
+            || matches!(
+                self,
+                Self::SevenZip | Self::Sqlite | Self::Mp4 | Self::Mov | Self::Ogg
+            )
     }
 
     fn starts(self, b: &[u8]) -> bool {
@@ -117,6 +130,8 @@ impl Kind {
             Self::Webp => b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP"),
             Self::SevenZip => b.starts_with(SEVEN_ZIP_MAGIC),
             Self::Sqlite => b.starts_with(SQLITE_MAGIC),
+            Self::Mp4 | Self::Mov => media::movie_kind(b) == Some(self),
+            Self::Ogg => media::ogg_start(b),
             Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => false, // EOCD-anchored, below.
         }
     }
@@ -135,6 +150,9 @@ impl Kind {
             Self::Pptx => "pptx",
             Self::SevenZip => "7z",
             Self::Sqlite => "sqlite",
+            Self::Mp4 => "mp4",
+            Self::Mov => "mov",
+            Self::Ogg => "ogg",
         }
     }
     fn footer(self) -> Option<&'static [u8]> {
@@ -155,6 +173,8 @@ impl Kind {
             Self::Wav | Self::Webp => 12,
             Self::SevenZip => 32,
             Self::Sqlite => 100,
+            Self::Mp4 | Self::Mov => 12,
+            Self::Ogg => 27,
             Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => 0,
         }
     }
@@ -179,6 +199,10 @@ fn candidate(
             Kind::Sqlite => {
                 "连续 SQLite 主数据库候选。已核对文件头和首页结构，未验证其余数据库页或恢复 WAL。"
             }
+            Kind::Mp4 | Kind::Mov => {
+                "连续电影容器候选。已核对媒体块的采样表与数据范围，未解码音频或视频。"
+            }
+            Kind::Ogg => "连续 Ogg 候选。已核对各流的页序列、包边界与 CRC，未解码音频或视频。",
             _ => "连续数据候选；未验证解码完整性，原文件名和删除状态未知",
         }
         .into(),
@@ -575,6 +599,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
             Kind::Zip | Kind::Docx | Kind::Xlsx | Kind::Pptx => b'P',
             Kind::SevenZip => SEVEN_ZIP_MAGIC[0],
             Kind::Sqlite => SQLITE_MAGIC[0],
+            Kind::Mp4 | Kind::Mov | Kind::Ogg => continue, // Multi-offset media anchors below.
         } as usize] = true;
     }
     let (mut carry, mut consumed, mut searched) = (
@@ -587,6 +612,8 @@ pub fn continue_scan_scoped<R: Read + Seek>(
     let (mut count, mut rejected, mut probes) =
         (checkpoint.count, checkpoint.rejected, checkpoint.probes);
     let archives = options.kinds.iter().any(|k| k.zip_family());
+    let movies = options.kinds.contains(&Kind::Mp4) || options.kinds.contains(&Kind::Mov);
+    let ogg = options.kinds.contains(&Kind::Ogg);
     let lookahead = if options.kinds.contains(&Kind::Sqlite) {
         SQLITE_MAGIC.len()
     } else {
@@ -683,6 +710,16 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         rejected += 1;
                     }
                 }
+                let aligned = (range.start + at) & (alignment - 1) == 0;
+                let media = if !aligned {
+                    None
+                } else if ogg && buffer[i] == b'O' && media::ogg_start(&buffer[i..end]) {
+                    Some(Kind::Ogg)
+                } else if movies && buffer.get(i + 4) == Some(&b'f') {
+                    media::movie_kind(&buffer[i..end]).filter(|kind| options.kinds.contains(kind))
+                } else {
+                    None
+                };
                 if let Some((kind, start, header)) = &active {
                     let footer = kind.footer().expect("only terminated kinds remain active");
                     if at - start >= MAX_FILE {
@@ -711,65 +748,64 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         continue;
                     }
                 }
-                if active.is_none() {
-                    if !possible_start[buffer[i] as usize]
-                        || (range.start + at) & (alignment - 1) != 0
-                    {
-                        i += 1;
-                        continue;
+                let kind = media.or_else(|| {
+                    if active.is_some() || !aligned || !possible_start[buffer[i] as usize] {
+                        return None;
                     }
-                    if let Some(kind) = options
+                    options
                         .kinds
                         .iter()
                         .copied()
                         .find(|k| k.starts(&buffer[i..end]))
-                    {
-                        if kind.footer().is_some() {
-                            active = Some((kind, at, buffer[i..i + kind.header_len()].to_vec()));
-                        } else {
-                            probes += 1;
-                            if probes > MAX_PROBES {
-                                stop!(
+                });
+                if let Some(kind) = kind {
+                    if kind.footer().is_some() {
+                        active = Some((kind, at, buffer[i..i + kind.header_len()].to_vec()));
+                    } else {
+                        probes += 1;
+                        if probes > MAX_PROBES {
+                            stop!(
                                 "达到 100 万次结构候选检查上限，扫描提前结束；已找到的结果保留。"
-                                    .into(),at
+                                    .into(),
+                                at
                             );
-                            }
-                            let absolute = range.start + at;
-                            let mut check_progress = || tick(at.max(consumed), size);
-                            let result = probe(
-                                reader,
-                                kind,
-                                absolute,
-                                range.start + span_end,
-                                &mut archive_budget,
-                                &mut check_progress,
-                            )?;
-                            if let Some((length, header, footer)) = result {
-                                let mut c =
-                                    candidate(count, kind, absolute, length, header, footer);
-                                if kind.requires_digest() {
-                                    archive_budget.charge(length)?;
-                                    let digest = crate::signature_zip::hash_range(
-                                        reader,
-                                        absolute,
-                                        length,
-                                        check_progress,
-                                    )?;
-                                    if let Locator::Signature { content_hash, .. } = &mut c.locator
-                                    {
-                                        *content_hash = Some(digest);
-                                    }
-                                }
-                                unpublished.push(c);
-                                count += 1;
-                                if count as usize >= MAX_RESULTS {
-                                    stop!("达到结果上限，扫描提前结束。".into(), at);
-                                }
-                                i = (at + length - base) as usize;
-                                continue;
-                            }
-                            rejected += 1;
                         }
+                        let absolute = range.start + at;
+                        let mut check_progress = || tick(at.max(consumed), size);
+                        let result = probe(
+                            reader,
+                            kind,
+                            absolute,
+                            range.start + span_end,
+                            &mut archive_budget,
+                            &mut check_progress,
+                        )?;
+                        if let Some((length, header, footer)) = result {
+                            let mut c = candidate(count, kind, absolute, length, header, footer);
+                            if kind.requires_digest() {
+                                archive_budget.charge(length)?;
+                                let digest = crate::signature_zip::hash_range(
+                                    reader,
+                                    absolute,
+                                    length,
+                                    check_progress,
+                                )?;
+                                if let Locator::Signature { content_hash, .. } = &mut c.locator {
+                                    *content_hash = Some(digest);
+                                }
+                            }
+                            unpublished.push(c);
+                            count += 1;
+                            if count as usize >= MAX_RESULTS {
+                                stop!("达到结果上限，扫描提前结束。".into(), at);
+                            }
+                            // A verified page sequence or movie span may contain
+                            // embedded byte patterns for unrelated active probes.
+                            active = None;
+                            i = (at + length - base) as usize;
+                            continue;
+                        }
+                        rejected += 1;
                     }
                 }
                 i += 1;
@@ -1299,6 +1335,11 @@ fn probe<R: Read + Seek>(
                 let header = p.bytes::<100>(0)?;
                 (p.sqlite(&header, budget)?, header.to_vec())
             }
+            Kind::Mp4 | Kind::Mov => (
+                media::movie(&mut p, kind, budget)?,
+                p.bytes::<12>(0)?.to_vec(),
+            ),
+            Kind::Ogg => (media::ogg(&mut p, budget)?, p.bytes::<27>(0)?.to_vec()),
             _ => return Err(ProbeError::Invalid),
         };
         let footer = p
@@ -1319,6 +1360,130 @@ mod tests {
     use std::io::{self, Cursor};
     const SAMPLE_7Z: &[u8] = include_bytes!("../../tests/fixtures/signature-sample.7z");
     const SAMPLE_SQLITE: &[u8] = include_bytes!("../../tests/fixtures/signature-sample.sqlite");
+    const MOVIE_MP4: &[u8] = include_bytes!("../../tests/fixtures/signature-bmff-faststart.mp4");
+    const MOVIE_MOV: &[u8] = include_bytes!("../../tests/fixtures/signature-bmff-tail.mov");
+    const OGG_MUX: &[u8] = include_bytes!("../../tests/fixtures/signature-ogg-multiplex.ogg");
+    const OGG_OPUS: &[u8] = include_bytes!("../../tests/fixtures/signature-ogg-opus.ogg");
+
+    #[test]
+    fn media_signatures_resume_and_extract_independent_samples() {
+        let spots = [
+            (CHUNK - 5, Kind::Mp4, MOVIE_MP4),
+            (2 * CHUNK - 4, Kind::Ogg, OGG_MUX),
+            (2 * CHUNK + 24 * 1024, Kind::Mov, MOVIE_MOV),
+            (2 * CHUNK + 32 * 1024, Kind::Ogg, OGG_OPUS),
+        ];
+        let mut source = vec![0; 3 * CHUNK];
+        source[..5].copy_from_slice(b"%PDF-");
+        for (start, _, bytes) in spots {
+            source[start..start + bytes.len()].copy_from_slice(bytes);
+        }
+        let options = Options {
+            kinds: vec![Kind::Pdf, Kind::Mp4, Kind::Mov, Kind::Ogg],
+            ..Options::default()
+        };
+        let mut checkpoint = Checkpoint::default();
+        let mut reader = Cursor::new(&source);
+        let mut found = Vec::new();
+        assert!(continue_scan(
+            &mut reader,
+            source.len() as u64,
+            &options,
+            &mut checkpoint,
+            |read, _| if read < CHUNK as u64 {
+                Ok(())
+            } else {
+                Err("pause".into())
+            },
+            |candidate| found.push(candidate)
+        )
+        .is_err());
+        assert!(found.is_empty());
+        let mut checkpoint: Checkpoint =
+            serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        checkpoint.verify_cursor(&mut reader, &options).unwrap();
+        continue_scan(
+            &mut reader,
+            source.len() as u64,
+            &options,
+            &mut checkpoint,
+            |_, _| Ok(()),
+            |candidate| found.push(candidate),
+        )
+        .unwrap();
+        assert_eq!(
+            found.len(),
+            spots.len(),
+            "{:?}",
+            found.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        for (candidate, (start, kind, bytes)) in found.iter().zip(spots) {
+            assert_eq!(
+                candidate.name,
+                format!("recovered_{start:016x}.{}", kind.extension())
+            );
+            assert_eq!(candidate.size, bytes.len() as u64);
+            let stored = StoredCandidate::from_candidate(candidate).unwrap();
+            let candidate = stored
+                .candidate(candidate.id, 0..source.len() as u64, &options, None)
+                .unwrap();
+            let mut output = Vec::new();
+            crate::recovery::extract(&mut reader, &candidate, &mut output, MAX_FILE, |_| Ok(()))
+                .unwrap();
+            assert_eq!(output, bytes);
+            let mut changed = source.clone();
+            changed[start + bytes.len() / 2] ^= 1;
+            output.clear();
+            assert!(crate::recovery::extract(
+                &mut Cursor::new(changed),
+                &candidate,
+                &mut output,
+                16,
+                |_| Ok(())
+            )
+            .is_err());
+            assert!(output.is_empty());
+        }
+        assert!(collect(MOVIE_MOV, vec![Kind::Mp4]).is_empty());
+        assert!(collect(MOVIE_MP4, vec![Kind::Mov]).is_empty());
+    }
+
+    #[test]
+    fn media_validation_rejects_bad_chunk_maps_and_ogg_page_damage() {
+        for (kind, bytes) in [(Kind::Mp4, MOVIE_MP4), (Kind::Mov, MOVIE_MOV)] {
+            assert!(collect(&bytes[..bytes.len() - 1], vec![kind]).is_empty());
+            let mut corrupt = bytes.to_vec();
+            let stco = bytes
+                .windows(4)
+                .position(|header| header == b"stco")
+                .unwrap();
+            corrupt[stco + 12..stco + 16].copy_from_slice(&1u32.to_be_bytes());
+            assert!(collect(&corrupt, vec![kind]).is_empty());
+            let mut corrupt = bytes.to_vec();
+            let times = bytes
+                .windows(4)
+                .position(|header| header == b"stts")
+                .unwrap();
+            corrupt[times + 12] ^= 1;
+            assert!(collect(&corrupt, vec![kind]).is_empty());
+        }
+        let mut corrupt = OGG_OPUS.to_vec();
+        let mid = corrupt.len() / 2;
+        corrupt[mid] ^= 1;
+        assert!(collect(&corrupt, vec![Kind::Ogg]).is_empty());
+        let page_start = OGG_OPUS[4..]
+            .windows(4)
+            .position(|header| header == b"OggS")
+            .unwrap()
+            + 4;
+        let lacing =
+            &OGG_OPUS[page_start + 27..page_start + 27 + usize::from(OGG_OPUS[page_start + 26])];
+        let page_end =
+            page_start + 27 + lacing.len() + lacing.iter().map(|&n| usize::from(n)).sum::<usize>();
+        let mut repeat = OGG_OPUS[..page_end].to_vec();
+        repeat.extend_from_slice(&OGG_OPUS[page_start..]);
+        assert!(collect(&repeat, vec![Kind::Ogg]).is_empty());
+    }
 
     #[test]
     fn seven_zip_and_sqlite_candidates_resume_across_the_chunk_and_recheck_full_content() {

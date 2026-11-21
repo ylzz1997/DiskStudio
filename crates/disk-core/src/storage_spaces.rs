@@ -36,6 +36,7 @@ pub struct Space {
     pub description: String,
     group: u64,
     layout: Option<layout::SpaceLayout>,
+    thin_cache: Option<(u64, u64)>,
 }
 
 /// An allocation record as stored on disk. Block indices have meaning only
@@ -65,6 +66,14 @@ pub struct Member {
     pub spaces: BTreeMap<u64, Space>,
     pub allocation_owners: BTreeMap<u64, Guid>,
     pub allocations: Vec<Allocation>,
+    thin_cache_owners: BTreeMap<u64, ThinCacheOwner>,
+}
+
+#[derive(Debug)]
+struct ThinCacheOwner {
+    group: u64,
+    space: u64,
+    capacity: u64,
 }
 
 fn u16be(bytes: &[u8], offset: usize) -> u16 {
@@ -118,6 +127,7 @@ fn headers(
     Ok((pool, member, length))
 }
 
+#[derive(Clone, Copy)]
 struct Record<'a>(&'a [u8]);
 
 impl<'a> Record<'a> {
@@ -198,6 +208,7 @@ struct Objects {
     spaces: BTreeMap<u64, Space>,
     allocation_owners: BTreeMap<u64, Guid>,
     allocations: Vec<Allocation>,
+    thin_cache_owners: BTreeMap<u64, ThinCacheOwner>,
 }
 
 impl Objects {
@@ -228,6 +239,11 @@ impl Objects {
                     let name = record.text()?;
                     let description = record.text()?;
                     let layout = layout::space(record).ok();
+                    let thin_cache = if name.is_empty() && description.is_empty() {
+                        layout::thin_cache_space(record).ok()
+                    } else {
+                        None
+                    };
                     self.spaces.insert(
                         id,
                         Space {
@@ -237,10 +253,21 @@ impl Objects {
                             description,
                             group,
                             layout,
+                            thin_cache,
                         },
                     );
                 } else {
                     self.allocation_owners.insert(id, guid);
+                    if let Ok((space, capacity)) = layout::thin_cache_owner(record) {
+                        self.thin_cache_owners.insert(
+                            id,
+                            ThinCacheOwner {
+                                group,
+                                space,
+                                capacity,
+                            },
+                        );
+                    }
                 }
             }
             (4, 6) => self.allocations.push(record.allocation()?),
@@ -363,6 +390,7 @@ pub fn read_member<R: Read + Seek>(reader: &mut R, sector: u64) -> Result<Member
         spaces,
         allocation_owners,
         allocations,
+        thin_cache_owners,
     } = objects(&records)?;
     let (pool_record, name) = pool_record.ok_or(INVALID)?;
     if pool != pool_record || !members.values().any(|id| *id == member) {
@@ -382,6 +410,7 @@ pub fn read_member<R: Read + Seek>(reader: &mut R, sector: u64) -> Result<Member
         spaces,
         allocation_owners,
         allocations,
+        thin_cache_owners,
     })
 }
 

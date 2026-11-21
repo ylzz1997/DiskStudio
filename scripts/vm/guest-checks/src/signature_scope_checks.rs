@@ -17,11 +17,16 @@ const LIVE_PDF: &[u8] = b"%PDF-1.4\nDiskStudio allocated control\n%%EOF";
 const UNALIGNED: &[u8] = b"%PDF-1.4\nDiskStudio unaligned free control\n%%EOF";
 const SEVEN_ZIP: &[u8] = include_bytes!("../../../../tests/fixtures/signature-sample.7z");
 const SQLITE: &[u8] = include_bytes!("../../../../tests/fixtures/signature-sample.sqlite");
+const MP4: &[u8] = include_bytes!("../../../../tests/fixtures/signature-bmff-faststart.mp4");
+const MOV: &[u8] = include_bytes!("../../../../tests/fixtures/signature-bmff-tail.mov");
+const OGG_MUX: &[u8] = include_bytes!("../../../../tests/fixtures/signature-ogg-multiplex.ogg");
+const OGG_OPUS: &[u8] = include_bytes!("../../../../tests/fixtures/signature-ogg-opus.ogg");
 
 #[derive(Clone, Copy)]
 pub(super) enum Sample {
     Pdf,
     Formats,
+    Media,
 }
 
 impl Sample {
@@ -29,6 +34,7 @@ impl Sample {
         match self {
             Self::Pdf => FOLDER,
             Self::Formats => "DS-SignatureFormats",
+            Self::Media => "DS-SignatureMedia",
         }
     }
 
@@ -36,6 +42,7 @@ impl Sample {
         match self {
             Self::Pdf => "signature-scope-4kn",
             Self::Formats => "signature-formats-4kn",
+            Self::Media => "signature-media-4kn",
         }
     }
 
@@ -45,6 +52,12 @@ impl Sample {
             Self::Formats => vec![
                 (offset + 2 * SECTOR, "7z", SEVEN_ZIP),
                 (offset + 4 * SECTOR, "sqlite", SQLITE),
+            ],
+            Self::Media => vec![
+                (offset + 2 * SECTOR, "mp4", MP4),
+                (offset + 6 * SECTOR, "mov", MOV),
+                (offset + 8 * SECTOR, "ogg", OGG_MUX),
+                (offset + 12 * SECTOR, "ogg", OGG_OPUS),
             ],
         }
     }
@@ -100,9 +113,16 @@ fn fixture(sample: Sample) -> Result<(Vec<u8>, u64), String> {
     ] {
         bytes[offset..][..pdf.len()].copy_from_slice(pdf);
     }
-    if matches!(sample, Sample::Formats) {
+    if matches!(sample, Sample::Formats | Sample::Media) {
         for (offset, _, contents) in sample.expected(aligned as u64) {
-            bytes[offset as usize..][..contents.len()].copy_from_slice(contents);
+            let start = usize::try_from(offset).map_err(err)?;
+            let end = start
+                .checked_add(contents.len())
+                .ok_or("Test sample range overflow")?;
+            bytes
+                .get_mut(start..end)
+                .ok_or("Test sample falls outside its fixture")?
+                .copy_from_slice(contents);
         }
     }
     Ok((bytes, aligned as u64))
@@ -244,6 +264,7 @@ pub(super) fn prepare(sample: Sample) -> Result<String, String> {
     let scan = match sample {
         Sample::Pdf => format!("Scan PDF only. Expect 3 full, 2 aligned, 1 free+aligned. Free PDF byte offset {aligned:#x}."),
         Sample::Formats => "Scan 7z and SQLite only with both free clusters and sector alignment enabled. Expect one candidate of each type.".into(),
+        Sample::Media => "Scan MP4, MOV and Ogg with free clusters and sector alignment enabled. Expect one MP4, one MOV and two Ogg files.".into(),
     };
     Ok(format!(
         "PASS: B/{partition} 8 MiB is offline. {scan} Save Scope.dsrecover and export to {}.",
@@ -346,4 +367,46 @@ pub(super) fn verify(sample: Sample) -> Result<String, String> {
         return Err("Expected exactly one native export".into());
     }
     Ok(format!("PASS: Saved settings, {} candidates, original B extent, both GPTs, adjacent sectors, guest OS layout and exported SHA-256 verified. B remains offline.", expected.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aligned_free_media_fixture_has_four_independently_verified_candidates() {
+        use signature_scan::{Checkpoint, Kind, Options};
+
+        let (bytes, aligned) = fixture(Sample::Media).unwrap();
+        let mut reader = Cursor::new(&bytes);
+        let plan =
+            used_space::inspect(&mut reader, SIZE, SECTOR, None, &AtomicBool::new(false)).unwrap();
+        let options = Options {
+            kinds: vec![Kind::Mp4, Kind::Mov, Kind::Ogg],
+            free_only: true,
+            sector_aligned: true,
+            ..Options::default()
+        };
+        let mut found = Vec::new();
+        signature_scan::continue_scan_scoped(
+            &mut reader,
+            SIZE,
+            &options,
+            &mut Checkpoint::default(),
+            SECTOR,
+            Some(&plan),
+            |_, _| Ok(()),
+            |candidate| found.push(candidate),
+        )
+        .unwrap();
+        let expected = Sample::Media.expected(aligned);
+        assert_eq!(found.len(), expected.len());
+        signature_scan::verify_free_candidates(&plan, &found).unwrap();
+        for (candidate, (offset, ext, bytes)) in found.iter().zip(expected) {
+            assert_eq!(candidate.name, format!("recovered_{offset:016x}.{ext}"));
+            let mut output = Vec::new();
+            recovery::extract(&mut reader, candidate, &mut output, SIZE, |_| Ok(())).unwrap();
+            assert_eq!(output, bytes);
+        }
+    }
 }

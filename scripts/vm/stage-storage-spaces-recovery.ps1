@@ -1,11 +1,14 @@
-param([switch]$Verify)
+param([switch]$Verify, [switch]$Thin)
 $ErrorActionPreference = 'Stop'
 $machine = @(Get-CimInstance -Query 'SELECT UUID,Name,Vendor FROM Win32_ComputerSystemProduct')
 if ($machine.Count -ne 1 -or $machine[0].UUID -ne 'e20adb9f-f665-432e-9a62-dd5d897b06a0' -or
     $machine[0].Name -ne 'DiskStudio-Test' -or $machine[0].Vendor -ne 'DiskStudio') {
     throw 'Run only in DiskStudio-Test after exact QMP preflight.'
 }
-$fixture = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'storage-spaces-recovery-clean-cache.json') -Raw | ConvertFrom-Json
+$fixtureName = if ($Thin) { 'storage-spaces-recovery-thin.json' } else { 'storage-spaces-recovery-clean-cache.json' }
+$fixture = Get-Content -LiteralPath (Join-Path $PSScriptRoot $fixtureName) -Raw | ConvertFrom-Json
+$sourceDirectory = if ($Thin) { 'S:\spaces-thin' } else { 'S:\spaces' }
+$outputDirectory = if ($Thin) { 'R:\thin-out' } else { 'R:\out' }
 $serials = @('DS-TEST-A-0001      _00000001.', 'DS-TEST-B-0001      _00000001.')
 $letters = @('S', 'R')
 $legacy = @(Get-CimInstance -Query 'SELECT Index,SerialNumber,BytesPerSector FROM Win32_DiskDrive')
@@ -42,13 +45,25 @@ function Confirm-TestVolume([int]$Slot) {
 }
 
 function Confirm-Segments($member, [string]$slot) {
-    if ($member.slot -cne $slot -or $member.capacity -ne 16GB -or $member.segments.Count -ne 10) {
+    if ($member.slot -cne $slot -or $member.capacity -ne 16GB) {
         throw 'Unexpected sparse member fixture.'
     }
-    $mirror = 2164260864
-    $expected = @(0, 16MB, 0x31000000, 0x41000000, 0x41002000, 0x41003000, $mirror,
-        ($mirror + 1MB), ($mirror + 1GB - 20KB), (16GB - 64KB))
-    $sizes = @(64KB, 16KB, 4KB, 4KB, 4KB, 4KB, 24KB, 128KB, 20KB, 64KB)
+    if ($Thin) {
+        $middle = if ($slot -ceq 'A') {
+            @(0xc1000000L, 0xc1002000L, 0xc1003000L, 0xc1004000L, 0xc1005000L, 0xc1006000L, 0xc1007000L,
+              0xc1202000L, 0xc1203000L, 0xc1240000L, 0xc1270000L, 0xf0ff2000L, 0xf0ffa000L, 0xf0ffe000L, 0xf0fff000L)
+        } else {
+            @(0xc1240000L, 0xc127f000L, 0xe1000000L, 0xe1001000L, 0xe1002000L, 0xf0ff9000L, 0xf0ffa000L)
+        }
+        $expected = @(0, 16MB) + $middle + (16GB - 64KB)
+        $sizes = @(64KB, 16KB) + (@(4KB) * $middle.Count) + 64KB
+    } else {
+        $mirror = 2164260864
+        $expected = @(0, 16MB, 0x31000000, 0x41000000, 0x41002000, 0x41003000, $mirror,
+            ($mirror + 1MB), ($mirror + 1GB - 20KB), (16GB - 64KB))
+        $sizes = @(64KB, 16KB, 4KB, 4KB, 4KB, 4KB, 24KB, 128KB, 20KB, 64KB)
+    }
+    if ($member.segments.Count -ne $expected.Count) { throw 'Unexpected sparse member segments.' }
     for ($i = 0; $i -lt $expected.Count; $i++) {
         $segment = $member.segments[$i]
         if ($segment.offset -ne $expected[$i] -or $segment.data.Length -gt 180000) { throw 'Unexpected fixture offset.' }
@@ -61,7 +76,7 @@ function Confirm-Segments($member, [string]$slot) {
 
 Confirm-Segments $fixture.members[0] 'A'
 Confirm-Segments $fixture.members[1] 'B'
-if (-not $Verify) {
+if (-not $Verify -and -not $Thin) {
     $disks = @(Find-TestDisk 0; Find-TestDisk 1)
     if ($disks[0].Number -eq $disks[1].Number -or
         @($disks | Where-Object { $_.PartitionStyle -ne 'RAW' -or $_.NumberOfPartitions -ne 0 }).Count -ne 0 -or
@@ -81,10 +96,17 @@ if (-not $Verify) {
         Confirm-TestVolume $slot
     }
 
-    New-Item -ItemType Directory -Path 'S:\spaces', 'R:\out' -ErrorAction Stop | Out-Null
+}
+Confirm-TestVolume 0
+Confirm-TestVolume 1
+if (-not $Verify) {
+    if ((Test-Path -LiteralPath $sourceDirectory) -or (Test-Path -LiteralPath $outputDirectory)) {
+        throw 'The fixture source and output directories must be new.'
+    }
+    New-Item -ItemType Directory -Path $sourceDirectory, $outputDirectory -ErrorAction Stop | Out-Null
     foreach ($member in $fixture.members) {
         Confirm-TestVolume 0
-        $path = "S:\spaces\Member-$($member.slot).raw"
+        $path = Join-Path $sourceDirectory "Member-$($member.slot).raw"
         [IO.File]::Open($path,[IO.FileMode]::CreateNew).Dispose()
         & "$env:SystemRoot\System32\fsutil.exe" sparse setflag $path | Out-Null
         if ($LASTEXITCODE -ne 0 -or -not ((Get-Item -LiteralPath $path).Attributes -band [IO.FileAttributes]::SparseFile)) {
@@ -106,7 +128,7 @@ if (-not $Verify) {
 Confirm-TestVolume 0
 Confirm-TestVolume 1
 foreach ($member in $fixture.members) {
-    $stream = [IO.File]::OpenRead("S:\spaces\Member-$($member.slot).raw")
+    $stream = [IO.File]::OpenRead((Join-Path $sourceDirectory "Member-$($member.slot).raw"))
     try {
         if ($stream.Length -ne $member.capacity) { throw 'Sparse member length mismatch.' }
         foreach ($segment in $member.segments) {
@@ -119,12 +141,12 @@ foreach ($member in $fixture.members) {
     } finally { $stream.Dispose() }
 }
 if ($Verify) {
-    $files = @(Get-ChildItem -LiteralPath 'R:\out' -File -Recurse)
+    $files = @(Get-ChildItem -LiteralPath $outputDirectory -File -Recurse)
     foreach ($record in @($fixture.existing, $fixture.deleted)) {
         $matches = @($files | Where-Object { $_.Length -eq $record.bytes -and (Get-FileHash -LiteralPath $_.FullName).Hash -ieq $record.sha256 })
         if ($matches.Count -ne 1) { throw 'Expected one exported file with the independent fixture digest.' }
         Write-Output "VERIFIED $($matches[0].Name) $($record.bytes) bytes $($record.sha256)"
     }
 } else {
-    'READY: read-only member images in S:\spaces and output directory R:\out.'
+    "READY: read-only member images in $sourceDirectory and output directory $outputDirectory."
 }

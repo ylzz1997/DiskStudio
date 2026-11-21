@@ -360,6 +360,68 @@ fn windows_thin_checkpoint_describes_cached_witnesses() {
             offset
         );
     }
+
+    let direct_directory = PathBuf::from(
+        std::env::var_os("DISKSTUDIO_SPACES_FULL_CAPTURE")
+            .expect("set full witness capture directory"),
+    );
+    let direct_manifests: [Manifest; 2] =
+        serde_json::from_slice(&fs::read(direct_directory.join("manifest.json")).unwrap()).unwrap();
+    for (member, manifest) in members.iter_mut().zip(&direct_manifests) {
+        let mut direct = Capture::load(&direct_directory, manifest);
+        let identity = storage_spaces::read_member(&mut direct, 4096).unwrap();
+        let base = storage_spaces::read_member(member, 4096).unwrap();
+        assert_eq!(identity.member, base.member);
+        assert_eq!(identity.database_digest, base.database_digest);
+        assert_eq!(identity.layout_digest, base.layout_digest);
+        member
+            .windows
+            .extend(direct.windows.into_iter().skip(manifest.regions.len()));
+    }
+    let id = pool
+        .spaces
+        .values()
+        .find(|space| space.name == "DS-TEST-THIN")
+        .unwrap()
+        .id;
+    let mut group = storage_spaces::Group::open(Vec::from(members.clone()), 4096).unwrap();
+    assert_eq!(group.availability(id).unwrap(), (1024 * MIB, false));
+    let mut reader = group.reader(id, false).unwrap();
+    assert_eq!(
+        digest_witnesses(&mut reader),
+        "8956dc0a5434c4671d735d07408c790d3d8d98c6e992b28843e87b2d87b0d5b9"
+    );
+    let mut boundary = [0; 8192];
+    reader.seek(SeekFrom::Start(512 * MIB - 4096)).unwrap();
+    reader.read_exact(&mut boundary).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(boundary[24..32].try_into().unwrap()),
+        512 * MIB - 4096
+    );
+    assert_eq!(
+        u64::from_le_bytes(boundary[4120..4128].try_into().unwrap()),
+        512 * MIB
+    );
+    reader.seek(SeekFrom::Start(520 * MIB)).unwrap();
+    reader.read_exact(&mut boundary).unwrap();
+    assert_eq!(boundary, [0; 8192]);
+
+    let [mut a, b] = members;
+    assert!(storage_spaces::Group::open(vec![b.clone()], 4096)
+        .unwrap()
+        .reader(id, true)
+        .is_err());
+    // Damage the checkpoint body while preserving the captured transactions.
+    let (_, contents) = a
+        .windows
+        .iter_mut()
+        .find(|(offset, _)| *offset == cache)
+        .unwrap();
+    contents[0x203000] ^= 1;
+    assert!(storage_spaces::Group::open(vec![a, b], 4096)
+        .unwrap()
+        .reader(id, false)
+        .is_err());
 }
 
 impl Read for Capture {

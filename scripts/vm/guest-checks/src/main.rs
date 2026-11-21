@@ -663,6 +663,8 @@ fn main() {
                 | "Signature-Scope-4Kn-Verify"
                 | "Signature-Formats-4Kn-Prepare"
                 | "Signature-Formats-4Kn-Verify"
+                | "Signature-Media-4Kn-Prepare"
+                | "Signature-Media-4Kn-Verify"
                 | "Surface-Refinement-4Kn-Verify"
                 | "Surface-Refinement-4Kn-Inspect"
                 | "Surface-Refinement-4Kn-Prepare"
@@ -837,6 +839,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Signature-Scope-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Pdf),
         Some("Signature-Formats-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Formats),
         Some("Signature-Formats-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Formats),
+        Some("Signature-Media-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Media),
+        Some("Signature-Media-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Media),
         Some("Surface-Refinement-4Kn-Verify") => sector_copy_checks::verify_surface_refinement(),
         Some("Surface-Refinement-4Kn-Inspect") => sector_copy_checks::inspect_surface_refinement(),
         Some("Surface-Refinement-4Kn-Prepare") => sector_copy_checks::prepare_surface_refinement(),

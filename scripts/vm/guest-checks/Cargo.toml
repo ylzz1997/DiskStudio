@@ -28,5 +28,8 @@ rfd = { version = "0.15", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemInformation", "Win32_System_Threading", "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Security_Cryptography"] }
 zip = { version = "9.8.1", default-features = false, features = ["deflate"] }
 
+[dev-dependencies]
+base64 = "0.23.1"
+
 [patch.crates-io]
 btrfs-disk = { path = "../../../vendor/btrfs-disk" }

@@ -8,6 +8,7 @@ import {
   defaultSignatureSettings,
   signatureRequest,
   previewImageMime,
+  previewMediaMime,
 } from "./signatureModel";
 describe("signature scan request", () => {
   it("keeps ZIP and Office selections separate and includes them in the default set", () => {
@@ -85,6 +86,14 @@ describe("signature scan request", () => {
     expect(previewImageMime("a.jpeg")).toBe("image/jpeg");
     expect(previewImageMime("a.wav")).toBe(null);
     expect(previewImageMime("a.png.exe")).toBe(null);
+  });
+  it("keeps media kinds selectable and uses only supported playback extensions", () => {
+    expect(signatureRequest({ ...defaultSignatureSettings, kinds: ["ogg", "mov"] }, 1024).kinds).toEqual(["ogg", "mov"]);
+    expect(previewMediaMime("video.MP4")).toBe("video/mp4");
+    expect(previewMediaMime("video.mov")).toBe("video/quicktime");
+    expect(previewMediaMime("stream.ogg")).toBe("application/ogg");
+    expect(previewMediaMime("audio.wav")).toBe("audio/wav");
+    expect(previewMediaMime("video.mp4.exe")).toBeNull();
   });
 });
 describe("saved signature scope", () => {
