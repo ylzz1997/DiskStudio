@@ -24,6 +24,8 @@ import {
 } from "../tests/fixtures/vmdk-data";
 import {
   fixture as vhdxFixture,
+  BAT,
+  get64,
   item,
   le32,
 } from "../tests/fixtures/vhdx-data";
@@ -186,6 +188,7 @@ it("passes decoded logical VHD head, tail and EBR bytes through the same path-fr
     "ebrs",
     "filename",
     "head",
+    "sector",
     "size",
     "tail",
   ]);
@@ -210,6 +213,7 @@ it("inspects an AVHD chain using only merged logical bytes and the current basen
     "ebrs",
     "filename",
     "head",
+    "sector",
     "size",
     "tail",
   ]);
@@ -262,18 +266,44 @@ it("imports VHDX 4Kn GPT with container sector size and never asks for 512-byte 
   expect(command).toBe("inspect_image");
   expect(args.ebrs).toEqual([]);
   expect(args.filename).toBe("test.vhdx");
+  expect(args.sector).toBe(4096);
   expect(args.size).toBe(8 * MiB);
   expect(String.fromCharCode(...args.head.slice(4096, 4104))).toBe("EFI PART");
   expect(result.imageFormat).toBe("VHDX · 动态扩展");
   expect(result.tableReport?.items[0].code).toBe("virtual-container");
 });
-it("rejects 4Kn MBR, GPT/container disagreement and native-result sector mismatch", async () => {
+it("reads a VHDX 4Kn MBR and passes a complete logical EBR sector to inspection", async () => {
   const b = vhdxFixture("dynamic");
   le32(b, item(b, 3), 4096);
   le32(b, item(b, 4), 4096);
-  await expect(openImage(memoryFile(b, "test.vhdx").file)).rejects.toThrow(
-    "4Kn MBR",
-  );
+  const start = Number(get64(b, BAT) >> 20n) * MiB;
+  b.fill(0, start, start + 8192);
+  b[start + 450] = 0x0f;
+  le32(b, start + 454, 1);
+  le32(b, start + 458, 256);
+  b.set([0x55, 0xaa], start + 510);
+  const ebrStart = start + 4096;
+  b[ebrStart + 450] = 7;
+  le32(b, ebrStart + 454, 1);
+  le32(b, ebrStart + 458, 128);
+  b.set([0x55, 0xaa], ebrStart + 510);
+  b.fill(0x79, ebrStart + 512, ebrStart + 4096);
+  bridge.invoke.mockResolvedValueOnce(4096).mockResolvedValueOnce(null);
+  bridge.invoke.mockResolvedValue({
+    disk: { ...disk, scheme: "MBR", sectorSize: 4096 }, report, parseError: null,
+  });
+  const opened = await openImage(memoryFile(b, "mbr.vhdx").file);
+  expect(opened.sectorSize).toBe(4096);
+  const [plan, request] = bridge.invoke.mock.calls[0];
+  expect(plan).toBe("image_ebr_next");
+  expect(request.sector).toBe(4096);
+  expect(request.mbr).toHaveLength(4096);
+  const [command, args] = bridge.invoke.mock.calls.at(-1)!;
+  expect(command).toBe("inspect_image");
+  expect(args.sector).toBe(4096);
+  expect(args.ebrs).toEqual([{ offset: 4096, bytes: Array.from(b.slice(ebrStart, ebrStart + 4096)) }]);
+});
+it("rejects GPT/container disagreement and native-result sector mismatch", async () => {
   const c = vhdxFixture("gpt4k");
   le32(c, item(c, 3), 512);
   await expect(openImage(memoryFile(c, "test.vhdx").file)).rejects.toThrow(
@@ -308,6 +338,7 @@ it("imports decoded VDI logical windows and EBRs without adding any path IPC", a
     "ebrs",
     "filename",
     "head",
+    "sector",
     "size",
     "tail",
   ]);
@@ -368,6 +399,7 @@ it("imports multipart VMDK with exact logical bytes and no companion filenames o
       "ebrs",
       "filename",
       "head",
+      "sector",
       "size",
       "tail",
     ]);
@@ -419,6 +451,7 @@ it("imports compressed VMDK head/tail/EBRs with only bounded byte decompression 
     "ebrs",
     "filename",
     "head",
+    "sector",
     "size",
     "tail",
   ]);
@@ -492,6 +525,7 @@ it("imports Parallels HDD/HDS logical data and retains the unknown snapshot depe
       "ebrs",
       "filename",
       "head",
+      "sector",
       "size",
       "tail",
     ]);

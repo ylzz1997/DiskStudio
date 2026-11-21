@@ -32,7 +32,7 @@ pub(super) fn parts() -> Result<Vec<partitions::policy::Partition>, String> {
     inventory()?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let mut p: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let mut p: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     p.sort_by_key(|p| (p.disk_number, p.partition_number));
     Ok(p)
 }
@@ -835,6 +835,7 @@ mod tests {
         let parts = |entry: &table_restore::Entry| Partition {
             guid: Some(format!("{{{}}}", entry.guid.to_uppercase())),
             gpt_type: Some(entry.kind.clone()),
+            mbr_type: None,
             offset: entry.offset,
             size: entry.size,
             ..Default::default()

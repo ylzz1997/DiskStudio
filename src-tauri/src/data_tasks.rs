@@ -1817,7 +1817,7 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
         source.verify_signature_ranges(&locked, std::slice::from_ref(&c), &cancel)?;
         let readers = source.extraction_readers(&locked, &cancel)?;
         let extension = c.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        let limit = if ["png", "jpg", "jpeg", "gif", "bmp", "webp", "mp4", "mov", "ogg", "wav"]
+        let limit = if ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "mp4", "mov", "ogg", "wav"]
             .contains(&extension.as_str())
         {
             8 * 1024 * 1024

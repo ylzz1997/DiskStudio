@@ -67,32 +67,29 @@ export async function openImage(
   ]);
   const headBytes = head instanceof Uint8Array ? head : new Uint8Array(head);
   const tailBytes = tail instanceof Uint8Array ? tail : new Uint8Array(tail);
-  if (container) {
-    const gpt = (offset: number) =>
-      [..."EFI PART"].every(
-        (c, i) => headBytes[offset + i] === c.charCodeAt(0),
-      );
-    if (container.sectorSize === 4096 && (!gpt(4096) || gpt(512)))
-      throw new Error(
-        "4096 B 扇区的 VHDX 当前要求对应的 GPT；4Kn MBR 与扇区信息冲突暂不支持。",
-      );
-    if (container.sectorSize === 512 && !gpt(512) && gpt(4096))
-      throw new Error("容器声明的 512 B 扇区与 GPT 位置冲突。");
-  }
+  const logicalSector = container?.sectorSize ?? 512;
+  const geometry = container ? { sector: logicalSector } : {};
+  const hasGpt = (offset: number) =>
+    [..."EFI PART"].every(
+      (c, i) => headBytes[offset + i] === c.charCodeAt(0),
+    );
+  if (container && hasGpt(logicalSector === 512 ? 4096 : 512))
+    throw new Error("容器声明的逻辑扇区大小与 GPT 位置冲突。");
   const ebrs: { offset: number; bytes: number[] }[] = [];
-  const mbr = Array.from(headBytes.subarray(0, 512));
-  for (; container?.sectorSize !== 4096;) {
+  const mbr = Array.from(headBytes.subarray(0, logicalSector));
+  for (; !(logicalSector === 4096 && hasGpt(4096));) {
     const offset = await invoke<number | null>("image_ebr_next", {
       mbr,
       size,
       ebrs,
+      ...geometry,
     });
     if (offset === null) break;
     if (
       !Number.isSafeInteger(offset) ||
-      offset < 512 ||
-      offset % 512 !== 0 ||
-      offset + 512 > size ||
+      offset < logicalSector ||
+      offset % logicalSector !== 0 ||
+      offset + logicalSector > size ||
       ebrs.length >= 64 ||
       ebrs.some((sector) => sector.offset === offset)
     )
@@ -100,10 +97,10 @@ export async function openImage(
     // Slice only the File selected by the user. No paths enter native commands.
     const bytes = Array.from(
       container
-        ? await container.read(offset, 512)
-        : new Uint8Array(await file.slice(offset, offset + 512).arrayBuffer()),
+        ? await container.read(offset, logicalSector)
+        : new Uint8Array(await file.slice(offset, offset + logicalSector).arrayBuffer()),
     );
-    if (bytes.length !== 512)
+    if (bytes.length !== logicalSector)
       throw new Error("EBR 扇区读取不完整，请重新打开镜像。");
     ebrs.push({ offset, bytes });
   }
@@ -118,6 +115,7 @@ export async function openImage(
     size,
     filename: file.name,
     ebrs,
+    ...geometry,
   });
   if (container) {
     const warning = container.warnings.length > 0;

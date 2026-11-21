@@ -9,6 +9,7 @@ fn partition(number: u32, offset: u64, size: u64) -> Partition {
         size: size * MIB,
         guid: Some(format!("00000000-0000-4000-8000-{number:012x}")),
         gpt_type: Some(policy::BASIC_DATA.into()),
+        mbr_type: None,
         is_boot: Some(false),
         is_system: Some(false),
         is_read_only: Some(false),

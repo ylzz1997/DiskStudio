@@ -668,6 +668,26 @@ Prepare 复核此前的 Btrfs 还原验收记录及 B 上的三个已还原分�
 
 原生验收使用 `node scripts/vm/lab.mjs start --4kn --signature-media`。用 `build-guest-checks.ps1 -SignatureMedia` 构建验收入口，再用 `make-tools-iso.ps1 -Live -GuestTools Signature-Media-4Kn-Prepare.exe,Signature-Media-4Kn-Verify.exe` 制作只读工具光盘。先通过 QMP 预检，在来宾核对完整 A/B 标识、几何及正式载荷摘要，再运行一次 `Signature-Media-4Kn-Prepare.exe`。夹具将四个样本放进 B 的 FAT12 对齐空闲簇并保持 B 脱机。仅选择 MP4、MOV 和 Ogg，同时启用空闲簇与逻辑扇区对齐。核对四个结果、保存和加载 `Scope.dsrecover`，播放完整的 H.264/AAC MP4，按平面布局导出到 A 的 `DS-SignatureMedia` 文件夹。运行 `Signature-Media-4Kn-Verify.exe` 核对进度及全部导出摘要、源范围、相邻扇区和 GPT。正式构建 `1cea3f4c…` 在原生界面找到四个样本，保存并加载了进度，播放了 MP4，并跨盘导出全部 20,424 字节。来宾独立复核确认四份输出与原样本逐字节一致，清单 SHA-256 匹配，源范围、相邻扇区、A/B 的 GPT 与系统盘布局均一致。夹具准备完成后，源盘 B 的写入计数在扫描、导出和复核期间保持不变。构建、载荷与测试记录见 `.vm/signature-media-status.json`。
 
+### 图像签名恢复验收
+
+`tests/fixtures/signature-tiff-pages.tif` 是 tifffile 生成的双页小端条带图像，`signature-bigtiff-tiles.tif` 是使用大端 64 位目录和分块的图像。两份 TIFF 均通过 tifffile 读回像素。Pillow 生成 `signature-icon-png.ico` 内的 16 和 32 像素 PNG 图标，以及 `signature-cursor-dib.cur` 的位图。两种图标尺寸和光标均通过 Pillow 加载。后端测试覆盖分块边界、断点续扫、摘要复核、损坏目录、内嵌 PNG 校验和及越界热点。
+
+使用 `node scripts/vm/lab.mjs start --4kn --signature-images` 的独立 A/B 夹具。用 `build-guest-checks.ps1 -SignatureImages` 和 `make-tools-iso.ps1 -Live -GuestTools Signature-Images-4Kn-Prepare.exe,Signature-Images-4Kn-Verify.exe` 生成只读工具光盘。通过 QMP 预检并核对来宾 A/B 的完整序列号、几何和正式载荷摘要后，只运行一次准备工具。源选脱机 B/2，只勾选 TIFF、ICO 和 CUR，同时启用空闲簇和逻辑扇区对齐。应发现两个 TIFF、一个 ICO 和一个 CUR。保存并加载 `Scope.dsrecover`，预览 ICO，选平面布局跨盘导出到 A 的 `DS-SignatureImages` 文件夹，再运行验证工具。验证工具检查四个文件的内容和清单摘要、进度选项、源分区及相邻扇区、两盘 GPT 和系统盘布局。
+
+正式构建 `5e29247d…` 已通过该流程。原生扫描找到四个样本，保存、加载进度后可预览 ICO，并跨盘导出全部 5,208 字节。来宾独立核对原始字节和清单 SHA-256，全部匹配。导出报告记录四份文件缺少可保留的时间或属性。源盘 B 保持脱机，准备后的写入计数在扫描、预览、导出与复核期间未增加。证据见 `.vm/signature-images-status.json`。
+
+### 4Kn MBR 与 EBR 检查和备份
+
+合成测试从同一份 4Kn 镜像检查倒序 EBR 链路，核对归档保存完整逻辑扇区及可选的分区首扇区，并拒绝缺链、循环和错误的扇区大小。镜像和整盘归档浏览用例读回相同分区首扇区。VHDX 前端测试核对按容器声明获取完整 EBR 扇区。
+
+用 `node scripts/vm/lab.mjs start --4kn --table-mbr` 启动独立的空白 A/B 夹具。使用 `build-guest-checks.ps1 -TableMbr` 和 `make-tools-iso.ps1 -Live -GuestTools Table-MBR-4Kn-Prepare.exe,Table-MBR-4Kn-Verify.exe` 准备只读光盘。完成 QMP、来宾完整序列和载荷摘要核对后，只运行一次准备工具。它在 A 建立输出卷，在 B 用 DiskPart 建立一个主分区和两个逻辑分区，并将 B 脱机。
+
+在正式程序选 B，依次打开磁盘菜单的分区表检查、分区表备份与验证。勾选分区首扇区，在 A 的 `DS-TableMBR` 中保存 `MBR.dspt`。运行独立验证工具，核对六个完整的 4 KiB 扇区、备份摘要、B 脱机状态、两盘布局及系统盘布局。原生验收状态见 `.vm/table-mbr-status.json`。
+
+Windows 会把扩展容器作为编号 0 的独立行返回。分区表检查和备份保留该行的身份，核对原始表的容器范围，并只把数据分区纳入卷关联核对。磁盘管理仍将容器中的未核对范围标为未知。已完成准备、尚未生成基线的隔离夹具可用 `Table-MBR-4Kn-Verify.exe Table-MBR-4Kn-Record` 对脱机 B 只读记录基线，并将记录保存到 A。
+
+正式构建 `ce90ffe7…` 通过原生检查、跨盘保存、回读及备份文件验证。独立工具核对归档中六个完整 4 KiB 扇区，确认来宾系统盘和 A/B 分区布局未变。B 保持脱机，夹具准备后的写入计数没有增加。英文界面的个别诊断项目仍显示中文。验收详情见 `.vm/table-mbr-status.json`。
+
 ### 整盘按文件克隆验收
 
 混合克隆使用 `node scripts/vm/lab.mjs start --4kn --mixed-clone` 的独立 A/B 盘。以匹配的正式程序运行 `build-btrfs.ps1 -MixedClone`，再通过 `make-tools-iso.ps1 -Live -BtrfsCloneFixture` 选择 `Mixed-File-Clone-4Kn-Prepare.exe` 和 `Mixed-File-Clone-4Kn-Verify.exe`。通过 QMP 预检后运行 Prepare。两块盘为空 RAW 时，Prepare 在 A 生成 384 MiB Btrfs、32 MiB 不透明数据和 96 MiB NTFS 分区，保留 A 联机及 B 空白。整盘按文件克隆的原生预览应显示 Btrfs 384→192 MiB 并搬移 80 MiB 条带、32 MiB 分区原位置逐扇区复制及 NTFS 96→48 MiB 按文件重建。独立 Verify 核对两盘布局、Btrfs 的 51 个文件和卷 UUID、NTFS 样本、32 MiB 全范围、清零区和整盘 SHA-256。对已经完整准备且 B 仍为空 RAW 的夹具，可用匹配载荷中的 `Mixed-File-Clone-4Kn-Resume.exe` 复核源内容并建立验收基线。

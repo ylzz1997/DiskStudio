@@ -1,6 +1,6 @@
 //! Complete, bounded association snapshots for batch state checks. No cache
 //! survives a read or mutation. Method targets remain original provider paths.
-use super::{err, policy, Disk, Partition, Session, Volume, DISKS, PARTITIONS};
+use super::{err, policy, Disk, Partition, Session, Volume, DISKS};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -172,7 +172,7 @@ pub(super) fn read(session: &Session, disk: &Disk) -> Result<Snapshot, String> {
     if disks.iter().find(|d| d.number == disk.number) != Some(disk) {
         return Err("读取卷关联时磁盘标识或保护信息已改变。".into());
     }
-    let partitions: Vec<Partition> = session.con.raw_query(PARTITIONS).map_err(err)?;
+    let partitions: Vec<Partition> = session.con.raw_query(Partition::WMI_SELECT).map_err(err)?;
     let volumes: Vec<Volume> = session.con.raw_query(VOLUMES).map_err(err)?;
     let links: Vec<Link> = session.con.raw_query(LINKS).map_err(err)?;
     let second = Snapshot::new(&scope, &partitions, volumes, links)?;

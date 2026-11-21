@@ -26,6 +26,7 @@ fn snapshot() -> Snapshot {
         size: 256 * policy::MIB,
         guid: Some(PARTITION_GUID.into()),
         gpt_type: Some(policy::BASIC_DATA.into()),
+        mbr_type: None,
         drive_letter: Some("G".into()),
         ..Default::default()
     };

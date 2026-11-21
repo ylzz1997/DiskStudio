@@ -25,7 +25,7 @@ struct Manifest {
 fn parts() -> Result<Vec<Partition>, String> {
     inventory()?;
     WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?
-        .raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)
+        .raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)
 }
 fn layout_without(fixtures: &[Fixture]) -> Result<Vec<Layout>, String> {
     let mut layout = parts()?

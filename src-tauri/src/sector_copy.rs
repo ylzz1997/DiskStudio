@@ -681,6 +681,7 @@ pub(crate) mod platform {
         use crate::partitions::policy::{Partition, BASIC_DATA};
         let ordinary = Partition {
             gpt_type: Some(BASIC_DATA.into()),
+            mbr_type: None,
             is_system: Some(false),
             is_boot: Some(false),
             is_offline: Some(true),

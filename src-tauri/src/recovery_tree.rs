@@ -293,7 +293,7 @@ fn file_kind(name: &str) -> FileKind {
         .as_deref()
     {
         Some(
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "svg"
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" | "cur" | "heic" | "svg"
             | "raw",
         ) => FileKind::Images,
         Some(

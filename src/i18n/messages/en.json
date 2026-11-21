@@ -1030,7 +1030,7 @@
   "正在锁定、修复并回读校验…": "Locking volumes, repairing, and verifying by readback…",
   "修复预览类型不匹配，请重新检查。": "The repair preview type is incorrect. Run the check again.",
   "分区表检查与修复": "Partition Table Check and Repair",
-  "检查 GPT 主备表的完整性与分区范围，或 512 字节 MBR 的主分区和扩展分区链。打开此面板不会读取设备。": "Check both GPT copies and partition ranges, or primary partitions and the extended chain of a 512-byte MBR. Device reads start when you run the check.",
+  "检查 GPT 主备表的完整性与分区范围，或 MBR 的主分区和扩展分区链。打开此面板不会读取设备。": "Check both GPT copies and partition ranges, or primary partitions and the extended chain of an MBR. Device reads start when you run the check.",
   "重新检查": "Check again",
   "开始检查": "Start check",
   "预览 GPT 修复": "Preview GPT repair",

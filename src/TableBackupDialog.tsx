@@ -61,7 +61,7 @@ export function TableBackupDialog({
               request: {
                 source: {
                   target: disk.hardware?.identity,
-                  layoutKey: disk.hardware?.layoutKey,
+                  layoutKey: disk.hardware?.tableLayoutKey ?? disk.hardware?.layoutKey,
                   partition: null,
                 },
                 includesBoot: boot,

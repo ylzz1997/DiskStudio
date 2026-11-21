@@ -33,7 +33,6 @@ mod volume_manage;
 mod volume_snapshot;
 
 const DISKS: &str = "SELECT __PATH,Number,SerialNumber,UniqueId,FriendlyName,Size,LogicalSectorSize,BusType,PartitionStyle,NumberOfPartitions,IsBoot,IsSystem,IsOffline,IsReadOnly,IsClustered FROM MSFT_Disk";
-const PARTITIONS: &str = "SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition";
 use crate::OPERATION;
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 struct Pending {
@@ -224,6 +223,7 @@ pub(crate) struct TableReadContext {
     pub resolved: crate::data_windows::Resolved,
     pub parts: Vec<Partition>,
     pub fingerprint: String,
+    pub mbr_container: Option<(u64, u64)>,
     volumes: Vec<(u32, Volume)>,
 }
 impl TableReadContext {
@@ -235,6 +235,7 @@ pub(crate) struct TableInspectContext {
     pub resolved: crate::data_windows::Resolved,
     pub parts: Vec<Partition>,
     pub fingerprint: String,
+    pub mbr_container: Option<(u64, u64)>,
 }
 /// Read-only diagnostics need complete identity/layout but do not lock volumes,
 /// reject the running OS merely for reading, or invoke any Storage methods.
@@ -247,7 +248,7 @@ pub(crate) fn table_inspect_context(
     let session = Session::open()?;
     let disk = policy::target_disk(&session.disks, &source.target)?;
     policy::corroborate(disk, &session.legacy)?;
-    let parts = policy::layout(disk, &session.partitions)?;
+    let (parts, container) = policy::table_layout(disk, &session.partitions)?;
     if disk.path.is_empty()
         || disk.is_clustered != Some(false)
         || disk.is_boot.is_none()
@@ -261,15 +262,14 @@ pub(crate) fn table_inspect_context(
     }
     if crate::disk_identity::layout_key(
         disk.partition_style,
-        parts
-            .iter()
+        parts.iter().copied().chain(container)
             .map(|p| (p.partition_number, p.offset, p.size, p.guid.clone()))
             .collect(),
     ) != source.layout_key
     {
         return Err("磁盘布局变化，请刷新后重选。".into());
     }
-    let fingerprint = digest(&(disk, &parts))?;
+    let fingerprint = digest(&(disk, &parts, container))?;
     let resolved = crate::data_windows::Resolved {
         disk: disk.clone(),
         offset: 0,
@@ -288,6 +288,7 @@ pub(crate) fn table_inspect_context(
         resolved,
         parts: parts.into_iter().cloned().collect(),
         fingerprint,
+        mbr_container: container.map(|p| (p.offset, p.size)),
     })
 }
 /// Explicit table jobs only. It does not preview a storage-method mutation or
@@ -298,10 +299,27 @@ pub(crate) fn table_read_context(
 ) -> Result<TableReadContext, String> {
     disk_read_context(source, retained, false)
 }
+
+pub(crate) fn table_backup_context(
+    source: &crate::data_tasks::Selection,
+    retained: Option<(&TableReadContext, &crate::data_windows::Locks)>,
+) -> Result<TableReadContext, String> {
+    read_disk_context(source, retained, false, true)
+}
+
 fn disk_read_context(
     source: &crate::data_tasks::Selection,
     retained: Option<(&TableReadContext, &crate::data_windows::Locks)>,
     allow_raw: bool,
+) -> Result<TableReadContext, String> {
+    read_disk_context(source, retained, allow_raw, false)
+}
+
+fn read_disk_context(
+    source: &crate::data_tasks::Selection,
+    retained: Option<(&TableReadContext, &crate::data_windows::Locks)>,
+    allow_raw: bool,
+    allow_extended_mbr: bool,
 ) -> Result<TableReadContext, String> {
     if source.partition.is_some() {
         return Err("分区表备份需要选择整块磁盘。".into());
@@ -316,7 +334,11 @@ fn disk_read_context(
     let session = Session::open()?;
     let disk = policy::target_disk(&session.disks, &source.target)?;
     policy::corroborate(disk, &session.legacy)?;
-    let parts = policy::layout(disk, &session.partitions)?;
+    let (parts, container) = if allow_extended_mbr {
+        policy::table_layout(disk, &session.partitions)?
+    } else {
+        (policy::layout(disk, &session.partitions)?, None)
+    };
     if disk.path.is_empty()
         || disk.is_boot != Some(false)
         || disk.is_system != Some(false)
@@ -337,8 +359,7 @@ fn disk_read_context(
     }
     if crate::disk_identity::layout_key(
         disk.partition_style,
-        parts
-            .iter()
+        parts.iter().copied().chain(container)
             .map(|p| (p.partition_number, p.offset, p.size, p.guid.clone()))
             .collect(),
     ) != source.layout_key
@@ -398,7 +419,11 @@ fn disk_read_context(
     if names(&after) != names(&session.pagefiles) {
         return Err("核对期间分页文件清单变化。".into());
     }
-    let fingerprint = digest(&(disk, &parts, &volumes))?;
+    let fingerprint = if let Some(container) = container {
+        digest(&(disk, &parts, &volumes, container))?
+    } else {
+        digest(&(disk, &parts, &volumes))?
+    };
     if retained.is_some_and(|(old, _)| old.fingerprint != fingerprint) {
         return Err("锁定期间磁盘、分区或卷信息变化。".into());
     }
@@ -421,6 +446,7 @@ fn disk_read_context(
         resolved,
         parts: parts.into_iter().cloned().collect(),
         fingerprint,
+        mbr_container: container.map(|p| (p.offset, p.size)),
         volumes,
     })
 }
@@ -646,7 +672,7 @@ impl Session {
             .raw_query("SELECT Index,SerialNumber FROM Win32_DiskDrive")
             .map_err(err)?;
         policy::inventory(&disks)?;
-        let partitions: Vec<Partition> = con.raw_query(PARTITIONS).map_err(err)?;
+        let partitions: Vec<Partition> = con.raw_query(Partition::WMI_SELECT).map_err(err)?;
         if partitions.len() > 32768 {
             return Err("分区数量异常，已拒绝操作。".into());
         }
@@ -1907,6 +1933,7 @@ mod tests {
                 size: 512 * policy::MIB,
                 guid: Some("a10ba738-0cdb-426d-a6bf-e7709f06e498".into()),
                 gpt_type: Some(policy::BASIC_DATA.into()),
+                mbr_type: None,
                 drive_letter: Some("R".into()),
                 is_boot: Some(false),
                 is_system: Some(false),
@@ -2088,6 +2115,7 @@ mod tests {
         };
         let p = Partition {
             gpt_type: Some(policy::BASIC_DATA.into()),
+            mbr_type: None,
             is_boot: Some(false),
             is_system: Some(false),
             is_offline: Some(false),

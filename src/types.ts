@@ -30,6 +30,7 @@ export interface Partition {
 export interface HardwareInfo {
   identity?: string | null;
   layoutKey?: string | null;
+  tableLayoutKey?: string | null;
   number: number;
   model: string;
   bus: string;

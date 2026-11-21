@@ -1,5 +1,5 @@
 use super::*;
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, SeekFrom};
 fn inspect_bytes(bytes: &[u8], sector: u64) -> Snapshot {
     inspect(&mut Cursor::new(bytes), bytes.len() as u64, sector, || {
         Ok(())
@@ -137,7 +137,7 @@ fn healthy_conflicting_double_bad_hybrid_wrong_sector_and_unsupported_tables_are
     }
 }
 #[test]
-fn mbr_chain_is_fully_read_but_cycles_and_four_kn_are_not_reported_as_passed() {
+fn mbr_chain_geometry_and_cycles_are_checked() {
     let original = crate::table_archive::tests::mbr();
     let s = inspect_bytes(&original, 512);
     assert_eq!(s.ebrs.len(), 2);
@@ -145,7 +145,20 @@ fn mbr_chain_is_fully_read_but_cycles_and_four_kn_are_not_reported_as_passed() {
     assert!(s.repair(&"a".repeat(64)).is_err());
     let s = inspect_bytes(&original, 4096);
     assert!(s.ebrs.is_empty());
-    assert_eq!(state(&s, "mbr-layout"), CheckState::Unchecked);
+    assert_eq!(state(&s, "mbr-layout"), CheckState::Failed);
+    let wide = crate::table_archive::tests::mbr_4kn();
+    let s = inspect_bytes(&wide, 4096);
+    assert_eq!(
+        s.ebrs.iter().map(|e| e.offset).collect::<Vec<_>>(),
+        [MIB, 3 * MIB, 2 * MIB]
+    );
+    assert_eq!(s.retained_bytes(), 2 * MIB + 3 * 4096);
+    assert_eq!(state(&s, "ebr-chain"), CheckState::Passed);
+    assert_eq!(s.mbr_ranges.as_ref().unwrap().len(), 4);
+    assert!(s.repair(&"a".repeat(64)).is_err());
+    let mut after = wide;
+    after[3 * MIB as usize + 600] ^= 1;
+    assert!(s.matches(&mut Cursor::new(after), || Ok(())).is_err());
     let mut cycle = original.clone();
     let at = 2 * MIB as usize + 462;
     cycle[at + 4] = 0x0f;

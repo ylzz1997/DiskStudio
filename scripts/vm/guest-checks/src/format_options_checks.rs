@@ -115,7 +115,7 @@ fn verify_existing_ntfs(fixture: &Fixture, options: FormatOptions) -> Result<(),
         .map_err(err)?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let p = parts
         .iter()
         .find(|p| p.disk_number == r.disk.number && p.partition_number == fixture.number)
@@ -173,7 +173,7 @@ fn resolve(fixture: &Fixture) -> Result<data_windows::Resolved, String> {
     }
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let found: Vec<_> = parts
         .iter()
         .filter(|p| p.disk_number == r.disk.number && p.partition_number == fixture.number)
@@ -217,7 +217,7 @@ fn new_fixture(log: &mut fs::File, size: u64) -> Result<Fixture, String> {
         .find(|d| d.serial_number.as_deref().map(disk_identity::clean) == Some(B))
         .ok_or("B absent")?
         .number;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let found: Vec<_> = parts
         .into_iter()
         .filter(|p| p.disk_number == disk_number && p.offset == offset && p.size == size)

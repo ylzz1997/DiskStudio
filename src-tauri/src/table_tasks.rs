@@ -103,7 +103,7 @@ mod windows {
         if request.source.partition.is_some() {
             return Err("请选择整块磁盘。".into());
         }
-        let initial = partitions::table_read_context(&request.source, None)?;
+        let initial = partitions::table_backup_context(&request.source, None)?;
         let Some(path) = rfd::FileDialog::new()
             .set_title(crate::native_locale::text("备份分区表到另一块磁盘"))
             .add_filter(
@@ -136,12 +136,12 @@ mod windows {
         if dir.exists(name) {
             return Err("备份文件已存在，请选择新文件名。".into());
         }
-        let ctx = partitions::table_read_context(&request.source, None)?;
+        let ctx = partitions::table_backup_context(&request.source, None)?;
         if ctx.fingerprint != initial.fingerprint {
             return Err("选择文件期间磁盘状态已变化，请重试。".into());
         }
         let locks = platform::lock(&ctx.resolved)?;
-        let fresh = partitions::table_read_context(&request.source, Some((&ctx, &locks)))?;
+        let fresh = partitions::table_backup_context(&request.source, Some((&ctx, &locks)))?;
         let mut reader = platform::device(&fresh.resolved, false)?;
         let d = &fresh.resolved.disk;
         // Exclude table-dependent UniqueId so a later damaged-table recovery
@@ -165,7 +165,14 @@ mod windows {
             || check(cancel),
         )?;
         let info = archive.validate()?;
-        if info.layout.len() != fresh.parts.len()
+        let expected = match d.partition_style {
+            Some(1) => "MBR",
+            Some(2) => "GPT",
+            _ => return Err("Windows 未报告可备份的分区表。".into()),
+        };
+        if info.scheme != expected
+            || info.mbr_container != fresh.mbr_container
+            || info.layout.len() != fresh.parts.len()
             || info.layout.iter().any(|p| {
                 !fresh
                     .parts
@@ -175,7 +182,7 @@ mod windows {
         {
             return Err("原始分区表与 Windows 分区范围不一致，未保存备份。".into());
         }
-        partitions::table_read_context(&request.source, Some((&ctx, &locks)))?;
+        partitions::table_backup_context(&request.source, Some((&ctx, &locks)))?;
         archive.matches(&mut reader, || check(cancel))?;
         let bytes = archive.encode()?;
         drop(reader);

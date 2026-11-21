@@ -28,7 +28,6 @@ mod surface_device_windows;
 pub(crate) use surface_device_windows::surface_scan_device;
 
 const DISKS: &str = "SELECT __PATH,Number,SerialNumber,UniqueId,FriendlyName,Size,LogicalSectorSize,BusType,PartitionStyle,NumberOfPartitions,IsBoot,IsSystem,IsOffline,IsReadOnly,IsClustered FROM MSFT_Disk";
-const PARTITIONS: &str = "SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition";
 #[derive(Clone)]
 pub struct Resolved {
     pub disk: Disk,
@@ -128,7 +127,7 @@ impl Inventory {
         let con =
             WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
         let disks = con.raw_query(DISKS).map_err(err)?;
-        let parts: Vec<Partition> = con.raw_query(PARTITIONS).map_err(err)?;
+        let parts: Vec<Partition> = con.raw_query(Partition::WMI_SELECT).map_err(err)?;
         policy::inventory(&disks)?;
         if parts.len() > 32768 {
             return Err("分区数量异常".into());

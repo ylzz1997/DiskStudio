@@ -161,6 +161,7 @@ mod storage_spaces;
 mod surface_scan;
 #[path = "../../../../src-tauri/src/table_archive.rs"]
 mod table_archive;
+mod table_mbr_checks;
 #[path = "../../../../src-tauri/src/table_restore.rs"]
 mod table_restore;
 #[path = "../../../../src-tauri/src/used_space.rs"]
@@ -665,6 +666,11 @@ fn main() {
                 | "Signature-Formats-4Kn-Verify"
                 | "Signature-Media-4Kn-Prepare"
                 | "Signature-Media-4Kn-Verify"
+                | "Signature-Images-4Kn-Prepare"
+                | "Signature-Images-4Kn-Verify"
+                | "Table-MBR-4Kn-Prepare"
+                | "Table-MBR-4Kn-Verify"
+                | "Table-MBR-4Kn-Record"
                 | "Surface-Refinement-4Kn-Verify"
                 | "Surface-Refinement-4Kn-Inspect"
                 | "Surface-Refinement-4Kn-Prepare"
@@ -841,6 +847,11 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Signature-Formats-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Formats),
         Some("Signature-Media-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Media),
         Some("Signature-Media-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Media),
+        Some("Signature-Images-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Images),
+        Some("Signature-Images-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Images),
+        Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
+        Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
+        Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),
         Some("Surface-Refinement-4Kn-Verify") => sector_copy_checks::verify_surface_refinement(),
         Some("Surface-Refinement-4Kn-Inspect") => sector_copy_checks::inspect_surface_refinement(),
         Some("Surface-Refinement-4Kn-Prepare") => sector_copy_checks::prepare_surface_refinement(),

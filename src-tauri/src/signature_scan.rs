@@ -4,6 +4,8 @@ use crate::recovery::{Candidate, Locator, MAX_RESULTS};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 
+#[path = "signature_images.rs"]
+mod images;
 #[path = "signature_media.rs"]
 mod media;
 
@@ -33,8 +35,11 @@ pub enum Kind {
     Mp4,
     Mov,
     Ogg,
+    Tiff,
+    Ico,
+    Cur,
 }
-const ALL: [Kind; 16] = [
+const ALL: [Kind; 19] = [
     Kind::Png,
     Kind::Jpeg,
     Kind::Pdf,
@@ -51,6 +56,9 @@ const ALL: [Kind; 16] = [
     Kind::Mp4,
     Kind::Mov,
     Kind::Ogg,
+    Kind::Tiff,
+    Kind::Ico,
+    Kind::Cur,
 ];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -115,7 +123,14 @@ impl Kind {
         self.zip_family()
             || matches!(
                 self,
-                Self::SevenZip | Self::Sqlite | Self::Mp4 | Self::Mov | Self::Ogg
+                Self::SevenZip
+                    | Self::Sqlite
+                    | Self::Mp4
+                    | Self::Mov
+                    | Self::Ogg
+                    | Self::Tiff
+                    | Self::Ico
+                    | Self::Cur
             )
     }
 
@@ -132,6 +147,8 @@ impl Kind {
             Self::Sqlite => b.starts_with(SQLITE_MAGIC),
             Self::Mp4 | Self::Mov => media::movie_kind(b) == Some(self),
             Self::Ogg => media::ogg_start(b),
+            Self::Tiff => images::tiff_start(b),
+            Self::Ico | Self::Cur => images::icon_kind(b) == Some(self),
             Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => false, // EOCD-anchored, below.
         }
     }
@@ -153,6 +170,9 @@ impl Kind {
             Self::Mp4 => "mp4",
             Self::Mov => "mov",
             Self::Ogg => "ogg",
+            Self::Tiff => "tif",
+            Self::Ico => "ico",
+            Self::Cur => "cur",
         }
     }
     fn footer(self) -> Option<&'static [u8]> {
@@ -175,6 +195,8 @@ impl Kind {
             Self::Sqlite => 100,
             Self::Mp4 | Self::Mov => 12,
             Self::Ogg => 27,
+            Self::Tiff => 16,
+            Self::Ico | Self::Cur => 6,
             Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => 0,
         }
     }
@@ -203,6 +225,8 @@ fn candidate(
                 "连续电影容器候选。已核对媒体块的采样表与数据范围，未解码音频或视频。"
             }
             Kind::Ogg => "连续 Ogg 候选。已核对各流的页序列、包边界与 CRC，未解码音频或视频。",
+            Kind::Tiff => "连续 TIFF 候选。已核对图像目录和像素数据范围，未解码像素。",
+            Kind::Ico | Kind::Cur => "连续图标或光标候选。已核对目录与内嵌图像范围，未解码像素。",
             _ => "连续数据候选；未验证解码完整性，原文件名和删除状态未知",
         }
         .into(),
@@ -599,7 +623,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
             Kind::Zip | Kind::Docx | Kind::Xlsx | Kind::Pptx => b'P',
             Kind::SevenZip => SEVEN_ZIP_MAGIC[0],
             Kind::Sqlite => SQLITE_MAGIC[0],
-            Kind::Mp4 | Kind::Mov | Kind::Ogg => continue, // Multi-offset media anchors below.
+            Kind::Mp4 | Kind::Mov | Kind::Ogg | Kind::Tiff | Kind::Ico | Kind::Cur => continue,
         } as usize] = true;
     }
     let (mut carry, mut consumed, mut searched) = (
@@ -614,6 +638,8 @@ pub fn continue_scan_scoped<R: Read + Seek>(
     let archives = options.kinds.iter().any(|k| k.zip_family());
     let movies = options.kinds.contains(&Kind::Mp4) || options.kinds.contains(&Kind::Mov);
     let ogg = options.kinds.contains(&Kind::Ogg);
+    let tiff = options.kinds.contains(&Kind::Tiff);
+    let icons = options.kinds.contains(&Kind::Ico) || options.kinds.contains(&Kind::Cur);
     let lookahead = if options.kinds.contains(&Kind::Sqlite) {
         SQLITE_MAGIC.len()
     } else {
@@ -711,15 +737,22 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                     }
                 }
                 let aligned = (range.start + at) & (alignment - 1) == 0;
-                let media = if !aligned {
-                    None
-                } else if ogg && buffer[i] == b'O' && media::ogg_start(&buffer[i..end]) {
-                    Some(Kind::Ogg)
-                } else if movies && buffer.get(i + 4) == Some(&b'f') {
-                    media::movie_kind(&buffer[i..end]).filter(|kind| options.kinds.contains(kind))
-                } else {
-                    None
-                };
+                // Structurally bounded candidates can start inside a stray open
+                // PDF or JPEG anchor. Validate their ranges independently.
+                let bytes = &buffer[i..end];
+                let structured = aligned
+                    .then(|| match buffer[i] {
+                        b'O' if ogg && media::ogg_start(bytes) => Some(Kind::Ogg),
+                        b'I' | b'M' if tiff && images::tiff_start(bytes) => Some(Kind::Tiff),
+                        0 if movies && bytes.get(4..8) == Some(b"ftyp") => {
+                            media::movie_kind(bytes).filter(|kind| options.kinds.contains(kind))
+                        }
+                        0 if icons && matches!(bytes.get(2), Some(1 | 2)) => {
+                            images::icon_kind(bytes).filter(|kind| options.kinds.contains(kind))
+                        }
+                        _ => None,
+                    })
+                    .flatten();
                 if let Some((kind, start, header)) = &active {
                     let footer = kind.footer().expect("only terminated kinds remain active");
                     if at - start >= MAX_FILE {
@@ -748,7 +781,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         continue;
                     }
                 }
-                let kind = media.or_else(|| {
+                let kind = structured.or_else(|| {
                     if active.is_some() || !aligned || !possible_start[buffer[i] as usize] {
                         return None;
                     }
@@ -799,8 +832,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                             if count as usize >= MAX_RESULTS {
                                 stop!("达到结果上限，扫描提前结束。".into(), at);
                             }
-                            // A verified page sequence or movie span may contain
-                            // embedded byte patterns for unrelated active probes.
+                            // Resume past the verified container and its embedded data.
                             active = None;
                             i = (at + length - base) as usize;
                             continue;
@@ -1340,6 +1372,11 @@ fn probe<R: Read + Seek>(
                 p.bytes::<12>(0)?.to_vec(),
             ),
             Kind::Ogg => (media::ogg(&mut p, budget)?, p.bytes::<27>(0)?.to_vec()),
+            Kind::Tiff => (images::tiff(&mut p, budget)?, p.bytes::<16>(0)?.to_vec()),
+            Kind::Ico | Kind::Cur => (
+                images::icon(&mut p, kind, budget)?,
+                p.bytes::<6>(0)?.to_vec(),
+            ),
             _ => return Err(ProbeError::Invalid),
         };
         let footer = p
@@ -1364,22 +1401,83 @@ mod tests {
     const MOVIE_MOV: &[u8] = include_bytes!("../../tests/fixtures/signature-bmff-tail.mov");
     const OGG_MUX: &[u8] = include_bytes!("../../tests/fixtures/signature-ogg-multiplex.ogg");
     const OGG_OPUS: &[u8] = include_bytes!("../../tests/fixtures/signature-ogg-opus.ogg");
+    const CLASSIC_TIFF: &[u8] = include_bytes!("../../tests/fixtures/signature-tiff-pages.tif");
+    const BIG_TIFF: &[u8] = include_bytes!("../../tests/fixtures/signature-bigtiff-tiles.tif");
+    const ICON: &[u8] = include_bytes!("../../tests/fixtures/signature-icon-png.ico");
+    const CURSOR: &[u8] = include_bytes!("../../tests/fixtures/signature-cursor-dib.cur");
 
     #[test]
     fn media_signatures_resume_and_extract_independent_samples() {
-        let spots = [
-            (CHUNK - 5, Kind::Mp4, MOVIE_MP4),
-            (2 * CHUNK - 4, Kind::Ogg, OGG_MUX),
-            (2 * CHUNK + 24 * 1024, Kind::Mov, MOVIE_MOV),
-            (2 * CHUNK + 32 * 1024, Kind::Ogg, OGG_OPUS),
-        ];
+        assert_resume_and_extract(
+            [
+                (CHUNK - 5, Kind::Mp4, MOVIE_MP4),
+                (2 * CHUNK - 4, Kind::Ogg, OGG_MUX),
+                (2 * CHUNK + 24 * 1024, Kind::Mov, MOVIE_MOV),
+                (2 * CHUNK + 32 * 1024, Kind::Ogg, OGG_OPUS),
+            ],
+            vec![Kind::Pdf, Kind::Mp4, Kind::Mov, Kind::Ogg],
+        );
+    }
+
+    #[test]
+    fn image_signatures_resume_and_extract_independent_samples() {
+        assert_resume_and_extract(
+            [
+                (CHUNK - 3, Kind::Tiff, CLASSIC_TIFF),
+                (2 * CHUNK - 7, Kind::Tiff, BIG_TIFF),
+                (2 * CHUNK + 4096, Kind::Ico, ICON),
+                (2 * CHUNK + 8192, Kind::Cur, CURSOR),
+            ],
+            vec![Kind::Pdf, Kind::Tiff, Kind::Ico, Kind::Cur],
+        );
+    }
+
+    #[test]
+    fn image_signatures_reject_cyclic_or_out_of_bounds_directories_and_bad_images() {
+        for (kind, bytes) in [
+            (Kind::Tiff, CLASSIC_TIFF),
+            (Kind::Tiff, BIG_TIFF),
+            (Kind::Ico, ICON),
+            (Kind::Cur, CURSOR),
+        ] {
+            assert!(collect(&bytes[..bytes.len() - 1], vec![kind]).is_empty());
+        }
+        let mut cyclic = CLASSIC_TIFF.to_vec();
+        let first = u32::from_le_bytes(cyclic[4..8].try_into().unwrap()) as usize;
+        let entries = u16::from_le_bytes(cyclic[first..first + 2].try_into().unwrap()) as usize;
+        let next = first + 2 + entries * 12;
+        cyclic[next..next + 4].copy_from_slice(&(first as u32).to_le_bytes());
+        assert!(collect(&cyclic, vec![Kind::Tiff]).is_empty());
+        let mut overlap = CLASSIC_TIFF.to_vec();
+        let strip_table = overlap[first + 2..next]
+            .chunks_exact(12)
+            .find(|entry| entry[..2] == 273u16.to_le_bytes())
+            .unwrap();
+        let strips = u32::from_le_bytes(strip_table[8..12].try_into().unwrap()) as usize;
+        overlap[strips..strips + 4].copy_from_slice(&(first as u32).to_le_bytes());
+        assert!(collect(&overlap, vec![Kind::Tiff]).is_empty());
+        let mut png = ICON.to_vec();
+        let embedded = u32::from_le_bytes(png[18..22].try_into().unwrap()) as usize;
+        png[embedded + 29] ^= 1; // IHDR CRC
+        assert!(collect(&png, vec![Kind::Ico]).is_empty());
+        let mut outside = CURSOR.to_vec();
+        outside[10..12].copy_from_slice(&16u16.to_le_bytes());
+        assert!(collect(&outside, vec![Kind::Cur]).is_empty());
+        assert!(collect(CURSOR, vec![Kind::Ico]).is_empty());
+        assert!(collect(ICON, vec![Kind::Cur]).is_empty());
+    }
+
+    fn assert_resume_and_extract<const N: usize>(
+        spots: [(usize, Kind, &[u8]); N],
+        kinds: Vec<Kind>,
+    ) {
         let mut source = vec![0; 3 * CHUNK];
         source[..5].copy_from_slice(b"%PDF-");
         for (start, _, bytes) in spots {
             source[start..start + bytes.len()].copy_from_slice(bytes);
         }
         let options = Options {
-            kinds: vec![Kind::Pdf, Kind::Mp4, Kind::Mov, Kind::Ogg],
+            kinds,
             ..Options::default()
         };
         let mut checkpoint = Checkpoint::default();

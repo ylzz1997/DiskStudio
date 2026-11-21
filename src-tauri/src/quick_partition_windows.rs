@@ -482,6 +482,7 @@ mod tests {
                 size: e.size,
                 guid: Some("new-guid".into()),
                 gpt_type: Some(policy::BASIC_DATA.into()),
+                mbr_type: None,
                 is_boot: Some(false),
                 is_system: Some(false),
                 is_offline: Some(false),

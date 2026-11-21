@@ -113,6 +113,57 @@ pub(crate) fn mbr() -> Vec<u8> {
     b[6291456..6291968].fill(33);
     b
 }
+
+pub(crate) fn mbr_4kn() -> Vec<u8> {
+    const S: usize = 4096;
+    let mib = MIB as usize;
+    let mut disk = vec![0; SIZE];
+    let unit = (mib / S) as u32;
+    mbr_entry(&mut disk, 0, 0x0f, unit, 4 * unit);
+    mbr_entry(&mut disk, 1, 7, 6 * unit, unit / 2);
+    disk[512..S].fill(0x31);
+    // Linked order is 1 MiB, 3 MiB, 2 MiB. The archive stores ascending extents.
+    for (page, next) in [(1, 2), (3, 1), (2, 0)] {
+        let at = page * mib;
+        let block = &mut disk[at..at + S];
+        mbr_entry(block, 0, 0x0c, 1, unit / 2);
+        if next != 0 {
+            mbr_entry(block, 1, 0x0f, next * unit, unit);
+        }
+        block[512..].fill(0x50 + page as u8);
+        disk[at + S..at + 2 * S].fill(0x60 + page as u8);
+    }
+    disk[6 * mib..6 * mib + S].fill(0x70);
+    disk
+}
+
+#[test]
+fn four_kn_mbr_archive_preserves_full_sectors_and_rebuilds_chain_order() {
+    const S: usize = 4096;
+    let disk = mbr_4kn();
+    for boot in [false, true] {
+        let archive = captured(disk.clone(), S as u64, boot);
+        let info = archive.validate().unwrap();
+        assert_eq!(
+            (info.scheme.as_str(), info.sector, info.partitions),
+            ("MBR", 4096, 4)
+        );
+        assert_eq!(info.table_bytes, 4 * S as u64);
+        assert_eq!(info.boot_bytes, if boot { 4 * S as u64 } else { 0 });
+        assert_eq!(
+            Archive::decode(&archive.encode().unwrap()).unwrap(),
+            archive
+        );
+        for span in &archive.extents {
+            let start = span.offset as usize;
+            assert_eq!(span.bytes.len(), S);
+            assert_eq!(span.bytes, disk[start..start + S]);
+        }
+        let mut damaged = archive;
+        damaged.extents.retain(|e| e.offset != 3 * MIB);
+        assert!(damaged.validate().is_err());
+    }
+}
 #[test]
 fn mbr_extended_chain_and_each_data_boot_sector_are_preserved_without_container_bytes() {
     let archive = captured(mbr(), 512, true);

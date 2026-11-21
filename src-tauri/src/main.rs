@@ -729,13 +729,15 @@ fn inspect_image(
     tail: Vec<u8>,
     size: u64,
     filename: String,
+    sector: Option<u64>,
     ebrs: Option<Vec<disk_core::mbr::EbrSector>>,
 ) -> Result<disk_core::table_check::ImageInspection, String> {
-    disk_core::table_check::inspect_image_with_ebrs(
+    disk_core::table_check::inspect_image_with_geometry(
         &head,
         &tail,
         size,
         &filename,
+        sector,
         &ebrs.unwrap_or_default(),
     )
 }
@@ -743,9 +745,10 @@ fn inspect_image(
 fn image_ebr_next(
     mbr: Vec<u8>,
     size: u64,
+    sector: Option<u64>,
     ebrs: Vec<disk_core::mbr::EbrSector>,
 ) -> Result<Option<u64>, String> {
-    disk_core::mbr::next_ebr(&mbr, size, &ebrs)
+    disk_core::mbr::next_ebr_with_sector(&mbr, size, sector.unwrap_or(512), &ebrs)
 }
 
 #[tauri::command]

@@ -34,6 +34,8 @@ pub struct TableReport {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageInspection {
+    #[serde(skip)]
+    pub mbr_container: Option<(u64, u64)>,
     pub disk: Option<Disk>,
     pub parse_error: Option<String>,
     pub report: TableReport,
@@ -287,6 +289,19 @@ pub fn inspect_image_with_ebrs(
     filename: &str,
     ebrs: &[EbrSector],
 ) -> Result<ImageInspection, String> {
+    inspect_image_with_geometry(head, tail, size, filename, None, ebrs)
+}
+
+/// An MBR has no stored logical sector size. A caller with device, container,
+/// or user-selected geometry must pass it explicitly.
+pub fn inspect_image_with_geometry(
+    head: &[u8],
+    tail: &[u8],
+    size: u64,
+    filename: &str,
+    sector: Option<u64>,
+    ebrs: &[EbrSector],
+) -> Result<ImageInspection, String> {
     if !(4 * MIB..=1 << 43).contains(&size)
         || !(512..=MIB as usize).contains(&head.len())
         || !(512..=MIB as usize).contains(&tail.len())
@@ -303,17 +318,25 @@ pub fn inspect_image_with_ebrs(
                 .into(),
         );
     }
-    mbr::validate_sectors(ebrs, size)?;
+    let mbr_sector = sector.unwrap_or(512);
+    if !matches!(mbr_sector, 512 | 4096)
+        || head.len() < mbr_sector as usize
+        || tail.len() < mbr_sector as usize
+    {
+        return Err("逻辑扇区大小无效或首尾读取窗口不足一个完整扇区。".into());
+    }
+    mbr::validate_sectors(ebrs, size, mbr_sector)?;
     let ends = Ends { head, tail, size };
-    for sector in ebrs {
+    for block in ebrs {
         if ends
-            .get(sector.offset, 512)
-            .is_some_and(|old| old != sector.bytes)
+            .get(block.offset, mbr_sector)
+            .is_some_and(|old| old != block.bytes)
         {
             return Err("EBR 与首尾读取窗口中的相同位置内容不一致，请重新打开镜像。".into());
         }
     }
     let mut parsed = parse_image(head, size, filename);
+    let mut mbr_container = None;
     let mut report = TableReport {
         filename: filename.into(),
         scheme: "未知".into(),
@@ -477,16 +500,26 @@ pub fn inspect_image_with_ebrs(
                 "存在保护性 MBR，但首尾均未找到可确认的 GPT 头部。",
             );
         } else {
-            report.sector_size = Some(512);
-            report.add(
-                "mbr-sector",
-                "MBR 扇区大小",
-                CheckState::Warning,
-                "MBR 不记录扇区大小，当前按 512 字节解释；不能据此验证 4Kn 镜像。",
-            );
-            let (state, detail) = match mbr::scan(head, size, ebrs) {
+            report.sector_size = Some(mbr_sector);
+            if sector.is_some() {
+                report.add(
+                    "mbr-sector",
+                    "MBR 扇区大小",
+                    CheckState::Passed,
+                    "MBR 与 EBR 条目按提供的逻辑扇区大小解释。",
+                );
+            } else {
+                report.add(
+                    "mbr-sector",
+                    "MBR 扇区大小",
+                    CheckState::Warning,
+                    "MBR 不记录扇区大小，当前按 512 字节解释；不能据此验证 4Kn 镜像。",
+                );
+            }
+            let (state, detail) = match mbr::scan(head, size, mbr_sector, ebrs) {
                 Ok(Scan::Complete(layout)) => {
                     if let Some((base, end)) = layout.extended {
+                        mbr_container = Some((base, end - base));
                         report.add("ebr-chain", "扩展分区与逻辑分区", CheckState::Passed,
                             format!("容器偏移 {base} B，容量 {} B；{} 个 EBR、{} 个逻辑分区。链路无循环，数据与分区表不重叠。", end - base, layout.table_count(), layout.logical_count));
                     }
@@ -526,6 +559,19 @@ pub fn inspect_image_with_ebrs(
         Ok(d) => (Some(d), None),
         Err(e) => (None, Some(e)),
     };
+    if sector
+        .zip(report.sector_size)
+        .is_some_and(|(provided, detected)| provided != detected)
+    {
+        report.add(
+            "sector-mismatch",
+            "逻辑扇区大小",
+            CheckState::Failed,
+            "提供的逻辑扇区大小与分区表不一致。",
+        );
+        disk = None;
+        parse_error = Some("提供的逻辑扇区大小与分区表不一致。".into());
+    }
     // A diagnostic report is useful even if there is no trustworthy primary
     // layout to display. Never silently promote a backup or a conflicting table.
     if report.items.iter().any(|i| {
@@ -553,9 +599,13 @@ pub fn inspect_image_with_ebrs(
             ebr_crc.finalize(),
             crc32fast::hash(filename.as_bytes())
         );
+        if disk.scheme == "MBR" && disk.sector_size == 4096 {
+            disk.id.push_str("-4096");
+        }
     }
     report.finish();
     Ok(ImageInspection {
+        mbr_container: disk.as_ref().and(mbr_container),
         disk,
         parse_error,
         report,

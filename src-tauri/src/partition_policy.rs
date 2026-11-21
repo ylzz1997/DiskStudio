@@ -47,6 +47,8 @@ pub struct Partition {
     pub size: u64,
     pub guid: Option<String>,
     pub gpt_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mbr_type: Option<u16>,
     pub drive_letter: Option<String>,
     pub is_boot: Option<bool>,
     pub is_system: Option<bool>,
@@ -55,6 +57,13 @@ pub struct Partition {
     pub is_hidden: Option<bool>,
     pub is_shadow_copy: Option<bool>,
 }
+
+#[cfg(windows)]
+impl Partition {
+    // WMI deserializes every field, including optional fields, from this projection.
+    pub(crate) const WMI_SELECT: &str = "SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,MbrType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition";
+}
+
 pub fn guid(s: &str) -> String {
     clean(s).trim_matches(['{', '}']).to_ascii_lowercase()
 }
@@ -139,6 +148,32 @@ pub fn corroborate(d: &Disk, legacy: &[LegacyIdentity]) -> Result<(), String> {
     Ok(())
 }
 pub fn layout<'a>(disk: &Disk, partitions: &'a [Partition]) -> Result<Vec<&'a Partition>, String> {
+    layout_with_container(disk, partitions, None)
+}
+
+pub(crate) fn table_layout<'a>(
+    disk: &Disk,
+    partitions: &'a [Partition],
+) -> Result<(Vec<&'a Partition>, Option<&'a Partition>), String> {
+    let container = (disk.partition_style == Some(1))
+        .then(|| crate::disk_identity::extended_mbr(
+            disk.logical_sector_size, disk.size,
+            partitions.iter().filter(|p| p.disk_number == disk.number)
+                .map(|p| (p.partition_number, p.offset, p.size, p.mbr_type)),
+        ))
+        .flatten()
+        .and_then(|(start, len)| partitions.iter().find(|p| {
+            p.disk_number == disk.number && p.partition_number == 0 && p.offset == start
+                && p.size == len && p.drive_letter.as_deref().is_none_or(|s| clean(s).is_empty())
+                && p.is_boot != Some(true) && p.is_system != Some(true)
+        }));
+    let parts = layout_with_container(disk, partitions, container)?;
+    Ok((parts, container))
+}
+
+fn layout_with_container<'a>(
+    disk: &Disk, partitions: &'a [Partition], container: Option<&Partition>,
+) -> Result<Vec<&'a Partition>, String> {
     let mut parts: Vec<_> = partitions
         .iter()
         .filter(|p| p.disk_number == disk.number)
@@ -146,6 +181,14 @@ pub fn layout<'a>(disk: &Disk, partitions: &'a [Partition]) -> Result<Vec<&'a Pa
     parts.sort_by_key(|p| p.offset);
     if disk.number_of_partitions != Some(parts.len() as u32) || parts.len() > 128 {
         return Err("分区列表不完整，请刷新后重试。".into());
+    }
+    if let Some(container) = container {
+        if container.path.is_empty()
+            || parts.iter().any(|p| p.partition_number != 0 && p.path == container.path)
+        {
+            return Err("MBR 扩展分区容器身份缺失或重复。".into());
+        }
+        parts.retain(|p| p.partition_number != 0);
     }
     let mut end = 0;
     let mut numbers = HashSet::new();
@@ -437,6 +480,25 @@ pub fn validate(disk: &Disk, partitions: &[Partition], action: &Action) -> Resul
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn wmi_partition_projection_includes_every_deserialized_field() {
+        let partition = Partition {
+            mbr_type: Some(5),
+            ..Partition::default()
+        };
+        let row = serde_json::to_value(partition).unwrap();
+        let fields = Partition::WMI_SELECT
+            .strip_prefix("SELECT ")
+            .unwrap()
+            .strip_suffix(" FROM MSFT_Partition")
+            .unwrap()
+            .split(',')
+            .collect::<std::collections::BTreeSet<_>>();
+        let keys = row.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(fields, keys);
+    }
+
     #[test]
     fn btrfs_clone_accepts_a_verified_offline_linux_data_partition() {
         let mut disk = disks()[1].clone();
@@ -628,6 +690,7 @@ mod tests {
             size: 2 * GIB,
             guid: Some("unique-guid".into()),
             gpt_type: Some(BASIC_DATA.into()),
+            mbr_type: None,
             is_boot: Some(false),
             is_system: Some(false),
             is_read_only: Some(false),

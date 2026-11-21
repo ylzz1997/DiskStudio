@@ -216,7 +216,7 @@ pub fn lock_probe() -> Result<String, String> {
         .ok_or("A missing")?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts:Vec<partitions::policy::Partition>=con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts:Vec<partitions::policy::Partition>=con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let matches = parts
         .iter()
         .filter(|p| {
@@ -392,7 +392,7 @@ pub fn volume_probe() -> Result<String, String> {
     struct Association {}
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts:Vec<partitions::policy::Partition>=con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts:Vec<partitions::policy::Partition>=con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let found = parts
         .iter()
         .filter(|p| {
@@ -478,7 +478,7 @@ pub fn support() -> Result<String, String> {
     }
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let p = parts
         .iter()
         .filter(|p| {
@@ -521,7 +521,7 @@ pub(super) fn layouts(exclude: &[(u32, u32)]) -> Result<Vec<(u32, u32, u64, u64,
     inventory()?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let mut keys = parts
         .into_iter()
         .filter(|p| !exclude.contains(&(p.disk_number, p.partition_number)))

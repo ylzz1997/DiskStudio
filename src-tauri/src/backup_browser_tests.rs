@@ -276,6 +276,31 @@ fn gpt(sector: usize) -> Vec<u8> {
     bytes
 }
 #[test]
+fn mbr_disk_backup_indexes_four_kn_ebr_ranges_and_preserves_boot_sectors() {
+    let disk = crate::table_archive::tests::mbr_4kn();
+    let browser = browse(&disk, "disk", 4096);
+    let parts = &browser.info.partitions;
+    assert_eq!(parts.len(), 4);
+    assert_eq!(
+        parts.iter().map(|part| part.start).collect::<Vec<_>>(),
+        [
+            MIB as u64 + 4096,
+            2 * MIB as u64 + 4096,
+            3 * MIB as u64 + 4096,
+            6 * MIB as u64,
+        ]
+    );
+    for part in parts {
+        let mut stream = browser.reader(part.id).unwrap();
+        let mut first = vec![0; 4096];
+        stream.read_exact(&mut first).unwrap();
+        assert_eq!(first, disk[part.start as usize..part.start as usize + 4096]);
+    }
+    let wrong = browse(&disk, "disk", 512);
+    assert!(wrong.info.partitions.is_empty() && wrong.info.table_issue.is_some());
+}
+
+#[test]
 fn gpt_backup_geometry_is_validated_before_partitions_are_available() {
     for sector in [512, 4096] {
         let disk = gpt(sector);

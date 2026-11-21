@@ -105,7 +105,7 @@ export function TableInspectDialog({
           request: {
             source: {
               target: disk.hardware?.identity,
-              layoutKey: disk.hardware?.layoutKey,
+              layoutKey: disk.hardware?.tableLayoutKey ?? disk.hardware?.layoutKey,
               partition: null,
             },
           },
@@ -152,7 +152,7 @@ export function TableInspectDialog({
     >
       <p className="table-backup-intro">
         {t(
-          "检查 GPT 主备表的完整性与分区范围，或 512 字节 MBR 的主分区和扩展分区链。打开此面板不会读取设备。",
+          "检查 GPT 主备表的完整性与分区范围，或 MBR 的主分区和扩展分区链。打开此面板不会读取设备。",
         )}
       </p>
       <div className="table-backup-actions">

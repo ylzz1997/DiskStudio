@@ -263,6 +263,7 @@ impl Browser {
         mut tick: impl FnMut(u64, u64) -> Result<(), String>,
     ) -> Result<(), String> {
         let size = self.info.size;
+        let sector = self.info.sector;
         let mut reader = self.content_reader()?;
         let count = size.min(disk_core::MIB) as usize;
         let mut head = vec![0; count];
@@ -278,8 +279,13 @@ impl Browser {
                 .iter()
                 .any(|n| head.get(*n..*n + 8) == Some(b"EFI PART"))
         {
+            let Some(first) = head.get(..sector as usize) else {
+                self.info.table_issue = Some("MBR 缺少完整的逻辑扇区。".into());
+                return Ok(());
+            };
             loop {
-                let offset = match disk_core::mbr::next_ebr(&head[..512], size, &ebrs) {
+                let offset = match disk_core::mbr::next_ebr_with_sector(first, size, sector, &ebrs)
+                {
                     Ok(Some(offset)) => offset,
                     Ok(None) => break,
                     Err(issue) => {
@@ -288,7 +294,7 @@ impl Browser {
                     }
                 };
                 tick(size, size)?;
-                let mut bytes = vec![0; 512];
+                let mut bytes = vec![0; sector as usize];
                 reader
                     .seek(SeekFrom::Start(offset))
                     .map_err(|e| e.to_string())?;
@@ -296,11 +302,12 @@ impl Browser {
                 ebrs.push(disk_core::mbr::EbrSector { offset, bytes });
             }
         }
-        let inspected = match disk_core::table_check::inspect_image_with_ebrs(
+        let inspected = match disk_core::table_check::inspect_image_with_geometry(
             &head,
             &tail,
             size,
             "backup-content.img",
+            Some(sector),
             &ebrs,
         ) {
             Ok(inspected) => inspected,
@@ -309,6 +316,14 @@ impl Browser {
                 return Ok(());
             }
         };
+        if inspected
+            .report
+            .sector_size
+            .is_some_and(|value| value != sector)
+        {
+            self.info.table_issue = Some("备份记录的扇区大小与分区表不一致".into());
+            return Ok(());
+        }
         if matches!(
             inspected.report.state,
             disk_core::table_check::CheckState::Failed
@@ -319,11 +334,13 @@ impl Browser {
                     .report
                     .items
                     .iter()
-                    .filter(|i| matches!(
-                        i.state,
-                        disk_core::table_check::CheckState::Failed
-                            | disk_core::table_check::CheckState::Unchecked
-                    ))
+                    .filter(|i| {
+                        matches!(
+                            i.state,
+                            disk_core::table_check::CheckState::Failed
+                                | disk_core::table_check::CheckState::Unchecked
+                        )
+                    })
                     .map(|i| i.detail.as_str())
                     .collect::<Vec<_>>()
                     .join("；"),
@@ -332,7 +349,9 @@ impl Browser {
         }
         let Some(disk) = inspected.disk else {
             self.info.table_issue = Some(
-                inspected.parse_error.unwrap_or_else(|| "无法读取备份分区表".into()),
+                inspected
+                    .parse_error
+                    .unwrap_or_else(|| "无法读取备份分区表".into()),
             );
             return Ok(());
         };
@@ -340,15 +359,14 @@ impl Browser {
             self.info.table_issue = Some("备份记录的扇区大小与分区表不一致".into());
             return Ok(());
         }
-        self.info.warning =
-            inspected
-                .report
-                .items
-                .iter()
-                .filter(|i| i.state == disk_core::table_check::CheckState::Warning)
-                .map(|i| i.detail.as_str())
-                .collect::<Vec<_>>()
-                .join("；");
+        self.info.warning = inspected
+            .report
+            .items
+            .iter()
+            .filter(|i| i.state == disk_core::table_check::CheckState::Warning)
+            .map(|i| i.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("；");
         self.info.partitions = disk
             .partitions
             .into_iter()

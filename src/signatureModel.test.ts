@@ -84,6 +84,9 @@ describe("signature scan request", () => {
     expect(previewImageMime("a.BMP")).toBe("image/bmp");
     expect(previewImageMime("a.webp")).toBe("image/webp");
     expect(previewImageMime("a.jpeg")).toBe("image/jpeg");
+    expect(previewImageMime("a.ico")).toBe("image/x-icon");
+    expect(previewImageMime("a.tif")).toBe(null);
+    expect(previewImageMime("a.cur")).toBe(null);
     expect(previewImageMime("a.wav")).toBe(null);
     expect(previewImageMime("a.png.exe")).toBe(null);
   });

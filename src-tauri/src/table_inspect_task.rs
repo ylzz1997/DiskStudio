@@ -130,6 +130,28 @@ pub fn inspect(request: Request) -> Result<Report, String> {
                             e,
                         ),
                     }
+                } else if let Some(ranges) = &snapshot.mbr_ranges {
+                    let mut windows: Vec<_> =
+                        ctx.parts.iter().map(|p| (p.offset, p.size)).collect();
+                    windows.sort_unstable();
+                    let (state, detail) = if *ranges == windows && snapshot.mbr_container == ctx.mbr_container {
+                        (
+                            CheckState::Passed,
+                            "MBR 与 EBR 的数据分区范围和 Windows 分区清单一致。",
+                        )
+                    } else {
+                        (
+                            CheckState::Failed,
+                            "MBR 或 EBR 的数据分区范围与 Windows 分区清单不一致。",
+                        )
+                    };
+                    table_diagnostics::add(
+                        &mut report,
+                        "windows-layout",
+                        "Windows 布局核对",
+                        state,
+                        detail.into(),
+                    );
                 }
                 if platform::table_inspect_context(&request.source)?.fingerprint != ctx.fingerprint
                 {

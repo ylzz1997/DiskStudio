@@ -42,9 +42,67 @@ pub fn layout_key(style: Option<u16>, mut parts: Vec<(u32, u64, u64, Option<Stri
     )
 }
 
+/// Windows includes the extended container as partition zero. Accept its
+/// overlap only with complete data partitions strictly inside the container.
+pub(crate) fn extended_mbr(
+    sector: Option<u64>,
+    size: u64,
+    rows: impl IntoIterator<Item = (u32, u64, u64, Option<u16>)>,
+) -> Option<(u64, u64)> {
+    let sector = sector.filter(|n| matches!(n, 512 | 4096))?;
+    let mut rows: Vec<_> = rows.into_iter().collect();
+    rows.sort_unstable_by_key(|p| p.1);
+    let mut ids = std::collections::HashSet::new();
+    let mut container = None;
+    let mut data_end = sector;
+    for &(number, start, len, ty) in &rows {
+        let end = start.checked_add(len)?;
+        if end > size || len == 0 || start < sector || (start | len) % sector != 0
+            || !ids.insert(number)
+        {
+            return None;
+        }
+        if matches!(ty, Some(0x05 | 0x0f | 0x85)) {
+            if number != 0 || container.replace((start, end)).is_some() {
+                return None;
+            }
+        } else {
+            if number == 0 || start < data_end {
+                return None;
+            }
+            data_end = end;
+        }
+    }
+    let (base, limit) = container?;
+    rows.iter().filter(|r| r.0 != 0).all(|&(_, start, len, _)| {
+        start + len <= base || start >= limit || (start >= base + sector && start + len <= limit)
+    }).then_some((base, limit - base))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn extended_mbr_allows_only_nested_non_overlapping_data_and_an_explicit_container() {
+        let sectors = [
+            (1, 4096, 8192, Some(6)),
+            (0, 12288, 32768, Some(5)),
+            (2, 16384, 8192, Some(6)),
+            (3, 28672, 8192, Some(6)),
+        ];
+        assert_eq!(extended_mbr(Some(4096), 65536, sectors), Some((12288, 32768)));
+        for (row, substitution) in [
+            (1, (0, 12288, 32768, None)),
+            (2, (2, 12288, 8192, Some(6))),
+            (3, (3, 40960, 8192, Some(6))),
+            (3, (3, 20480, 8192, Some(6))),
+            (3, (3, 28672, 8192, Some(5))),
+        ] {
+            let mut bad = sectors;
+            bad[row] = substitution;
+            assert_eq!(extended_mbr(Some(4096), 65536, bad), None);
+        }
+    }
     #[test]
     fn replaced_disks_cannot_inherit_display_identity() {
         let key_for = |serial| {

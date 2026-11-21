@@ -22,7 +22,7 @@ fn volume(serial: &str, number: u32, guid: &str, offset: u64) -> Result<Volume, 
         .ok_or("Disk missing")?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let found = parts
         .iter()
         .filter(|p| {
@@ -104,7 +104,7 @@ fn run_checks(log: &mut fs::File) -> Result<String, String> {
             created.push((d.hardware.number, number));
             let con = WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage")
                 .map_err(err)?;
-            let rows: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+            let rows: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
             let guid = rows
                 .iter()
                 .find(|p| {

@@ -39,6 +39,9 @@ export const signatureTypes = [
   { id: "mp4", label: "MP4", detail: "核对独立 MP4/MOV 的媒体块与采样表。" },
   { id: "mov", label: "MOV", detail: "核对独立 MP4/MOV 的媒体块与采样表。" },
   { id: "ogg", label: "Ogg", detail: "核对连续 Ogg 页的序列、包边界与 CRC。" },
+  { id: "tiff", label: "TIFF", detail: "核对 TIFF 和 BigTIFF 的图像目录及条带或分块范围。" },
+  { id: "ico", label: "ICO", detail: "核对图标目录及内嵌 PNG 或位图。" },
+  { id: "cur", label: "CUR", detail: "核对光标目录、热点及内嵌 PNG 或位图。" },
 ] as const;
 export type SignatureKind = (typeof signatureTypes)[number]["id"];
 export type SignatureSettings = {
@@ -102,6 +105,7 @@ export function previewImageMime(name: string): string | null {
         gif: "image/gif",
         bmp: "image/bmp",
         webp: "image/webp",
+        ico: "image/x-icon",
       } as Record<string, string>
     )[extension ?? ""] ?? null
   );

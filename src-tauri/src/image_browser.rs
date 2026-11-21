@@ -121,26 +121,20 @@ impl Browser {
                     .seek(SeekFrom::Start(size - count as u64))
                     .map_err(|e| e.to_string())?;
                 source.read_exact(&mut tail).map_err(|e| e.to_string())?;
-                let gpt = [512, 4096]
-                    .iter()
-                    .any(|n| head.get(*n..*n + 8) == Some(b"EFI PART"));
-                if !gpt && options.sector != 512 {
-                    return Err("MBR RAW 浏览目前仅支持明确选择的 512 B 扇区。".into());
-                }
-                let mut ebrs = vec![];
-                if !gpt && head.get(510..512) == Some(&[0x55, 0xaa]) {
-                    while let Some(offset) = disk_core::mbr::next_ebr(&head[..512], size, &ebrs)? {
-                        tick()?;
-                        let mut bytes = vec![0; 512];
-                        source
-                            .seek(SeekFrom::Start(offset))
-                            .map_err(|e| e.to_string())?;
-                        source.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-                        ebrs.push(disk_core::mbr::EbrSector { offset, bytes });
-                    }
-                }
-                let inspected = disk_core::table_check::inspect_image_with_ebrs(
-                    &head, &tail, size, &name, &ebrs,
+                let ebrs = crate::table_archive::read_ebrs(
+                    &mut source,
+                    &head,
+                    size,
+                    options.sector,
+                    &mut tick,
+                )?;
+                let inspected = disk_core::table_check::inspect_image_with_geometry(
+                    &head,
+                    &tail,
+                    size,
+                    &name,
+                    Some(options.sector),
+                    &ebrs,
                 )?;
                 use disk_core::table_check::CheckState;
                 if matches!(

@@ -977,6 +977,7 @@ mod tests {
         };
         let p = Partition {
             gpt_type: Some(policy::BASIC_DATA.into()),
+            mbr_type: None,
             is_boot: Some(false),
             is_system: Some(false),
             is_hidden: Some(false),

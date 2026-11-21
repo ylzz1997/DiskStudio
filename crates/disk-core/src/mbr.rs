@@ -11,6 +11,7 @@ pub struct EbrSector {
     pub bytes: Vec<u8>,
 }
 pub(crate) struct Layout {
+    sector: u64,
     parts: Vec<Partition>,
     tables: Vec<u64>,
     pub extended: Option<(u64, u64)>,
@@ -36,18 +37,23 @@ fn unsupported(detail: &str) -> Problem {
         detail: detail.into(),
     }
 }
-pub(crate) fn validate_sectors(sectors: &[EbrSector], size: u64) -> Result<(), String> {
+pub(crate) fn validate_sectors(
+    sectors: &[EbrSector],
+    size: u64,
+    sector: u64,
+) -> Result<(), String> {
     let mut offsets = HashSet::new();
-    if sectors.len() > MAX_EBRS
+    if !matches!(sector, 512 | 4096)
+        || sectors.len() > MAX_EBRS
         || sectors.iter().any(|s| {
-            s.bytes.len() != 512
-                || s.offset < 512
-                || s.offset % 512 != 0
-                || s.offset.checked_add(512).is_none_or(|end| end > size)
+            s.bytes.len() as u64 != sector
+                || s.offset < sector
+                || s.offset % sector != 0
+                || s.offset.checked_add(sector).is_none_or(|end| end > size)
                 || !offsets.insert(s.offset)
         })
     {
-        return Err("EBR 输入须为最多 64 个不重复、已对齐且位于镜像内的 512 字节扇区。".into());
+        return Err("EBR 输入须为最多 64 个不重复、按逻辑扇区对齐且位于磁盘内的完整扇区。".into());
     }
     Ok(())
 }
@@ -55,11 +61,23 @@ pub(crate) fn validate_sectors(sectors: &[EbrSector], size: u64) -> Result<(), S
 /// Returns only the next validated 512-byte range, never a path or device name.
 /// Structural failures stop further reads; final inspection supplies diagnostics.
 pub fn next_ebr(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Option<u64>, String> {
-    if mbr.len() != 512 || !(4 * MIB..=1 << 43).contains(&size) {
+    next_ebr_with_sector(mbr, size, 512, sectors)
+}
+
+pub fn next_ebr_with_sector(
+    mbr: &[u8],
+    size: u64,
+    sector: u64,
+    sectors: &[EbrSector],
+) -> Result<Option<u64>, String> {
+    if !matches!(sector, 512 | 4096)
+        || mbr.len() as u64 != sector
+        || !(4 * MIB..=1 << 43).contains(&size)
+    {
         return Err("MBR 读取计划的头部或镜像容量无效。".into());
     }
-    validate_sectors(sectors, size)?;
-    Ok(match scan(mbr, size, sectors) {
+    validate_sectors(sectors, size, sector)?;
+    Ok(match scan(mbr, size, sector, sectors) {
         Ok(Scan::Need(offset)) => Some(offset),
         _ => None,
     })
@@ -73,7 +91,7 @@ struct Entry {
 fn extended(kind: u8) -> bool {
     matches!(kind, 0x05 | 0x0f | 0x85)
 }
-fn entry(bytes: &[u8]) -> Result<Option<Entry>, Problem> {
+fn entry(bytes: &[u8], sector: u64) -> Result<Option<Entry>, Problem> {
     if !matches!(bytes[0], 0 | 0x80) {
         return Err(bad("分区条目含非法启动标记。"));
     }
@@ -84,8 +102,8 @@ fn entry(bytes: &[u8]) -> Result<Option<Entry>, Problem> {
             Err(bad("未使用的分区条目含非零数据。"))
         };
     }
-    let start = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as u64 * 512;
-    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as u64 * 512;
+    let start = u64::from(u32::from_le_bytes(bytes[8..12].try_into().unwrap())) * sector;
+    let len = u64::from(u32::from_le_bytes(bytes[12..16].try_into().unwrap())) * sector;
     if len == 0 {
         return Err(bad("分区条目长度为零。"));
     }
@@ -110,14 +128,23 @@ fn part(number: usize, start: u64, len: u64, logical: bool) -> Partition {
         system: false,
     }
 }
-pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan, Problem> {
-    if mbr.len() < 512 || mbr[510..512] != [0x55, 0xaa] {
+pub(crate) fn scan(
+    mbr: &[u8],
+    size: u64,
+    sector: u64,
+    sectors: &[EbrSector],
+) -> Result<Scan, Problem> {
+    if !matches!(sector, 512 | 4096) || mbr.len() < sector as usize {
+        return Err(bad("MBR 缺少完整的逻辑扇区。"));
+    }
+    if mbr[510..512] != [0x55, 0xaa] {
         return Err(bad("缺少 MBR 的 55AA 签名。"));
     }
-    if size % 512 != 0 {
-        return Err(bad("文件长度不是 512 字节的整数倍。"));
+    if size % sector != 0 {
+        return Err(bad("容量不是逻辑扇区的整数倍。"));
     }
     let mut layout = Layout {
+        sector,
         parts: vec![],
         tables: vec![],
         extended: None,
@@ -125,14 +152,14 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
     };
     let mut primary_ranges = Vec::new();
     for (i, slot) in mbr[446..510].chunks_exact(16).enumerate() {
-        let Some(e) = entry(slot)? else {
+        let Some(e) = entry(slot, sector)? else {
             continue;
         };
         if e.kind == 0xee {
             return Err(bad("保护性 MBR 需要使用 GPT 检查。"));
         }
         let end = e.start + e.len; // Both fields are bounded u32 sector counts.
-        if e.start < 512 || end > size {
+        if e.start < sector || end > size {
             return Err(bad("MBR 主条目越出镜像范围。"));
         }
         if primary_ranges.iter().any(|r| overlap(*r, (e.start, end))) {
@@ -157,23 +184,23 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
             if layout.tables.len() == MAX_EBRS {
                 return Err(unsupported("EBR 链超过 64 个扇区的检查上限。"));
             }
-            if at < base || at + 512 > limit {
+            if at < base || at + sector > limit {
                 return Err(bad("EBR 位置越出扩展分区。"));
             }
             if layout
                 .parts
                 .iter()
-                .any(|p| overlap((at, at + 512), (p.start, p.start + p.size)))
+                .any(|p| overlap((at, at + sector), (p.start, p.start + p.size)))
             {
                 return Err(bad("EBR 分区表扇区与分区数据范围重叠。"));
             }
-            let Some(sector) = sectors.get(layout.tables.len()) else {
+            let Some(block) = sectors.get(layout.tables.len()) else {
                 return Ok(Scan::Need(at));
             };
-            if sector.offset != at || sector.bytes.len() != 512 {
+            if block.offset != at || block.bytes.len() as u64 != sector {
                 return Err(bad("提供的 EBR 扇区与链路请求不一致。"));
             }
-            let bytes = &sector.bytes;
+            let bytes = &block.bytes;
             if bytes[510..512] != [0x55, 0xaa] {
                 return Err(bad(format!("偏移 {at} B 的 EBR 缺少 55AA 签名。")));
             }
@@ -183,7 +210,7 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
                 ));
             }
             layout.tables.push(at);
-            if let Some(e) = entry(&bytes[446..462])? {
+            if let Some(e) = entry(&bytes[446..462], sector)? {
                 if extended(e.kind) {
                     return Err(unsupported(
                         "EBR 第一个条目为链路，当前只支持常规数据/链路布局。",
@@ -194,7 +221,7 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
                 }
                 let start = at + e.start;
                 let end = start + e.len;
-                if e.start < 512 || start < base || end > limit {
+                if e.start < sector || start < base || end > limit {
                     return Err(bad("逻辑分区越出扩展分区范围或覆盖自身 EBR。"));
                 }
                 if layout
@@ -207,7 +234,7 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
                 if layout
                     .tables
                     .iter()
-                    .any(|t| overlap((start, end), (*t, *t + 512)))
+                    .any(|t| overlap((start, end), (*t, *t + sector)))
                 {
                     return Err(bad("逻辑分区覆盖了 EBR 分区表扇区。"));
                 }
@@ -216,7 +243,7 @@ pub(crate) fn scan(mbr: &[u8], size: u64, sectors: &[EbrSector]) -> Result<Scan,
                     .push(part(5 + layout.logical_count, start, e.len, true));
                 layout.logical_count += 1;
             }
-            let Some(link) = entry(&bytes[462..478])? else {
+            let Some(link) = entry(&bytes[462..478], sector)? else {
                 break;
             };
             if !extended(link.kind) {
@@ -248,10 +275,14 @@ impl Layout {
             .into_iter()
             .map(|p| (p.start, p.start + p.size, Some(p)))
             .collect();
-        events.extend(self.tables.into_iter().map(|at| (at, at + 512, None)));
+        events.extend(
+            self.tables
+                .into_iter()
+                .map(|at| (at, at + self.sector, None)),
+        );
         events.sort_by_key(|e| e.0);
         let mut parts = Vec::new();
-        let mut cursor = 512;
+        let mut cursor = self.sector;
         let gap = |start: u64, end: u64, parts: &mut Vec<Partition>| {
             let mut boundaries = vec![start, end];
             if let Some((base, limit)) = self.extended {
@@ -289,7 +320,7 @@ impl Layout {
                 .into(),
             filename: filename.into(),
             size,
-            sector_size: 512,
+            sector_size: self.sector,
             scheme: "MBR".into(),
             kind: "image".into(),
             partitions: parts,

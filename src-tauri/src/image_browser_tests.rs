@@ -44,6 +44,39 @@ fn extract(browser: &Browser, part: u32, candidate: &Candidate) -> Vec<u8> {
 }
 
 #[test]
+fn explicitly_opened_four_kn_raw_mbr_binds_the_selected_sector_geometry() {
+    let raw = crate::table_archive::tests::mbr_4kn();
+    let browser = open(raw.clone(), Kind::Disk, 4096);
+    assert_eq!(browser.info.partitions.len(), 4);
+    for (part, offset) in
+        browser
+            .info
+            .partitions
+            .iter()
+            .zip([MIB + 4096, 2 * MIB + 4096, 3 * MIB + 4096, 6 * MIB])
+    {
+        assert_eq!(part.start, offset as u64);
+        let mut first = vec![0; 4096];
+        browser
+            .reader(part.id)
+            .unwrap()
+            .read_exact(&mut first)
+            .unwrap();
+        assert_eq!(first, raw[offset..offset + 4096]);
+    }
+    assert!(Browser::open(
+        Cursor::new(raw),
+        "wrong.img".into(),
+        Options {
+            kind: Kind::Disk,
+            sector: 512
+        },
+        || Ok(()),
+    )
+    .is_err());
+}
+
+#[test]
 #[ignore = "requires the generated thin Storage Spaces recovery fixture"]
 fn thin_storage_space_browses_and_extracts_through_a_checkpoint() {
     use base64::{engine::general_purpose::STANDARD, Engine};

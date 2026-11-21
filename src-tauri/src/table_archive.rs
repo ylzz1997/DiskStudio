@@ -7,6 +7,7 @@ use disk_core::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
 pub const MAX_FILE: usize = 24 * 1024 * 1024;
@@ -44,6 +45,8 @@ pub struct Archive {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
+    #[serde(skip)]
+    pub mbr_container: Option<(u64, u64)>,
     pub scheme: String,
     pub size: u64,
     pub sector: u64,
@@ -65,6 +68,7 @@ struct Layout {
     disk: Disk,
     report: TableReport,
     ranges: Vec<(Kind, u64, usize)>,
+    mbr_container: Option<(u64, u64)>,
 }
 fn hash(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
@@ -91,6 +95,33 @@ pub(crate) fn read_at(
         .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
+
+pub(crate) fn read_ebrs(
+    reader: &mut (impl Read + Seek),
+    head: &[u8],
+    size: u64,
+    sector: u64,
+    mut checkpoint: impl FnMut() -> Result<(), String>,
+) -> Result<Vec<EbrSector>, String> {
+    geometry(size, sector)?;
+    if head.get(510..512) != Some(&[0x55, 0xaa])
+        || [512, 4096]
+            .iter()
+            .any(|&at| head.get(at..at + 8) == Some(b"EFI PART"))
+    {
+        return Ok(vec![]);
+    }
+    let first = head
+        .get(..sector as usize)
+        .ok_or("MBR 缺少完整的逻辑扇区。")?;
+    let mut chain = vec![];
+    while let Some(offset) = disk_core::mbr::next_ebr_with_sector(first, size, sector, &chain)? {
+        checkpoint()?;
+        let bytes = read_at(reader, offset, sector as usize, size)?;
+        chain.push(EbrSector { offset, bytes });
+    }
+    Ok(chain)
+}
 fn u32le(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap())
 }
@@ -105,8 +136,14 @@ fn layout(
     ebrs: &[EbrSector],
     boot: bool,
 ) -> Result<Layout, String> {
-    let inspected =
-        table_check::inspect_image_with_ebrs(head, tail, size, "partition-table.img", ebrs)?;
+    let inspected = table_check::inspect_image_with_geometry(
+        head,
+        tail,
+        size,
+        "partition-table.img",
+        Some(sector),
+        ebrs,
+    )?;
     if matches!(
         inspected.report.state,
         CheckState::Failed | CheckState::Unchecked
@@ -163,12 +200,7 @@ fn layout(
             ranges.push((ek, table_at, len as usize));
         }
     } else {
-        // The existing MBR/EBR validator deliberately supports 512-byte LBAs.
-        // A known 4Kn device must never be silently interpreted as 512 B.
-        if sector != 512 {
-            return Err("4Kn MBR 备份尚未实现。".into());
-        }
-        ranges.extend(ebrs.iter().map(|e| (Kind::Ebr, e.offset, 512)));
+        ranges.extend(ebrs.iter().map(|e| (Kind::Ebr, e.offset, sector as usize)));
     }
     if boot {
         ranges.extend(
@@ -193,6 +225,7 @@ fn layout(
         disk,
         report: inspected.report,
         ranges,
+        mbr_container: inspected.mbr_container,
     })
 }
 pub fn capture(
@@ -208,18 +241,7 @@ pub fn capture(
     let head = read_at(reader, 0, MIB as usize, size)?;
     checkpoint()?;
     let tail = read_at(reader, size - MIB, MIB as usize, size)?;
-    let mut ebrs = vec![];
-    if sector == 512
-        && ![512, 4096]
-            .iter()
-            .any(|&n| head.get(n..n + 8) == Some(b"EFI PART"))
-    {
-        while let Some(at) = disk_core::mbr::next_ebr(&head[..512], size, &ebrs)? {
-            checkpoint()?;
-            let bytes = read_at(reader, at, 512, size)?;
-            ebrs.push(EbrSector { offset: at, bytes });
-        }
-    }
+    let ebrs = read_ebrs(reader, &head, size, sector, &mut checkpoint)?;
     let parsed = layout(&head, &tail, size, sector, &ebrs, includes_boot)?;
     let mut extents = vec![];
     for (kind, offset, len) in parsed.ranges {
@@ -276,7 +298,7 @@ impl Archive {
         }
         let mut head = vec![0; MIB as usize];
         let mut tail = vec![0; MIB as usize];
-        let mut ebrs = vec![];
+        let mut ebrs = BTreeMap::new();
         let mut end = 0;
         let mut total = 0usize;
         for e in &self.extents {
@@ -306,10 +328,30 @@ impl Archive {
                     .copy_from_slice(&e.bytes[(start - e.offset) as usize..]);
             }
             if e.kind == Kind::Ebr {
-                ebrs.push(EbrSector {
-                    offset: e.offset,
-                    bytes: e.bytes.clone(),
-                });
+                ebrs.insert(
+                    e.offset,
+                    EbrSector {
+                        offset: e.offset,
+                        bytes: e.bytes.clone(),
+                    },
+                );
+            }
+        }
+        // The file stores extents in ascending offset order. EBR links can
+        // visit them in a different order, which is determined by the MBR.
+        let mut chain = vec![];
+        if !ebrs.is_empty() {
+            let first = &head[..self.sector as usize];
+            while let Some(offset) =
+                disk_core::mbr::next_ebr_with_sector(first, self.size, self.sector, &chain)?
+            {
+                let block = ebrs
+                    .remove(&offset)
+                    .ok_or("备份缺少 EBR 链路所需的扇区。")?;
+                chain.push(block);
+            }
+            if !ebrs.is_empty() {
+                return Err("备份包含 EBR 链路未引用的扇区。".into());
             }
         }
         let parsed = layout(
@@ -317,7 +359,7 @@ impl Archive {
             &tail,
             self.size,
             self.sector,
-            &ebrs,
+            &chain,
             self.includes_boot,
         )?;
         if parsed.ranges.len() != self.extents.len()
@@ -333,6 +375,7 @@ impl Archive {
         }
         let payload = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         Ok(Info {
+            mbr_container: parsed.mbr_container,
             scheme: parsed.disk.scheme,
             size: self.size,
             sector: self.sector,

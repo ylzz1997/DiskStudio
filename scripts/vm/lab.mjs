@@ -18,7 +18,7 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'ldm', 'storage-spaces', 'storage-spaces-recovery'];
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery'];
 function profileDisks(fourKn, fixture) {
   const base = fourKn ? fourKnDisks : disks;
   return fixture ? base.map(disk => disk.bus === 'nvme' ? {
@@ -494,6 +494,8 @@ async function preflight() {
     if (stateFixture(state) === 'signature-scope') console.log('Signature scan scope uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-formats') console.log('Signature formats use their independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-media') console.log('Media recovery uses its independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'signature-images') console.log('Image signature recovery uses its independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'table-mbr') console.log('MBR table inspection and backup use their independent 4Kn A/B pair.');
     console.log('Partition tests may target ONLY DS-TEST-A-0001 and DS-TEST-B-0001 (16 GiB each), never the 80 GiB OS disk.');
   } finally { qmp.close(); }
 }
@@ -643,6 +645,8 @@ async function main() {
     console.log('start --4kn --signature-scope: use the dedicated 4Kn signature scan fixtures');
     console.log('start --4kn --signature-formats: use the dedicated 4Kn signature format fixtures');
     console.log('start --4kn --signature-media: use the dedicated 4Kn media recovery fixtures');
+    console.log('start --4kn --signature-images: use the dedicated 4Kn image signature fixtures');
+    console.log('start --4kn --table-mbr: use the dedicated 4Kn MBR partition table fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     console.log('surface-read-window|surface-read-clear: set or clear the fixed Test A 4Kn read limit');

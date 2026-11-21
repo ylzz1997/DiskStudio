@@ -21,12 +21,17 @@ const MP4: &[u8] = include_bytes!("../../../../tests/fixtures/signature-bmff-fas
 const MOV: &[u8] = include_bytes!("../../../../tests/fixtures/signature-bmff-tail.mov");
 const OGG_MUX: &[u8] = include_bytes!("../../../../tests/fixtures/signature-ogg-multiplex.ogg");
 const OGG_OPUS: &[u8] = include_bytes!("../../../../tests/fixtures/signature-ogg-opus.ogg");
+const TIFF_PAGES: &[u8] = include_bytes!("../../../../tests/fixtures/signature-tiff-pages.tif");
+const BIG_TIFF: &[u8] = include_bytes!("../../../../tests/fixtures/signature-bigtiff-tiles.tif");
+const ICON: &[u8] = include_bytes!("../../../../tests/fixtures/signature-icon-png.ico");
+const CURSOR: &[u8] = include_bytes!("../../../../tests/fixtures/signature-cursor-dib.cur");
 
 #[derive(Clone, Copy)]
 pub(super) enum Sample {
     Pdf,
     Formats,
     Media,
+    Images,
 }
 
 impl Sample {
@@ -35,6 +40,7 @@ impl Sample {
             Self::Pdf => FOLDER,
             Self::Formats => "DS-SignatureFormats",
             Self::Media => "DS-SignatureMedia",
+            Self::Images => "DS-SignatureImages",
         }
     }
 
@@ -43,6 +49,7 @@ impl Sample {
             Self::Pdf => "signature-scope-4kn",
             Self::Formats => "signature-formats-4kn",
             Self::Media => "signature-media-4kn",
+            Self::Images => "signature-images-4kn",
         }
     }
 
@@ -59,6 +66,22 @@ impl Sample {
                 (offset + 8 * SECTOR, "ogg", OGG_MUX),
                 (offset + 12 * SECTOR, "ogg", OGG_OPUS),
             ],
+            Self::Images => vec![
+                (offset + 2 * SECTOR, "tif", TIFF_PAGES),
+                (offset + 4 * SECTOR, "tif", BIG_TIFF),
+                (offset + 6 * SECTOR, "ico", ICON),
+                (offset + 8 * SECTOR, "cur", CURSOR),
+            ],
+        }
+    }
+
+    fn kinds(self) -> &'static [signature_scan::Kind] {
+        use signature_scan::Kind;
+        match self {
+            Self::Pdf => &[Kind::Pdf],
+            Self::Formats => &[Kind::SevenZip, Kind::Sqlite],
+            Self::Media => &[Kind::Mp4, Kind::Mov, Kind::Ogg],
+            Self::Images => &[Kind::Tiff, Kind::Ico, Kind::Cur],
         }
     }
 }
@@ -113,7 +136,7 @@ fn fixture(sample: Sample) -> Result<(Vec<u8>, u64), String> {
     ] {
         bytes[offset..][..pdf.len()].copy_from_slice(pdf);
     }
-    if matches!(sample, Sample::Formats | Sample::Media) {
+    if !matches!(sample, Sample::Pdf) {
         for (offset, _, contents) in sample.expected(aligned as u64) {
             let start = usize::try_from(offset).map_err(err)?;
             let end = start
@@ -265,6 +288,7 @@ pub(super) fn prepare(sample: Sample) -> Result<String, String> {
         Sample::Pdf => format!("Scan PDF only. Expect 3 full, 2 aligned, 1 free+aligned. Free PDF byte offset {aligned:#x}."),
         Sample::Formats => "Scan 7z and SQLite only with both free clusters and sector alignment enabled. Expect one candidate of each type.".into(),
         Sample::Media => "Scan MP4, MOV and Ogg with free clusters and sector alignment enabled. Expect one MP4, one MOV and two Ogg files.".into(),
+        Sample::Images => "Scan TIFF, ICO and CUR with free clusters and sector alignment enabled. Expect two TIFF files, one icon and one cursor.".into(),
     };
     Ok(format!(
         "PASS: B/{partition} 8 MiB is offline. {scan} Save Scope.dsrecover and export to {}.",
@@ -311,6 +335,8 @@ pub(super) fn verify(sample: Sample) -> Result<String, String> {
     let expected = sample.expected(aligned);
     if !options.free_only
         || !options.sector_aligned
+        || options.kinds.len() != sample.kinds().len()
+        || sample.kinds().iter().any(|kind| !options.kinds.contains(kind))
         || !cursor.sealed
         || found.len() != expected.len()
         || found
@@ -375,14 +401,23 @@ mod tests {
 
     #[test]
     fn aligned_free_media_fixture_has_four_independently_verified_candidates() {
-        use signature_scan::{Checkpoint, Kind, Options};
+        check_aligned_fixture(Sample::Media);
+    }
 
-        let (bytes, aligned) = fixture(Sample::Media).unwrap();
+    #[test]
+    fn aligned_free_image_fixture_has_four_independently_verified_candidates() {
+        check_aligned_fixture(Sample::Images);
+    }
+
+    fn check_aligned_fixture(sample: Sample) {
+        use signature_scan::{Checkpoint, Options};
+
+        let (bytes, aligned) = fixture(sample).unwrap();
         let mut reader = Cursor::new(&bytes);
         let plan =
             used_space::inspect(&mut reader, SIZE, SECTOR, None, &AtomicBool::new(false)).unwrap();
         let options = Options {
-            kinds: vec![Kind::Mp4, Kind::Mov, Kind::Ogg],
+            kinds: sample.kinds().to_vec(),
             free_only: true,
             sector_aligned: true,
             ..Options::default()
@@ -399,7 +434,7 @@ mod tests {
             |candidate| found.push(candidate),
         )
         .unwrap();
-        let expected = Sample::Media.expected(aligned);
+        let expected = sample.expected(aligned);
         assert_eq!(found.len(), expected.len());
         signature_scan::verify_free_candidates(&plan, &found).unwrap();
         for (candidate, (offset, ext, bytes)) in found.iter().zip(expected) {

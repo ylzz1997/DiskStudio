@@ -1054,7 +1054,7 @@
   "正在锁定、修复并回读校验…": "Bloqueando volúmenes, reparando y verificando por relectura…",
   "修复预览类型不匹配，请重新检查。": "El tipo de vista previa no coincide. Repite la comprobación.",
   "分区表检查与修复": "Comprobación y reparación de la tabla de particiones",
-  "检查 GPT 主备表的完整性与分区范围，或 512 字节 MBR 的主分区和扩展分区链。打开此面板不会读取设备。": "Comprueba ambas GPT y los rangos de particiones, o las primarias y la cadena extendida de un MBR de 512 bytes. La lectura empieza al iniciar la comprobación.",
+  "检查 GPT 主备表的完整性与分区范围，或 MBR 的主分区和扩展分区链。打开此面板不会读取设备。": "Comprueba ambas GPT y los rangos de particiones, o las primarias y la cadena extendida de un MBR. La lectura empieza al iniciar la comprobación.",
   "重新检查": "Volver a comprobar",
   "开始检查": "Iniciar comprobación",
   "预览 GPT 修复": "Previsualizar reparación GPT",

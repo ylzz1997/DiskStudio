@@ -94,6 +94,8 @@ pub struct LocalDisk {
 pub struct Hardware {
     pub identity: Option<String>,
     pub layout_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_layout_key: Option<String>,
     pub number: u32,
     pub model: String,
     pub bus: &'static str,
@@ -391,10 +393,27 @@ fn normalize_associated(
             .number_of_partitions
             .is_none_or(|n| n as usize == raw.len());
         let layout_available = partitions.is_some() && valid && count_matches;
+        let table_layout_key = (d.partition_style == Some(1) && count_matches
+            && raw.iter().filter(|p| p.partition_number == 0).all(|p| {
+                letter(&p.drive_letter).is_none()
+                    && p.is_boot != Some(true) && p.is_system != Some(true)
+            }))
+            .then(|| crate::disk_identity::extended_mbr(
+                d.logical_sector_size, d.size,
+                raw.iter().map(|p| (p.partition_number, p.offset, p.size, p.mbr_type)),
+            ))
+            .flatten()
+            .map(|_| crate::disk_identity::layout_key(
+                d.partition_style,
+                raw.iter().map(|p| (p.partition_number, p.offset, p.size, p.guid.clone())).collect(),
+            ));
         let layout_note = if !layout_available {
             Some(
-                "分区信息暂不完整，可能是设备状态发生变化。请重新读取；这里不会推测空闲空间。"
-                    .into(),
+                if table_layout_key.is_some() {
+                    "Windows 报告了扩展分区容器。可从磁盘菜单检查或备份分区表。"
+                } else {
+                    "分区信息暂不完整，可能是设备状态发生变化。请重新读取；这里不会推测空闲空间。"
+                }.into(),
             )
         } else {
             None
@@ -517,6 +536,7 @@ fn normalize_associated(
                 } else {
                     None
                 },
+                table_layout_key,
                 number: d.number,
                 model: clean(&d.friendly_name).unwrap_or_else(|| "未提供型号".into()),
                 bus: bus(d.bus_type),

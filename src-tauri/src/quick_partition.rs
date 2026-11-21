@@ -308,6 +308,7 @@ mod tests {
             size: 128 * p::MIB,
             guid: Some("synthetic-guid".into()),
             gpt_type: Some(p::BASIC_DATA.into()),
+            mbr_type: None,
             is_boot: Some(false),
             is_system: Some(false),
             is_offline: Some(false),

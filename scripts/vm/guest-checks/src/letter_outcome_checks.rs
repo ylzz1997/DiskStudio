@@ -38,7 +38,7 @@ fn target(expected: Option<&str>) -> Result<(Selection, Dir, PathBuf), String> {
     }
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let frozen = parts
         .iter()
         .filter(|p| p.disk_number == b.number && p.partition_number == 7)
@@ -100,7 +100,7 @@ fn other_letters() -> Result<Letters, String> {
         .ok_or("B absent")?;
     let con =
         WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").map_err(err)?;
-    let parts: Vec<partitions::policy::Partition> = con.raw_query("SELECT __PATH,DiskNumber,PartitionNumber,Offset,Size,Guid,GptType,DriveLetter,IsBoot,IsSystem,IsReadOnly,IsOffline,IsHidden,IsShadowCopy FROM MSFT_Partition").map_err(err)?;
+    let parts: Vec<partitions::policy::Partition> = con.raw_query(partitions::policy::Partition::WMI_SELECT).map_err(err)?;
     let mut result = parts
         .into_iter()
         .filter(|p| p.disk_number != b.number || p.partition_number != 15)

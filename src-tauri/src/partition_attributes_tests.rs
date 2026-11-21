@@ -112,6 +112,7 @@ fn only_known_unprotected_online_data_partitions_are_eligible() {
         path: "synthetic".into(),
         disk_number: 1,
         gpt_type: Some(BASIC_DATA.into()),
+        mbr_type: None,
         is_boot: Some(false),
         is_system: Some(false),
         is_shadow_copy: Some(false),

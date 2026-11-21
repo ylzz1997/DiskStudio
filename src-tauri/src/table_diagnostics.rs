@@ -1,7 +1,7 @@
 //! Explicit, bounded partition-table inspection and reconstruction from one
 //! independently valid GPT copy. No device APIs, paths, or automatic writes.
 use crate::{
-    table_archive::{Archive, Extent, Kind},
+    table_archive::{read_at as read, read_ebrs, Archive, Extent, Kind},
     table_restore,
 };
 use disk_core::{
@@ -10,7 +10,7 @@ use disk_core::{
     MIB,
 };
 use sha2::{Digest, Sha256};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 #[derive(Clone)]
 pub struct Snapshot {
@@ -20,26 +20,12 @@ pub struct Snapshot {
     head: Vec<u8>,
     tail: Vec<u8>,
     ebrs: Vec<EbrSector>,
+    pub mbr_ranges: Option<Vec<(u64, u64)>>,
+    pub mbr_container: Option<(u64, u64)>,
 }
 pub struct Repair {
     pub archive: Archive,
     pub description: String,
-}
-fn read(
-    reader: &mut (impl Read + Seek),
-    at: u64,
-    len: usize,
-    size: u64,
-) -> Result<Vec<u8>, String> {
-    if len == 0 || len > MIB as usize || at.checked_add(len as u64).is_none_or(|n| n > size) {
-        return Err("分区表读取范围越界。".into());
-    }
-    let mut bytes = vec![0; len];
-    reader
-        .seek(SeekFrom::Start(at))
-        .and_then(|_| reader.read_exact(&mut bytes))
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
 }
 pub fn inspect(
     reader: &mut (impl Read + Seek),
@@ -54,39 +40,24 @@ pub fn inspect(
     let head = read(reader, 0, MIB as usize, size)?;
     checkpoint()?;
     let tail = read(reader, size - MIB, MIB as usize, size)?;
-    let initial = table_check::inspect_image(&head, &tail, size, "partition-table.img")?;
-    let mut ebrs = vec![];
-    if sector == 512 && initial.report.scheme == "MBR" {
-        // Stop malformed/unsupported chains and let the diagnostic engine
-        // describe them. Never turn a partial chain into a successful layout.
-        while let Ok(Some(offset)) = disk_core::mbr::next_ebr(&head[..512], size, &ebrs) {
-            checkpoint()?;
-            let bytes = read(reader, offset, 512, size)?;
-            ebrs.push(EbrSector { offset, bytes });
-        }
-    }
-    let mut report =
-        table_check::inspect_image_with_ebrs(&head, &tail, size, "partition-table.img", &ebrs)?
-            .report;
-    if report.scheme == "MBR" && sector != 512 {
-        for item in &mut report.items {
-            if matches!(
-                item.code.as_str(),
-                "mbr-layout" | "mbr-sector" | "ebr-chain"
-            ) {
-                item.state = CheckState::Unchecked;
-                item.detail="设备报告为 4096 字节逻辑扇区；4Kn MBR/EBR 解释尚未实现，未按 512 字节结果判断通过。".into();
-            }
-        }
-        report.sector_size = Some(sector);
-        add(
-            &mut report,
-            "device-sector",
-            "设备逻辑扇区",
-            CheckState::Unchecked,
-            "已核对 4096 字节设备几何；该 MBR 布局未完整检查。".into(),
-        );
-    } else if report.sector_size.is_some_and(|n| n != sector) {
+    let ebrs = read_ebrs(reader, &head, size, sector, &mut checkpoint)?;
+    let inspected = table_check::inspect_image_with_geometry(
+        &head,
+        &tail,
+        size,
+        "partition-table.img",
+        Some(sector),
+        &ebrs,
+    )?;
+    let mbr_ranges = inspected.disk.filter(|d| d.scheme == "MBR").map(|d| {
+        d.partitions
+            .into_iter()
+            .filter(|p| p.color != "free")
+            .map(|p| (p.start, p.size))
+            .collect()
+    });
+    let mut report = inspected.report;
+    if report.sector_size.is_some_and(|n| n != sector) {
         add(
             &mut report,
             "device-sector",
@@ -110,6 +81,8 @@ pub fn inspect(
         head,
         tail,
         ebrs,
+        mbr_ranges,
+        mbr_container: inspected.mbr_container,
     };
     snapshot.matches(reader, &mut checkpoint)?;
     Ok(snapshot)
@@ -137,7 +110,7 @@ pub fn add(report: &mut TableReport, code: &str, title: &str, state: CheckState,
 }
 impl Snapshot {
     pub fn retained_bytes(&self) -> u64 {
-        (self.head.len() + self.tail.len() + self.ebrs.len() * 512) as u64
+        (self.head.len() + self.tail.len()) as u64 + self.ebrs.len() as u64 * self.sector
     }
     pub fn digest(&self) -> String {
         let mut h = Sha256::new();
