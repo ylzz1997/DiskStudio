@@ -34,14 +34,13 @@ pub fn extent(
     }
     // Filesystem probes include sub-sector reads (e.g. FAT's 8-byte reserved
     // entries). Bound and align the raw stream before any evidence probe.
-    drop(lost_partitions::candidate_reader(
+    lost_partitions::validate_primary(
         &mut *reader,
         range.offset.checked_add(range.size).ok_or("搜索范围溢出")?,
-        range.sector,
         range,
         candidate,
         cancel,
-    )?);
+    )?;
     let mut size = candidate.size;
     let kind = match candidate.filesystem.as_str() {
         "NTFS" => {

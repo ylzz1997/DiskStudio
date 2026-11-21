@@ -19,8 +19,19 @@ const BASELINE: &str = "baseline.json";
 const FAT32: u64 = START + 4 * MIB;
 const EXFAT: u64 = START + 40 * MIB;
 const NTFS: &[u8] = include_bytes!("../../../../tests/fixtures/ntfs-testfs1.img");
+const EXT_START: u64 = 8 * GIB;
+const EXT_WINDOW: u64 = 66 * MIB;
+const EXT_FOLDER: &str = "DS-LostExt4";
+const EXT: &[u8] = include_bytes!("../../../../tests/fixtures/test_disk1.bin.zst");
 
-fn images() -> [(u64, Vec<u8>); 3] {
+struct Fixture {
+    start: u64,
+    size: u64,
+    folder: &'static str,
+    images: Vec<(u64, Vec<u8>)>,
+}
+
+fn boot_fixture() -> Fixture {
     let mut ntfs = NTFS.to_vec();
     ntfs[..512].fill(0);
     ntfs[16384..16384 + 2048].fill(0);
@@ -28,19 +39,43 @@ fn images() -> [(u64, Vec<u8>); 3] {
     fat32[..512].fill(0);
     let mut exfat = fixture::exfat(SECTOR as usize);
     exfat[..12 * 512].fill(0);
-    [(START, ntfs), (FAT32, fat32), (EXFAT, exfat)]
+    Fixture {
+        start: START,
+        size: SIZE,
+        folder: FOLDER,
+        images: vec![(START, ntfs), (FAT32, fat32), (EXFAT, exfat)],
+    }
 }
 
-fn read_window(file: &mut File) -> Result<Vec<u8>, String> {
-    let mut bytes = vec![0; (SIZE + 2 * SECTOR) as usize];
-    file.seek(SeekFrom::Start(START - SECTOR)).map_err(err)?;
+fn ext_fixture() -> Result<Fixture, String> {
+    let mut image = zstd::stream::decode_all(EXT).map_err(err)?;
+    if image.len() as u64 != 64 * MIB || image[1080..1082] != [0x53, 0xef] {
+        return Err("Unexpected independent Ext4 fixture geometry".into());
+    }
+    image[1080..1082].fill(0);
+    Ok(Fixture {
+        start: EXT_START,
+        size: EXT_WINDOW,
+        folder: EXT_FOLDER,
+        images: vec![(EXT_START + SECTOR, image)],
+    })
+}
+
+fn read_window(file: &mut File, fixture: &Fixture) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0; (fixture.size + 2 * SECTOR) as usize];
+    file.seek(SeekFrom::Start(fixture.start - SECTOR))
+        .map_err(err)?;
     for chunk in bytes.chunks_mut(128 * 1024) {
         file.read_exact(chunk).map_err(err)?;
     }
     Ok(bytes)
 }
 
-fn guard_range(a: &table_restore::Layout, b: &table_restore::Layout) -> Result<(), String> {
+fn guard_range(
+    a: &table_restore::Layout,
+    b: &table_restore::Layout,
+    fixture: &Fixture,
+) -> Result<(), String> {
     if a.guid == b.guid
         || a.entries
             .iter()
@@ -48,11 +83,12 @@ fn guard_range(a: &table_restore::Layout, b: &table_restore::Layout) -> Result<(
     {
         return Err("STOP: duplicate GPT identities on the test disks".into());
     }
-    if (START - SECTOR) / SECTOR < b.first
-        || (START + SIZE) / SECTOR > b.last
-        || b.entries
-            .iter()
-            .any(|e| e.offset < START + SIZE + SECTOR && START - SECTOR < e.offset + e.size)
+    if (fixture.start - SECTOR) / SECTOR < b.first
+        || (fixture.start + fixture.size) / SECTOR > b.last
+        || b.entries.iter().any(|e| {
+            e.offset < fixture.start + fixture.size + SECTOR
+                && fixture.start - SECTOR < e.offset + e.size
+        })
     {
         return Err(
             "STOP: space in the fixture window is outside usable LBAs or already assigned".into(),
@@ -72,20 +108,16 @@ struct Baseline {
     after: String,
 }
 
-fn check_window(
-    file: &mut File,
-    baseline: &Baseline,
-    images: &[(u64, Vec<u8>); 3],
-) -> Result<(), String> {
-    let data = read_window(file)?;
+fn check_window(file: &mut File, baseline: &Baseline, fixture: &Fixture) -> Result<(), String> {
+    let data = read_window(file, fixture)?;
     if hash(&data[..SECTOR as usize]) != baseline.before
         || hash(&data[data.len() - SECTOR as usize..]) != baseline.after
     {
         return Err("An adjacent sector differs from the baseline".into());
     }
     let mut start = SECTOR as usize;
-    for (address, expected) in images {
-        let at = (address - START + SECTOR) as usize;
+    for (address, expected) in &fixture.images {
+        let at = (address - fixture.start + SECTOR) as usize;
         if data[start..at].iter().any(|&byte| byte != 0)
             || data[at..at + expected.len()] != *expected
         {
@@ -105,10 +137,10 @@ fn check_window(
     Ok(())
 }
 
-pub(super) fn prepare() -> Result<String, String> {
+fn prepare_fixture(fixture: &Fixture) -> Result<PathBuf, String> {
     btrfs_checks::desktop()?;
     let (root, output) = ntfs_reconstruction_checks::verified_a_root()?;
-    if root.symlink_metadata(FOLDER).is_ok() {
+    if root.symlink_metadata(fixture.folder).is_ok() {
         return Err(
             "STOP: this fixture window already has a baseline; do not repeat preparation".into(),
         );
@@ -116,7 +148,7 @@ pub(super) fn prepare() -> Result<String, String> {
     let a = quick_partition_checks::table(A)?;
     let b = quick_partition_checks::table(B)?;
     let original = table_restore::archive_layout(&b)?;
-    guard_range(&table_restore::archive_layout(&a)?, &original)?;
+    guard_range(&table_restore::archive_layout(&a)?, &original, fixture)?;
     let source = selection(B, None)?;
     let (ctx, _, _) = partitions::platform::table_restore_context(&source, None)?;
     let locks = data_windows::lock(&ctx.resolved)?;
@@ -134,17 +166,17 @@ pub(super) fn prepare() -> Result<String, String> {
     {
         return Err("STOP: B's raw and native tables changed or disagree".into());
     }
-    let empty = read_window(&mut file)?;
+    let empty = read_window(&mut file, fixture)?;
     if empty[SECTOR as usize..empty.len() - SECTOR as usize]
         .iter()
         .any(|&byte| byte != 0)
     {
-        return Err("STOP: the dedicated 48 MiB data window is not entirely zero".into());
+        return Err("STOP: the dedicated data window is not entirely zero".into());
     }
     data_windows::offline(&file)?;
     data_windows::confirm_writable_offline(&file)?;
     if !original.agrees(&extfs::restore_native(&file, Some(&parts), SECTOR)?.0)
-        || read_window(&mut file)? != empty
+        || read_window(&mut file, fixture)? != empty
     {
         return Err("STOP: B changed after taking it offline; no fixture data was written".into());
     }
@@ -157,15 +189,14 @@ pub(super) fn prepare() -> Result<String, String> {
         before: hash(&empty[..SECTOR as usize]),
         after: hash(&empty[empty.len() - SECTOR as usize..]),
     };
-    root.create_dir(FOLDER).map_err(err)?;
-    let dir = root.open_dir(FOLDER).map_err(err)?;
+    root.create_dir(fixture.folder).map_err(err)?;
+    let dir = root.open_dir(fixture.folder).map_err(err)?;
     let mut record = dir
         .open_with(BASELINE, CapOptions::new().write(true).create_new(true))
         .map_err(err)?;
     serde_json::to_writer(&mut record, &baseline).map_err(err)?;
     record.sync_all().map_err(err)?;
-    let images = images();
-    for (address, data) in &images {
+    for (address, data) in &fixture.images {
         file.seek(SeekFrom::Start(*address)).map_err(err)?;
         for chunk in data.chunks(128 * 1024) {
             if file.write(chunk).map_err(err)? != chunk.len() {
@@ -174,17 +205,22 @@ pub(super) fn prepare() -> Result<String, String> {
         }
     }
     file.sync_all().map_err(err)?;
-    check_window(&mut file, &baseline, &images)?;
+    check_window(&mut file, &baseline, fixture)?;
     drop(file);
     drop(locks);
     reallocation_checks::state(&inventory()?, B, true)?;
     if ntfs_reconstruction_checks::table_hashes()? != baseline.tables {
         return Err("STOP: GPT or guest OS layout changed".into());
     }
+    Ok(output.join(fixture.folder))
+}
+
+pub(super) fn prepare() -> Result<String, String> {
+    let output = prepare_fixture(&boot_fixture())?;
     Ok(format!(
         "PASS: three unregistered damaged volumes on offline B. Search from LBA {} for {} sectors. Expected starts NTFS {}, FAT32 {}, exFAT {}. A output: {}. Full fixture, padding, adjacent sectors and unchanged tables checked.",
         START / SECTOR, SIZE / SECTOR, START / SECTOR, FAT32 / SECTOR, EXFAT / SECTOR,
-        output.join(FOLDER).display(),
+        output.display(),
     ))
 }
 
@@ -237,10 +273,10 @@ fn check_exports(dir: &Dir) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn verify() -> Result<String, String> {
+fn verify_fixture(fixture: &Fixture) -> Result<Dir, String> {
     btrfs_checks::desktop()?;
     let (root, _) = ntfs_reconstruction_checks::verified_a_root()?;
-    let dir = root.open_dir(FOLDER).map_err(err)?;
+    let dir = root.open_dir(fixture.folder).map_err(err)?;
     let baseline: Baseline =
         serde_json::from_reader(dir.open(BASELINE).map_err(err)?.take(4096)).map_err(err)?;
     reallocation_checks::state(&inventory()?, B, true)?;
@@ -249,7 +285,63 @@ pub(super) fn verify() -> Result<String, String> {
     }
     let source = selection(B, None)?;
     let mut file = data_windows::device(&data_windows::resolve(&source, false, false)?, false)?;
-    check_window(&mut file, &baseline, &images())?;
+    check_window(&mut file, &baseline, fixture)?;
+    Ok(dir)
+}
+
+pub(super) fn verify() -> Result<String, String> {
+    let dir = verify_fixture(&boot_fixture())?;
     check_exports(&dir)?;
     Ok("PASS: FAT32 and exFAT file bytes, SHA-256 and reconstruction manifests match. Offline B's full fixture window and adjacent sectors, both GPTs and the guest OS layout are unchanged.".into())
+}
+
+pub(super) fn prepare_ext() -> Result<String, String> {
+    let fixture = ext_fixture()?;
+    let output = prepare_fixture(&fixture)?;
+    Ok(format!(
+        "PASS: unregistered Ext4 volume on offline B starts at LBA {}. Search from LBA {} for {} sectors. Preview small_file and export it to {}.",
+        fixture.images[0].0 / SECTOR, fixture.start / SECTOR, fixture.size / SECTOR,
+        output.display(),
+    ))
+}
+
+pub(super) fn verify_ext() -> Result<String, String> {
+    let fixture = ext_fixture()?;
+    let dir = verify_fixture(&fixture)?;
+    let mut found = 0;
+    for entry in dir.entries().map_err(err)? {
+        let name = entry.map_err(err)?.file_name();
+        if !name.to_string_lossy().starts_with("DiskStudio-recovered-") {
+            continue;
+        }
+        let out = dir.open_dir(name).map_err(err)?;
+        let report: serde_json::Value = serde_json::from_reader(
+            out.open(recovery_export::REPORT)
+                .map_err(err)?
+                .take(128 * 1024),
+        )
+        .map_err(err)?;
+        let expected = b"hello, world!";
+        let proof = &report["extReconstruction"];
+        if report["completed"] != true
+            || report["savedFiles"] != 1
+            || report["failedFiles"] != 0
+            || report["entries"][0]["originalName"] != "small_file"
+            || report["entries"][0]["name"] != "000001_small_file"
+            || report["entries"][0]["folder"] != 0
+            || report["outcomes"][0]["sha256"] != hash(expected)
+            || proof["backupGroup"] != 1
+            || proof["backupOffset"] != 8_389_632u64
+            || proof["sectorSize"] != SECTOR
+            || proof["bytes"] != fixture.images[0].1.len()
+            || out.read("000001_small_file").map_err(err)? != expected
+        {
+            return Err("The Ext4 file or reconstruction manifest differs".into());
+        }
+        found += 1;
+    }
+    if found != 1 {
+        return Err("Expected exactly one checked Ext4 export".into());
+    }
+    Ok("PASS: Ext4 export bytes, SHA-256 and backup location match. Offline B's full extent and adjacent sectors, both GPTs and the guest OS layout are unchanged.".into())
 }

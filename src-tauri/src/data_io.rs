@@ -26,9 +26,9 @@ impl<R: Read + Seek> Region<R> {
         Self::with_cache(inner, start, len, 4096, 1)
     }
 
-    pub(crate) fn for_image_files(inner: R, start: u64, len: u64) -> io::Result<Self> {
+    pub(crate) fn for_file_view(inner: R, start: u64, len: u64) -> io::Result<Self> {
         // Directory lookups alternate among indexes, inodes and allocation
-        // maps. Preserve their windows without charging the bridge repeatedly.
+        // maps. Keep recent windows to avoid repeatedly fetching the same data.
         Self::with_cache(inner, start, len, 1024 * 1024, 8)
     }
 

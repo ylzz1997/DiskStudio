@@ -163,6 +163,8 @@
   "重建视图缺少可核对的单卷来源。": "Reconstruction requires a single, verifiable volume.",
   "重建文件视图需要文件系统读取模式。": "File view reconstruction requires a file system scan mode.",
   "已采用 Ext4 备用超级块。": "The file view uses an Ext4 backup superblock.",
+  "Ext4 备用超级块、当前块组、根 inode 与内部日志已核对。": "Verified the Ext4 backup superblock, current block groups, root inode, and internal journal.",
+  "Ext4 备用超级块证据超过搜索预算，请缩小范围。": "Ext4 backup superblock verification exceeded the search budget. Narrow the search range.",
   "检测到其他文件系统或加密证据，不能采用 Ext4 备用超级块。": "Another file system or encryption signature conflicts with the Ext4 backup superblock.",
   "重建需要带元数据校验且保留卷身份的 Ext4 主超级块。": "Reconstruction requires an Ext4 primary superblock with metadata checksums and a surviving volume identity.",
   "Ext4 主超级块可读，请使用常规目录读取。": "The Ext4 primary superblock is readable. Use the regular directory browser.",

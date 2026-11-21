@@ -17,9 +17,9 @@ fn findings(bytes: Vec<u8>, sector: u64) -> Vec<Candidate> {
     };
     let mut items = vec![];
     scan(
-        &mut Cursor::new(bytes),
+        Cursor::new(bytes),
         r,
-        &AtomicBool::new(false),
+        &Arc::new(AtomicBool::new(false)),
         |_, c| {
             if let Some(c) = c {
                 items.push(c)
@@ -55,15 +55,15 @@ fn backup_boot_search_finds_bounded_ntfs_fat32_and_exfat_views() {
         let mut bytes = vec![0; start];
         bytes.extend_from_slice(&image);
         bytes.resize(bytes.len() + BLOCK, 0);
-        let mut source = Region::new(Cursor::new(&bytes), 0, bytes.len() as u64).unwrap();
+        let mut source = Region::new(Cursor::new(bytes.clone()), 0, bytes.len() as u64).unwrap();
         let range = Range {
             offset: sector as u64,
             size: (bytes.len() - sector) as u64,
             sector: sector as u64,
         };
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         let mut found = vec![];
-        scan(&mut source, range, &cancel, |_, item| {
+        scan(Cursor::new(bytes.clone()), range, &cancel, |_, item| {
             found.extend(item);
             Ok(())
         })
@@ -77,7 +77,7 @@ fn backup_boot_search_finds_bounded_ntfs_fat32_and_exfat_views() {
         assert!(item.can_browse && !item.can_restore && item.reconstruction().is_some());
         assert!(crate::lost_partition_restore::extent(&mut source, range, item, &cancel).is_err());
         let mut view = candidate_reader(
-            &mut source,
+            source,
             bytes.len() as u64,
             sector as u64,
             range,
@@ -146,6 +146,108 @@ fn backup_boot_search_ignores_duplicate_conflicting_and_truncated_copies() {
 }
 
 #[test]
+fn ext4_backup_search_checks_bounds_and_reopens_the_same_read_only_view() {
+    let image =
+        zstd::stream::decode_all(&include_bytes!("../../tests/fixtures/test_disk1.bin.zst")[..])
+            .unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    const FIRST_BACKUP: usize = 8_389_632;
+    for (sector, start) in [(512, BLOCK - 1536), (4096, BLOCK - 4096)] {
+        let mut disk = vec![0; start];
+        disk.extend_from_slice(&image);
+        let range = Range {
+            sector,
+            ..range(disk.len())
+        };
+        let healthy = findings(disk.clone(), sector);
+        assert_eq!(healthy.len(), 1);
+        assert!(healthy[0].can_restore);
+        disk[start + 1080..start + 1082].fill(0);
+        let backup = start + FIRST_BACKUP;
+        let anchor = backup_ext::hint(&disk[backup..], backup as u64, range).unwrap();
+        let fault = backup_ext::probe(
+            Cursor::new(disk.clone()),
+            sector,
+            anchor,
+            &cancel,
+            &Rc::new(Cell::new(0)),
+        )
+        .unwrap_err();
+        assert!(fault.contains("搜索预算"));
+
+        let mut lost = findings(disk.clone(), sector);
+        assert_eq!(lost.len(), 1);
+        let item = lost.pop().unwrap();
+        assert_eq!(
+            (&*item.filesystem, item.offset, item.size),
+            ("Ext4", start as u64, image.len() as u64)
+        );
+        assert!(item.can_browse && !item.can_restore);
+        assert!(matches!(item.reconstruction(), Some(view::Proof::Ext(_))));
+        assert!(crate::lost_partition_restore::extent(
+            &mut Cursor::new(disk.as_slice()),
+            range,
+            &item,
+            &cancel,
+        )
+        .is_err());
+        let open = |bytes: Vec<u8>| {
+            candidate_reader(
+                Cursor::new(bytes),
+                range.size,
+                range.sector,
+                range,
+                &item,
+                &cancel,
+            )
+        };
+        let mut files = vec![];
+        crate::ext_recovery::scan(
+            open(disk.clone()).unwrap(),
+            crate::recovery::ScanMode::Existing,
+            cancel.clone(),
+            |_, _| Ok(()),
+            |file| files.push(file),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let sample = files.iter().find(|c| c.name == "small_file").unwrap();
+        let mut output = vec![];
+        crate::recovery::extract_owned(
+            open(disk.clone()).unwrap(),
+            sample,
+            &mut output,
+            u64::MAX,
+            cancel.clone(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(output, b"hello, world!");
+
+        let mut changed = disk.clone();
+        changed[start + FIRST_BACKUP + 0x3fc] ^= 1;
+        assert!(open(changed.clone()).is_err());
+        assert_eq!(
+            findings(changed, sector).len(),
+            1,
+            "use the next valid backup"
+        );
+        let mut changed = disk.clone();
+        changed[start + 16_778_240 + 0x1f] = 1;
+        assert!(open(changed.clone()).is_err());
+        assert!(findings(changed, sector).is_empty(), "pending journal");
+        let mut shorter = disk.clone();
+        shorter.truncate(disk.len() - sector as usize);
+        assert!(findings(shorter, sector).is_empty());
+        disk[start + 1024..start + 2048].fill(0);
+        assert!(
+            findings(disk, sector).is_empty(),
+            "missing primary identity"
+        );
+    }
+}
+
+#[test]
 fn btrfs_search_deduplicates_mirrors_and_allows_read_only_recovery_without_primary() {
     let offset = BLOCK - 64 * 1024;
     let mut disk = vec![0; offset];
@@ -156,11 +258,11 @@ fn btrfs_search_deduplicates_mirrors_and_allows_read_only_recovery_without_prima
         sector: 4096,
         ..range(disk.len())
     };
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut source = Cursor::new(disk);
-    let detect = |source: &mut Cursor<Vec<u8>>, range| {
+    let detect = |source: &Cursor<Vec<u8>>, range| {
         let mut candidates = Vec::new();
-        scan(source, range, &cancel, |_, candidate| {
+        scan(source.clone(), range, &cancel, |_, candidate| {
             candidates.extend(candidate);
             Ok(())
         })
@@ -192,7 +294,7 @@ fn btrfs_search_deduplicates_mirrors_and_allows_read_only_recovery_without_prima
     assert_eq!((mirror.offset, mirror.size), (offset as u64, size));
     assert!(!mirror.can_restore);
     let reader = candidate_reader(
-        &mut source,
+        source.clone(),
         range.size,
         range.sector,
         range,
@@ -444,24 +546,24 @@ fn selected_range_cancellation_errors_and_truncation_do_not_report_completion() 
             self.cursor.read(b)
         }
     }
-    let mut source = Bounded {
+    let source = || Bounded {
         cursor: Cursor::new(bytes.clone()),
         low: r.offset,
         high: r.offset + r.size,
     };
     let mut completed = 0;
-    scan(&mut source, r, &AtomicBool::new(false), |n, _| {
+    scan(source(), r, &Arc::new(AtomicBool::new(false)), |n, _| {
         completed = n;
         Ok(())
     })
     .unwrap();
     assert_eq!(completed, r.size);
-    let stop = AtomicBool::new(true);
-    assert!(scan(&mut source, r, &stop, |_, _| Ok(())).is_err());
+    let stop = Arc::new(AtomicBool::new(true));
+    assert!(scan(source(), r, &stop, |_, _| Ok(())).is_err());
     assert!(scan(
-        &mut Cursor::new(vec![0; 512]),
+        Cursor::new(vec![0; 512]),
         r,
-        &AtomicBool::new(false),
+        &Arc::new(AtomicBool::new(false)),
         |_, _| Ok(())
     )
     .is_err());
@@ -511,12 +613,12 @@ fn production_cache_is_bounded_before_search_and_candidate_validation() {
         low: offset,
         high: offset + range.size,
     };
-    let mut bounded = crate::data_io::Region::new(raw, range.offset, range.size).unwrap();
+    let bounded = crate::data_io::Region::new(raw, range.offset, range.size).unwrap();
     let mut found = vec![];
     scan(
-        &mut bounded,
+        bounded,
         Range { offset: 0, ..range },
-        &AtomicBool::new(false),
+        &Arc::new(AtomicBool::new(false)),
         |_, c| {
             if let Some(mut c) = c {
                 c.offset += offset;

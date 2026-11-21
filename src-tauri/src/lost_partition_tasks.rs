@@ -298,14 +298,14 @@ pub fn start(request: Request) -> Result<String, String> {
                     if checked != range {
                         return Err("搜索范围已变化".into());
                     }
-                    let mut reader = crate::data_io::Region::new(
+                    let reader = crate::data_io::Region::new(
                         platform::device(&resolved, false)?,
                         range.offset,
                         range.size,
                     )
                     .map_err(|e| e.to_string())?;
                     lost_partitions::scan(
-                        &mut reader,
+                        reader,
                         Range { offset: 0, ..range },
                         &cancel,
                         |done, candidate| {
@@ -404,9 +404,9 @@ mod tests {
         };
         let mut found = Vec::new();
         crate::lost_partitions::scan(
-            &mut std::io::Cursor::new(bytes),
+            std::io::Cursor::new(bytes),
             range,
-            &std::sync::atomic::AtomicBool::new(false),
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_, candidate| {
                 found.extend(candidate);
                 Ok(())

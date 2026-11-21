@@ -120,15 +120,15 @@ pub fn search(request: SearchRequest) -> Result<String, String> {
 }
 
 fn scan_range(
-    reader: impl Read + Seek,
+    reader: impl Read + Seek + 'static,
     range: surface_scan::Range,
-    cancel: &AtomicBool,
+    cancel: &std::sync::Arc<AtomicBool>,
     mut publish: impl FnMut(u64, Option<lost_partitions::Candidate>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut reader =
+    let reader =
         data_io::Region::new(reader, range.offset, range.size).map_err(|e| e.to_string())?;
     lost_partitions::scan(
-        &mut reader,
+        reader,
         surface_scan::Range { offset: 0, ..range },
         cancel,
         |done, candidate| {
@@ -217,7 +217,7 @@ mod tests {
             size: size - stripe as u64,
             sector: 512,
         };
-        let cancel = AtomicBool::new(false);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let mut candidates = Vec::new();
         scan_range(open(&members), range, &cancel, |_, candidate| {
             candidates.extend(candidate);

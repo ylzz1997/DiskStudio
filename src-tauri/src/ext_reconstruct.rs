@@ -91,6 +91,30 @@ fn compatible(primary: &[u8; 1024], backup: &[u8; 1024]) -> bool {
     .all(|field| primary[field.clone()] == backup[field])
 }
 
+/// Derive a possible volume extent from a complete, checksummed backup.
+/// The caller must still corroborate it against the current volume metadata.
+pub(crate) fn backup_extent(bytes: &[u8], limit: u64) -> Option<(u64, u64)> {
+    let s: &[u8; 1024] = bytes.get(..1024)?.try_into().ok()?;
+    let group = u64::from(u16le(s, 0x5a));
+    if group == 0
+        || u16le(s, 0x38) != MAGIC
+        || u16le(s, 0x3a) > 1
+        || u32le(s, 0x64) & 0x400 == 0
+        || !clean_fields(s)
+        || !checksum(s)
+    {
+        return None;
+    }
+    let layout = superblock_layout(s, limit).ok()?;
+    let listed = if u32le(s, 0x5c) & 0x200 != 0 || u32le(s, 0x64) & 1 != 0 {
+        backup_groups(s, layout.groups).contains(&group)
+    } else {
+        group < layout.groups
+    };
+    let offset = (layout.first + group * layout.bpg) * layout.block;
+    (listed && offset + SUPERBLOCK <= layout.size).then_some((offset, layout.size))
+}
+
 pub(crate) fn inspect(
     reader: &mut (impl Read + Seek),
     sector: u64,
@@ -318,7 +342,7 @@ mod tests {
                 inner: Cursor::new(image.clone()),
                 bytes_read: 0,
             };
-            let region = Region::for_image_files(source, 0, image.len() as u64).unwrap();
+            let region = Region::for_file_view(source, 0, image.len() as u64).unwrap();
             let (reader, proof) = recovery::view::Proof::open(region, sector, &cancel).unwrap();
             let recovery::view::Proof::Ext(details) = &proof else {
                 panic!("Expected Ext4");

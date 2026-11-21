@@ -55,6 +55,7 @@ impl Proof {
         Ok(reader)
     }
 
+    #[cfg(test)]
     pub(crate) fn reopen_boot<R: Read + Seek>(
         &self,
         reader: R,

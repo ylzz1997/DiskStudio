@@ -122,7 +122,7 @@ pub(super) fn probe<R: Read + Seek>(
         can_restore: false,
         can_browse: true,
         btrfs_member_count: None,
-        validation: Validation::BackupBoot(proof),
+        validation: Validation::BackupMetadata(proof),
         btrfs_member: None,
     }))
 }

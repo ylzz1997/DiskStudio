@@ -1209,6 +1209,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Ext-Reconstruct-Verify") => ext_reconstruct_checks::verify(),
         Some("Lost-Backup-Boot-Prepare") => lost_backup_boot_checks::prepare(),
         Some("Lost-Backup-Boot-Verify") => lost_backup_boot_checks::verify(),
+        Some("Lost-Ext4-Prepare") => lost_backup_boot_checks::prepare_ext(),
+        Some("Lost-Ext4-Verify") => lost_backup_boot_checks::verify_ext(),
         Some("BitLocker-Marker-Prepare") => bitlocker_checks::prepare(),
         Some("BitLocker-Marker-Verify") => bitlocker_checks::verify(),
         Some("Resize-Clone-Prepare") => resize_clone_checks::prepare(),

@@ -66,9 +66,9 @@ fn verify_member(mut reader: impl Read + Seek, primary: bool) -> Result<(), Stri
 }
 
 fn scan_candidates(
-    reader: &mut (impl Read + Seek),
+    reader: impl Read + Seek + 'static,
     local: Range,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<lost_partitions::Candidate>, String> {
     let mut found = Vec::new();
     lost_partitions::scan(reader, local, cancel, |_, item| {
@@ -85,13 +85,15 @@ fn scan_candidates(
 }
 
 fn check_candidates(file: &mut File) -> Result<(), String> {
-    let cancel = AtomicBool::new(false);
-    let mut reader = data_io::Region::new(&mut *file, SEARCH.offset, SEARCH.size).map_err(err)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let read_window = || {
+        data_io::Region::new(file.try_clone().map_err(err)?, SEARCH.offset, SEARCH.size).map_err(err)
+    };
     let local = Range {
         offset: 0,
         ..SEARCH
     };
-    let found = scan_candidates(&mut reader, local, &cancel)?;
+    let found = scan_candidates(read_window()?, local, &cancel)?;
     for (offset, primary) in [(0, true), (SECOND - START, false)] {
         let candidate = found
             .iter()
@@ -103,7 +105,7 @@ fn check_candidates(file: &mut File) -> Result<(), String> {
             })
             .ok_or("Btrfs candidate bounds or write eligibility differ")?;
         let member = lost_partitions::candidate_reader(
-            &mut reader,
+            read_window()?,
             local.size,
             local.sector,
             local,
@@ -324,13 +326,14 @@ pub(crate) fn inspect() -> Result<String, String> {
 }
 
 fn group_readback(file: &mut File) -> Result<(), String> {
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
     let local = Range {
         offset: 0,
         ..GROUP_SEARCH
     };
     let found = scan_candidates(
-        &mut data_io::Region::new(&mut *file, GROUP_SEARCH.offset, local.size).map_err(err)?,
+        data_io::Region::new(file.try_clone().map_err(err)?, GROUP_SEARCH.offset, local.size)
+            .map_err(err)?,
         local,
         &cancel,
     )?;

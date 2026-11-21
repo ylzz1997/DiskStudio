@@ -1,15 +1,24 @@
 //! Find filesystem boundaries without consulting or modifying a partition table.
 //! All I/O is confined to the selected range; signatures alone are not results.
-use crate::{data_io::Region, recovery::view, surface_scan::Range};
+use crate::{
+    data_io::Region, ext_recovery::scan_progress::SharedReader, recovery::view, surface_scan::Range,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
+    cell::Cell,
     collections::HashSet,
     io::{self, Read, Seek, SeekFrom},
-    sync::atomic::{AtomicBool, Ordering},
+    rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 #[path = "lost_backup_boot.rs"]
 mod backup_boot;
+#[path = "lost_backup_ext.rs"]
+mod backup_ext;
 #[path = "lost_btrfs.rs"]
 mod btrfs;
 
@@ -38,13 +47,13 @@ pub struct Candidate {
 enum Validation {
     Primary(String),
     Btrfs { anchor: u64, fingerprint: String },
-    BackupBoot(view::Proof),
+    BackupMetadata(view::Proof),
 }
 
 impl Candidate {
     pub(crate) fn reconstruction(&self) -> Option<&view::Proof> {
         match &self.validation {
-            Validation::BackupBoot(proof) => Some(proof),
+            Validation::BackupMetadata(proof) => Some(proof),
             _ => None,
         }
     }
@@ -500,7 +509,7 @@ fn revalidate<R: Read + Seek>(
             )?
         }
         Validation::Primary(_) => probe(reader, range, candidate.offset, cancel)?,
-        Validation::BackupBoot(_) => return Err("候选需要按备用引导视图核对。".into()),
+        Validation::BackupMetadata(_) => return Err("候选需要按备用元数据视图核对。".into()),
     }
     .ok_or("候选文件系统证据已失效")?;
     if current.filesystem != candidate.filesystem
@@ -516,14 +525,13 @@ fn revalidate<R: Read + Seek>(
 }
 // Bound the raw reader before adding any cache. A whole-disk cache here would
 // prefetch bytes outside an unaligned candidate despite higher-level bounds.
-pub(crate) fn candidate_reader<R: Read + Seek>(
+fn candidate_region<R: Read + Seek>(
     reader: R,
     source_size: u64,
     sector: u64,
     range: Range,
     candidate: &Candidate,
-    cancel: &AtomicBool,
-) -> Result<view::Reader<Region<R>>, String> {
+) -> Result<Region<R>, String> {
     if sector != range.sector
         || !matches!(sector, 512 | 4096)
         || candidate.offset % sector != 0
@@ -540,17 +548,26 @@ pub(crate) fn candidate_reader<R: Read + Seek>(
     {
         return Err("候选范围或设备几何已变化".into());
     }
-    let mut reader =
-        Region::new(reader, candidate.offset, candidate.size).map_err(|e| e.to_string())?;
-    if let Some(proof) = candidate.reconstruction() {
-        return proof.reopen_boot(reader, cancel);
+    if matches!(candidate.reconstruction(), Some(view::Proof::Ext(_))) {
+        Region::for_file_view(reader, candidate.offset, candidate.size)
+    } else {
+        Region::new(reader, candidate.offset, candidate.size)
     }
+    .map_err(|e| e.to_string())
+}
+
+fn revalidate_region<R: Read + Seek>(
+    reader: &mut Region<R>,
+    sector: u64,
+    candidate: &Candidate,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
     let local = Candidate {
         offset: 0,
         ..candidate.clone()
     };
     revalidate(
-        &mut reader,
+        reader,
         Range {
             offset: 0,
             size: candidate.size,
@@ -558,13 +575,39 @@ pub(crate) fn candidate_reader<R: Read + Seek>(
         },
         &local,
         cancel,
-    )?;
+    )
+}
+
+pub(crate) fn validate_primary(
+    reader: impl Read + Seek,
+    source_size: u64,
+    range: Range,
+    candidate: &Candidate,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let mut region = candidate_region(reader, source_size, range.sector, range, candidate)?;
+    revalidate_region(&mut region, range.sector, candidate, cancel)
+}
+
+pub(crate) fn candidate_reader<R: Read + Seek + 'static>(
+    reader: R,
+    source_size: u64,
+    sector: u64,
+    range: Range,
+    candidate: &Candidate,
+    cancel: &AtomicBool,
+) -> Result<view::Reader<Region<R>>, String> {
+    let mut reader = candidate_region(reader, source_size, sector, range, candidate)?;
+    if let Some(proof) = candidate.reconstruction() {
+        return proof.reopen(reader, cancel);
+    }
+    revalidate_region(&mut reader, sector, candidate, cancel)?;
     Ok(view::Reader::new(reader, Vec::new(), candidate.size))
 }
-pub fn scan<R: Read + Seek>(
-    reader: &mut R,
+pub fn scan<R: Read + Seek + 'static>(
+    reader: R,
     range: Range,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
     mut progress: impl FnMut(u64, Option<Candidate>) -> Result<(), String>,
 ) -> Result<(), String> {
     if !matches!(range.sector, 512 | 4096)
@@ -585,6 +628,9 @@ pub fn scan<R: Read + Seek>(
     let mut btrfs_budget = btrfs::BUDGET;
     let mut boot_budget = backup_boot::BUDGET;
     let mut boot_offsets = HashSet::new();
+    let ext_budget = Rc::new(Cell::new(backup_ext::BUDGET));
+    let mut ext_offsets = HashSet::new();
+    let mut reader = SharedReader::new(reader);
     progress(0, None)?;
     while done < range.size {
         canceled(cancel)?;
@@ -606,8 +652,19 @@ pub fn scan<R: Read + Seek>(
             let known_copy = backup.as_ref().is_some_and(|item| {
                 boot_offsets.contains(&(item.start, item.filesystem, item.size))
             });
+            // A 1 KiB Ext4 backup can begin inside a 4Kn logical sector.
+            // The derived volume start must still align to the device sector.
+            let ext_backups: Vec<_> = (0..range.sector as usize)
+                .step_by(1024)
+                .filter_map(|at| backup_ext::hint(bytes.get(i + at..)?, offset + at as u64, range))
+                .filter(|backup| !ext_offsets.contains(&(backup.start, backup.size)))
+                .collect();
             let boot = !known_copy && hint(&bytes[i..]);
-            if !boot && anchor.is_none() && (backup.is_none() || known_copy) {
+            if !boot
+                && anchor.is_none()
+                && (backup.is_none() || known_copy)
+                && ext_backups.is_empty()
+            {
                 continue;
             }
             canceled(cancel)?;
@@ -624,7 +681,7 @@ pub fn scan<R: Read + Seek>(
                 Ok(())
             };
             let primary = if boot {
-                probe(reader, range, offset, cancel)?
+                probe(&mut reader, range, offset, cancel)?
             } else {
                 None
             };
@@ -633,21 +690,43 @@ pub fn scan<R: Read + Seek>(
                     let size = candidate.size + if kind == "NTFS" { range.sector } else { 0 };
                     boot_offsets.insert((candidate.offset, kind, size));
                 }
+                if candidate.filesystem == "Ext4" {
+                    ext_offsets.insert((candidate.offset, candidate.size));
+                }
                 publish(candidate)?;
             } else if let Some(backup) = backup.filter(|_| !known_copy) {
                 if let Some(candidate) =
-                    backup_boot::probe(reader, range.sector, backup, cancel, &mut boot_budget)?
+                    backup_boot::probe(&mut reader, range.sector, backup, cancel, &mut boot_budget)?
                 {
                     boot_offsets.insert((backup.start, backup.filesystem, backup.size));
                     publish(candidate)?;
                 }
             }
             if let Some((start, relative)) = anchor {
-                if let Some(candidate) =
-                    btrfs::probe(reader, range, start, relative, cancel, &mut btrfs_budget)?
-                {
+                if let Some(candidate) = btrfs::probe(
+                    &mut reader,
+                    range,
+                    start,
+                    relative,
+                    cancel,
+                    &mut btrfs_budget,
+                )? {
                     btrfs_offsets.insert(start);
                     publish(candidate)?;
+                }
+            }
+            for backup in ext_backups {
+                if !ext_offsets.contains(&(backup.start, backup.size)) {
+                    if let Some(candidate) = backup_ext::probe(
+                        reader.clone(),
+                        range.sector,
+                        backup,
+                        cancel,
+                        &ext_budget,
+                    )? {
+                        ext_offsets.insert((backup.start, backup.size));
+                        publish(candidate)?;
+                    }
                 }
             }
         }
