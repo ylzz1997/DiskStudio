@@ -56,6 +56,16 @@ fn random(bytes: &mut [u8]) -> Result<(), String> {
         Ok(())
     }
 }
+fn benchmark_reader(
+    resolved: &device::Resolved,
+    block: u32,
+) -> Result<impl crate::surface_scan::ScanSource + Send, String> {
+    let (reader, limit) = device::surface_scan_device(resolved, None)?;
+    if !limit.supports(block) {
+        return Err("测速块大小超过存储适配器的单次无缓存读取上限。请选择更小的块。".into());
+    }
+    Ok(reader)
+}
 fn whole(request: &Request) -> data_tasks::Selection {
     let mut s = request.source.clone();
     s.partition = None;
@@ -413,8 +423,8 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
             )?;
             if let Operation::Benchmark { options } = &request.operation {
                 options.validate(r)?;
+                benchmark_reader(&resolved, options.block_size)?;
             }
-            let _file = device::surface_device(&resolved)?;
             let fingerprint = digest(&resolved.disk)?;
             (r, resolved.label, fingerprint, None, false)
         } else {
@@ -451,8 +461,8 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
         let warning=match &request.operation {
             Operation::Wipe{..}=>"将永久覆盖指定范围。若覆盖文件系统或分区表，现有文件/分区会损坏。成功、取消或失败均保持整盘脱机；不自动重试、回滚或重新联机。每轮完整 SHA-256 回读；不能证明 SSD 重映射区、隐藏区域或历史物理页已清除。",
             Operation::WipeFree{..}=>"锁定后检查 NTFS、FAT12/16/32 或 exFAT 的分配信息，仅覆盖确认空闲的簇，不处理文件尾部余量、未知格式或 Ext。已删除内容将无法从已覆盖区域恢复。每轮完整回读，并比对全部保留区域的写前/写后 SHA-256。整盘保持脱机；取消或失败不重试、不回滚。逻辑覆写不能证明 SSD 历史物理页已擦除。",
-            Operation::Benchmark{options} if options.write=>"这是破坏性的原始写入测速，所选范围内的数据可能损坏。整盘将脱机并保持脱机，每次写入刷新并回读 SHA-256；不会恢复原数据。QD1，无 Windows 缓存；写入耗时包括刷新，回读单独计数，设备/虚拟化缓存仍可能影响结果。",
-            Operation::Benchmark{..}=>"仅读取选定范围。QD1，无 Windows 缓存；设备/虚拟化缓存、其他工作负载会影响结果，在线内容可能变化。请求次数决定读取量，可重复覆盖测量范围。",
+            Operation::Benchmark{options} if options.write=>"测速包含破坏性原始写入，可能损坏所选范围内的数据。整盘将保持脱机。每次写入都刷新并回读 SHA-256，写入内容永久改变。写入延迟包含刷新，校验回读单独计数。",
+            Operation::Benchmark{..}=>"仅读取选定范围。读取请求绕过 Windows 缓存。设备或虚拟化缓存及其他工作负载会影响结果。请求可能重复读取同一位置。",
             Operation::Trim=>"由 Windows 对所选 NTFS 卷执行 ReTrim，可能使已删除数据无法恢复。只传 ReTrim，不执行碎片整理。不保证 SSD 物理擦除或清零；提交到 Windows 后无法中途取消，提供者失败不自动重试。",
         }.into();
         let preview = Preview {
@@ -572,16 +582,20 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
             {
                 return Err("身份或范围与预览不一致".into());
             }
-            let mut file = device::surface_device(&resolved)?;
+            options.validate(expected)?;
+            let mut readers = Vec::with_capacity(usize::from(options.queue_depth));
+            for _ in 0..options.queue_depth {
+                canceled(cancel)?;
+                readers.push(benchmark_reader(&resolved, options.block_size)?);
+            }
             let mut stats = engine::BenchmarkProgress::default();
-            let result = engine::benchmark(
-                &mut file,
+            let result = engine::benchmark_reads(
+                readers,
                 expected,
                 options,
                 cancel,
                 &mut stats,
                 random,
-                |f| f.sync_all(),
                 |s| {
                     report.benchmark = Some(s.clone());
                     report.phase = "无缓存读取".into();
@@ -600,7 +614,8 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
                 return Err("测速结束时设备状态变化，结果仅对应已读请求。".into());
             }
             return Ok(
-                "读取测速完成。结果为 QD1 请求耗时统计，设备和虚拟化缓存仍会影响数值。".into(),
+                "读取测速完成。吞吐量和 IOPS 按整段测量时间计算。设备和虚拟化缓存可能影响结果。"
+                    .into(),
             );
         }
     }
@@ -781,7 +796,12 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
                 |f| f.sync_all(),
                 |s| {
                     report.benchmark = Some(s.clone());
-                    report.phase = "写入、刷新与回读".into();
+                    report.phase = if options.read_percent.is_some() {
+                        "混合读写、刷新与回读"
+                    } else {
+                        "写入、刷新与回读"
+                    }
+                    .into();
                     model::publish(report);
                     data_tasks::record_progress(
                         &report.id,

@@ -288,6 +288,8 @@ fn bench(write: bool, access: Access) -> BenchmarkOptions {
         access,
         operations: 5,
         block_size: 4096,
+        queue_depth: 1,
+        read_percent: None,
     }
 }
 #[test]
@@ -357,6 +359,46 @@ fn random_write_benchmark_verifies_each_request_and_preserves_outside_bytes() {
         .iter()
         .chain(&io.bytes.get_ref()[16384..])
         .all(|b| *b == 0x79));
+}
+#[test]
+fn mixed_benchmark_separates_workload_reads_writes_and_required_readback() {
+    let mut io = Fake::new(24576);
+    let opt = BenchmarkOptions {
+        read_percent: Some(50),
+        ..bench(true, Access::Sequential)
+    };
+    let mut p = BenchmarkProgress::default();
+    benchmark(
+        &mut io,
+        range(12288),
+        &opt,
+        &AtomicBool::new(false),
+        &mut p,
+        |bytes| {
+            bytes.fill(42);
+            Ok(())
+        },
+        |_| Ok(()),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(p.operations, 5);
+    assert_eq!((p.read_operations, p.write_operations), (3, 2));
+    assert_eq!(
+        (p.read_bytes, p.write_bytes, p.verified_bytes),
+        (12288, 8192, 8192)
+    );
+    assert_eq!(io.writes, vec![(4096, 4096), (12288, 4096)]);
+    assert_eq!(
+        io.reads,
+        vec![
+            (4096, 4096),
+            (8192, 4096),
+            (12288, 4096),
+            (4096, 4096),
+            (8192, 4096)
+        ]
+    );
 }
 #[test]
 fn benchmark_invalid_alignment_short_write_and_corruption_fail_closed() {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
@@ -14,9 +14,14 @@ import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { formatSize, type Disk } from "./types";
 import {
+  benchmarkOptions,
+  benchmarkThroughput,
   maintenanceRange,
   maintenanceTarget,
   wipePattern,
+  type BenchmarkAccess,
+  type BenchmarkMode,
+  type BenchmarkSample,
   type MaintenanceMode,
   type MaintenanceOperation,
   type MaintenancePreview,
@@ -36,6 +41,100 @@ const modes = [
   { id: "wipeFree", title: "清除空闲空间", icon: Brush },
   { id: "trim", title: "TRIM", icon: Activity },
 ] as const;
+function ThroughputChart({
+  samples,
+  showRead,
+  showWrite,
+}: {
+  samples: BenchmarkSample[];
+  showRead: boolean;
+  showWrite: boolean;
+}) {
+  const { t, language } = useLocale();
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const intervals = useMemo(() => benchmarkThroughput(samples), [samples]);
+  const total = intervals.at(-1)?.endSeconds ?? 0;
+  const peak = Math.max(
+    1,
+    ...intervals.map((interval) =>
+      Math.max(interval.readMiBPerSecond, interval.writeMiBPerSecond),
+    ),
+  );
+  useEffect(() => {
+    const element = canvas.current;
+    const ctx = element?.getContext("2d");
+    if (!element || !ctx || total <= 0) return;
+    const { width, height } = element;
+    const margin = 5;
+    const x = (seconds: number) =>
+      margin + ((width - margin * 2) * seconds) / total;
+    const y = (rate: number) =>
+      height - margin - ((height - margin * 2) * rate) / peak;
+    ctx.clearRect(0, 0, width, height);
+    ctx.strokeStyle = getComputedStyle(element)
+      .getPropertyValue("--border")
+      .trim();
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const rate of [0, peak / 2, peak]) {
+      ctx.moveTo(x(0), y(rate));
+      ctx.lineTo(x(total), y(rate));
+    }
+    ctx.stroke();
+    for (const [visible, field, color] of [
+      [showRead, "readMiBPerSecond", "--benchmark-read"],
+      [showWrite, "writeMiBPerSecond", "--benchmark-write"],
+    ] as const) {
+      if (!visible) continue;
+      ctx.strokeStyle = getComputedStyle(element)
+        .getPropertyValue(color)
+        .trim();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      intervals.forEach((interval, index) => {
+        const point = x(interval.startSeconds);
+        const rate = y(interval[field]);
+        if (index === 0) ctx.moveTo(point, rate);
+        else ctx.lineTo(point, rate);
+        ctx.lineTo(x(interval.endSeconds), rate);
+      });
+      ctx.stroke();
+    }
+  }, [intervals, total, peak, showRead, showWrite]);
+  if (!total) return null;
+  return (
+    <figure className="maintenance-throughput">
+      <figcaption>
+        <strong>{t("测速曲线")}</strong>
+        <span>
+          {peak.toLocaleString(language, { maximumFractionDigits: 1 })} MiB/s
+        </span>
+      </figcaption>
+      <canvas
+        width={640}
+        height={110}
+        ref={canvas}
+        aria-label={t("分时读写吞吐量")}
+        role="img"
+      />
+      <div className="maintenance-throughput-time">
+        <span>0 s</span>
+        <span>
+          {total.toLocaleString(language, { maximumFractionDigits: 3 })} s
+        </span>
+      </div>
+      <div className="maintenance-throughput-legend">
+        {showRead && (
+          <span className="maintenance-throughput-read">{t("读取")}</span>
+        )}
+        {showWrite && (
+          <span className="maintenance-throughput-write">{t("写入")}</span>
+        )}
+      </div>
+    </figure>
+  );
+}
+
 export function MaintenanceDialog({
   disk,
   initialPartition,
@@ -59,10 +158,12 @@ export function MaintenanceDialog({
     [count, setCount] = useState(
       String((first?.size ?? disk.size) / disk.sectorSize),
     );
-  const [write, setWrite] = useState(false),
-    [access, setAccess] = useState<"sequential" | "random">("sequential");
+  const [benchmarkMode, setBenchmarkMode] = useState<BenchmarkMode>("read"),
+    [access, setAccess] = useState<BenchmarkAccess>("sequential");
   const [block, setBlock] = useState(1048576),
-    [operations, setOperations] = useState("256");
+    [operations, setOperations] = useState("256"),
+    [queueDepth, setQueueDepth] = useState("1"),
+    [readPercent, setReadPercent] = useState("70");
   const [random, setRandom] = useState(false),
     [hex, setHex] = useState("00"),
     [passes, setPasses] = useState(1);
@@ -163,7 +264,7 @@ export function MaintenanceDialog({
       );
     }
   }
-  const modifies = mode !== "benchmark" || write;
+  const modifies = mode !== "benchmark" || benchmarkMode !== "read";
   const unavailable =
     !disk.hardware?.identity ||
     !disk.hardware.layoutKey ||
@@ -202,14 +303,6 @@ export function MaintenanceDialog({
           throw Error(t("请选择一个普通 NTFS 数据分区。"));
         operation = { kind: "trim" };
       } else {
-        const n = Number(operations);
-        if (
-          !/^\d+$/.test(operations) ||
-          !Number.isSafeInteger(n) ||
-          n < 1 ||
-          n > 65536
-        )
-          throw Error(t("请求次数须为 1–65536。"));
         if (
           (target.offset + range.startSector * disk.sectorSize) % 4096 !== 0 ||
           (range.sectorCount * disk.sectorSize) % 4096 !== 0 ||
@@ -218,7 +311,14 @@ export function MaintenanceDialog({
           throw Error(t("测速范围须按 4 KiB 对齐且至少容纳一个测量块。"));
         operation = {
           kind: "benchmark",
-          options: { access, blockSize: block, operations: n, write },
+          options: benchmarkOptions({
+            access,
+            blockSize: block,
+            operations,
+            mode: benchmarkMode,
+            queueDepth,
+            readPercent,
+          }),
         };
       }
       phase.current = execute ? "execute" : "preview";
@@ -290,6 +390,8 @@ export function MaintenanceDialog({
   }
   const stats = report?.benchmark,
     wiped = report?.wipe;
+  const workload =
+    report?.operation.kind === "benchmark" ? report.operation.options : null;
   return (
     <Dialog
       wide
@@ -401,6 +503,20 @@ export function MaintenanceDialog({
           <>
             <div className="maintenance-grid">
               <label>
+                {t("测速方式")}
+                <select
+                  value={benchmarkMode}
+                  onChange={(e) => {
+                    invalidate();
+                    setBenchmarkMode(e.target.value as BenchmarkMode);
+                  }}
+                >
+                  <option value="read">{t("读取测速")}</option>
+                  <option value="write">{t("写入测速")}</option>
+                  <option value="mixed">{t("混合读写测速")}</option>
+                </select>
+              </label>
+              <label>
                 {t("访问方式")}
                 <select
                   value={access}
@@ -422,8 +538,11 @@ export function MaintenanceDialog({
                     setBlock(Number(e.target.value));
                   }}
                 >
-                  <option value={4096}>4 KiB</option>
-                  <option value={65536}>64 KiB</option>
+                  {[4, 8, 16, 32, 64, 128, 256, 512].map((kib) => (
+                    <option key={kib} value={kib * 1024}>
+                      {kib} KiB
+                    </option>
+                  ))}
                   <option value={1048576}>1 MiB</option>
                 </select>
               </label>
@@ -438,22 +557,39 @@ export function MaintenanceDialog({
                   }}
                 />
               </label>
-            </div>
-            <label className="maintenance-check">
-              <input
-                type="checkbox"
-                checked={write}
-                onChange={(e) => {
-                  invalidate();
-                  setWrite(e.target.checked);
-                }}
-              />
-              {t("写入测速（会覆盖所选范围中的数据）")}
-            </label>
-            <p className="maintenance-note">
-              {t(
-                "单队列深度 QD1 · 绕过 Windows 缓存。写入耗时包含刷新，校验回读单独统计。",
+              {benchmarkMode === "read" && (
+                <label>
+                  {t("队列深度")}
+                  <input
+                    inputMode="numeric"
+                    value={queueDepth}
+                    onChange={(e) => {
+                      invalidate();
+                      setQueueDepth(e.target.value);
+                    }}
+                  />
+                </label>
               )}
+              {benchmarkMode === "mixed" && (
+                <label>
+                  {t("读取比例（%）")}
+                  <input
+                    inputMode="numeric"
+                    value={readPercent}
+                    onChange={(e) => {
+                      invalidate();
+                      setReadPercent(e.target.value);
+                    }}
+                  />
+                </label>
+              )}
+            </div>
+            <p className="maintenance-note">
+              {benchmarkMode === "read"
+                ? t("使用 1–32 个并发读取请求，绕过 Windows 缓存。")
+                : t(
+                    "含写入的测速使用 QD1，会覆盖所选范围中的数据。每次写入刷新后单独回读校验。",
+                  )}
             </p>
           </>
         )}
@@ -587,7 +723,7 @@ export function MaintenanceDialog({
           <p>
             {report.target} · {formatSize(report.size)}
           </p>
-          {stats && (
+          {stats && workload && (
             <>
               <div className="maintenance-metrics">
                 <div>
@@ -612,23 +748,42 @@ export function MaintenanceDialog({
                   <span>{t("完成请求")}</span>
                 </div>
               </div>
+              {report.state !== "running" && (
+                <p>
+                  {t(
+                    "P50 {p50} μs · P95 {p95} μs · 最短 {min} μs · 最长 {max} μs",
+                    {
+                      p50: stats.p50Microseconds.toLocaleString(language),
+                      p95: stats.p95Microseconds.toLocaleString(language),
+                      min: stats.minMicroseconds.toLocaleString(language),
+                      max: stats.maxMicroseconds.toLocaleString(language),
+                    },
+                  )}
+                </p>
+              )}
+              <p>
+                {t("队列深度 {depth} · 峰值并发 {peak}", {
+                  depth: workload.queueDepth.toLocaleString(language),
+                  peak: stats.peakQueueDepth.toLocaleString(language),
+                })}
+              </p>
               <p>
                 {t(
-                  "P50 {p50} μs · P95 {p95} μs · 最短 {min} μs · 最长 {max} μs",
+                  "读取 {read}（{reads} 次） · 写入 {write}（{writes} 次） · 校验回读 {verified}",
                   {
-                    p50: stats.p50Microseconds.toLocaleString(language),
-                    p95: stats.p95Microseconds.toLocaleString(language),
-                    min: stats.minMicroseconds.toLocaleString(language),
-                    max: stats.maxMicroseconds.toLocaleString(language),
+                    read: formatSize(stats.readBytes),
+                    reads: stats.readOperations.toLocaleString(language),
+                    write: formatSize(stats.writeBytes),
+                    writes: stats.writeOperations.toLocaleString(language),
+                    verified: formatSize(stats.verifiedBytes),
                   },
                 )}
               </p>
-              <p>
-                {t("传输 {transferred} · 校验回读 {verified}", {
-                  transferred: formatSize(stats.transferredBytes),
-                  verified: formatSize(stats.verifiedBytes),
-                })}
-              </p>
+              <ThroughputChart
+                samples={stats.samples}
+                showRead={!workload.write || workload.readPercent != null}
+                showWrite={workload.write}
+              />
             </>
           )}
           {wiped && (

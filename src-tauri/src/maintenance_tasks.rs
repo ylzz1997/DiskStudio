@@ -33,7 +33,9 @@ impl Operation {
             Self::Wipe { .. } => "清除扇区",
             Self::WipeFree { .. } => "清除空闲空间",
             Self::Benchmark { options } => {
-                if options.write {
+                if options.read_percent.is_some() {
+                    "混合读写测速"
+                } else if options.write {
                     "写入测速"
                 } else {
                     "读取测速"

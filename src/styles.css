@@ -4663,6 +4663,51 @@ i {
   font-size: 12px;
   color: var(--muted);
 }
+.maintenance-throughput {
+  --benchmark-read: #3183d7;
+  --benchmark-write: #de5969;
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.maintenance-throughput figcaption,
+.maintenance-throughput-time,
+.maintenance-throughput-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.maintenance-throughput figcaption strong {
+  color: var(--text);
+}
+.maintenance-throughput canvas {
+  display: block;
+  width: 100%;
+  height: 110px;
+  margin: 6px 0 2px;
+}
+.maintenance-throughput-legend {
+  justify-content: center;
+  margin-top: 4px;
+}
+.maintenance-throughput-legend span::before {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  margin-right: 5px;
+  vertical-align: middle;
+  content: "";
+}
+.maintenance-throughput-read::before {
+  background: var(--benchmark-read);
+}
+.maintenance-throughput-write::before {
+  background: var(--benchmark-write);
+}
 .maintenance-result code {
   display: block;
   font-size: 11px;

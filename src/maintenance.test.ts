@@ -1,11 +1,74 @@
 import { describe, it, expect } from "vitest";
 import {
+  benchmarkOptions,
+  benchmarkThroughput,
   maintenanceRange,
   maintenanceTarget,
   wipePattern,
 } from "./maintenance";
 import type { Disk } from "./types";
 describe("maintenance request boundaries", () => {
+  it("binds queue depth to read-only workloads and validates mixed reads", () => {
+    const input = {
+      access: "random",
+      blockSize: 4096,
+      operations: "64",
+      mode: "read",
+      queueDepth: "4",
+      readPercent: "70",
+    } as const;
+    expect(benchmarkOptions(input)).toEqual({
+      access: "random",
+      blockSize: 4096,
+      operations: 64,
+      write: false,
+      queueDepth: 4,
+    });
+    expect(benchmarkOptions({ ...input, mode: "mixed" })).toMatchObject({
+      write: true,
+      queueDepth: 1,
+      readPercent: 70,
+    });
+    for (const queueDepth of ["0", "33", "1.1", "1e1"])
+      expect(() => benchmarkOptions({ ...input, queueDepth })).toThrow();
+    expect(() => benchmarkOptions({ ...input, operations: "3" })).toThrow();
+    expect(() =>
+      benchmarkOptions({ ...input, mode: "mixed", operations: "1" }),
+    ).toThrow();
+    expect(() =>
+      benchmarkOptions({ ...input, mode: "mixed", readPercent: "100" }),
+    ).toThrow();
+  });
+  it("derives separate rates over the actual intervals of cumulative I/O samples", () => {
+    expect(
+      benchmarkThroughput([
+        {
+          elapsedNanoseconds: 250_000_000,
+          readBytes: 524288,
+          writeBytes: 262144,
+        },
+        { elapsedNanoseconds: 250_000_000, readBytes: 1048576, writeBytes: 0 },
+        {
+          elapsedNanoseconds: 750_000_000,
+          readBytes: 786432,
+          writeBytes: 786432,
+        },
+      ]),
+    ).toEqual([
+      {
+        startSeconds: 0,
+        endSeconds: 0.25,
+        readMiBPerSecond: 2,
+        writeMiBPerSecond: 1,
+      },
+      {
+        startSeconds: 0.25,
+        endSeconds: 0.75,
+        readMiBPerSecond: 0.5,
+        writeMiBPerSecond: 1,
+      },
+    ]);
+  });
   it("keeps 512 and 4Kn ranges bounded and rejects unsafe integers", () => {
     expect(maintenanceRange("1", "7", 4096, 512)).toEqual({
       startSector: 1,

@@ -448,6 +448,10 @@ pub(crate) fn media_error(code: i32) -> bool {
 pub struct TransferLimit(usize);
 
 impl TransferLimit {
+    pub(crate) fn supports(self, bytes: u32) -> bool {
+        bytes as usize <= self.0
+    }
+
     pub fn from_adapter(bytes: u32, pages: u32, mask: u32, page_size: u32) -> Result<Self, String> {
         let alignment = BUFFER_ALIGNMENT as u64;
         let page = u64::from(page_size);

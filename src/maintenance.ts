@@ -1,5 +1,15 @@
 import type { Disk } from "./types";
 export type MaintenanceMode = "benchmark" | "wipe" | "wipeFree" | "trim";
+export type BenchmarkMode = "read" | "write" | "mixed";
+export type BenchmarkAccess = "sequential" | "random";
+interface BenchmarkOptions {
+  access: BenchmarkAccess;
+  blockSize: number;
+  operations: number;
+  write: boolean;
+  queueDepth: number;
+  readPercent?: number;
+}
 export type MaintenanceOperation =
   | {
       kind: "wipe" | "wipeFree";
@@ -10,12 +20,7 @@ export type MaintenanceOperation =
     }
   | {
       kind: "benchmark";
-      options: {
-        access: "sequential" | "random";
-        blockSize: number;
-        operations: number;
-        write: boolean;
-      };
+      options: BenchmarkOptions;
     }
   | { kind: "trim" };
 export interface MaintenancePreview {
@@ -69,7 +74,86 @@ export interface MaintenanceReport {
     p95Microseconds: number;
     mibPerSecond: number;
     iops: number;
+    readOperations: number;
+    writeOperations: number;
+    readBytes: number;
+    writeBytes: number;
+    peakQueueDepth: number;
+    samples: BenchmarkSample[];
   };
+}
+export interface BenchmarkSample {
+  elapsedNanoseconds: number;
+  readBytes: number;
+  writeBytes: number;
+}
+export function benchmarkOptions({
+  access,
+  blockSize,
+  operations,
+  mode,
+  queueDepth,
+  readPercent,
+}: {
+  access: BenchmarkAccess;
+  blockSize: number;
+  operations: string;
+  mode: BenchmarkMode;
+  queueDepth: string;
+  readPercent: string;
+}): BenchmarkOptions {
+  const count = Number(operations);
+  if (!/^\d+$/.test(operations) || count < 1 || count > 65536)
+    throw Error("请求次数须为 1–65536。");
+  const depth = mode === "read" ? Number(queueDepth) : 1;
+  if (
+    mode === "read" &&
+    (!/^\d+$/.test(queueDepth) || depth < 1 || depth > 32 || depth > count)
+  )
+    throw Error(
+      "只读队列深度须为 1–32 且不超过请求次数。含写入的测速使用 QD1。",
+    );
+  const percent = Number(readPercent);
+  if (
+    mode === "mixed" &&
+    (!/^\d+$/.test(readPercent) || percent < 1 || percent > 99 || count < 2)
+  )
+    throw Error("混合测速至少需要两个请求，读取比例须为 1–99%。");
+  return {
+    access,
+    blockSize,
+    operations: count,
+    write: mode !== "read",
+    queueDepth: depth,
+    ...(mode === "mixed" ? { readPercent: percent } : {}),
+  };
+}
+export function benchmarkThroughput(samples: BenchmarkSample[]) {
+  let previous: BenchmarkSample = {
+    elapsedNanoseconds: 0,
+    readBytes: 0,
+    writeBytes: 0,
+  };
+  return samples.flatMap((sample) => {
+    const span = sample.elapsedNanoseconds - previous.elapsedNanoseconds;
+    if (
+      span <= 0 ||
+      sample.readBytes < previous.readBytes ||
+      sample.writeBytes < previous.writeBytes
+    )
+      return [];
+    const toMiBPerSecond = 1e9 / 1048576 / span;
+    const interval = {
+      startSeconds: previous.elapsedNanoseconds / 1e9,
+      endSeconds: sample.elapsedNanoseconds / 1e9,
+      readMiBPerSecond:
+        (sample.readBytes - previous.readBytes) * toMiBPerSecond,
+      writeMiBPerSecond:
+        (sample.writeBytes - previous.writeBytes) * toMiBPerSecond,
+    };
+    previous = sample;
+    return [interval];
+  });
 }
 export function maintenanceRange(
   start: string,
