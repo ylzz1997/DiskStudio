@@ -12,12 +12,33 @@ use std::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Operation {
-    Wipe { options: WipeOptions },
-    WipeFree { options: WipeOptions },
-    Benchmark { options: BenchmarkOptions },
+    Wipe {
+        options: WipeOptions,
+    },
+    WipeFree {
+        options: WipeOptions,
+    },
+    Benchmark {
+        options: BenchmarkOptions,
+    },
+    #[serde(rename_all = "camelCase")]
+    FileBenchmark {
+        options: BenchmarkOptions,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_workloads: Vec<BenchmarkOptions>,
+        #[serde(default = "single_round")]
+        repetitions: u8,
+        file_size: u64,
+        zero_fill: bool,
+    },
     Trim,
 }
 impl Operation {
+    pub fn requires_acknowledgment(&self) -> bool {
+        self.destructive()
+            || matches!(self, Self::FileBenchmark { options, additional_workloads, .. }
+            if options.write || additional_workloads.iter().any(|workload| workload.write))
+    }
     pub fn destructive(&self) -> bool {
         matches!(
             self,
@@ -41,15 +62,38 @@ impl Operation {
                     "读取测速"
                 }
             }
+            Self::FileBenchmark {
+                additional_workloads,
+                repetitions,
+                ..
+            } if !additional_workloads.is_empty() || *repetitions > 1 => "多负载文件测速",
+            Self::FileBenchmark { options, .. } if options.read_percent.is_some() => {
+                "文件混合读写测速"
+            }
+            Self::FileBenchmark { options, .. } if options.write => "文件写入测速",
+            Self::FileBenchmark { .. } => "文件读取测速",
             Self::Trim => "TRIM 空闲空间",
         }
     }
+}
+
+fn single_round() -> u8 {
+    1
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBenchmarkRun {
+    pub round: u8,
+    pub workload: u8,
+    pub state: &'static str,
+    pub stats: Option<BenchmarkProgress>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub source: Selection,
-    pub range: Options,
+    pub range: Option<Options>,
     pub operation: Operation,
 }
 #[derive(Clone, Serialize)]
@@ -62,6 +106,7 @@ pub struct Preview {
     pub size: u64,
     pub sector_size: u64,
     pub destructive: bool,
+    pub requires_acknowledgment: bool,
     pub warning: String,
 }
 #[derive(Clone, Serialize)]
@@ -81,6 +126,8 @@ pub struct Report {
     pub wipe: Option<WipeProgress>,
     pub free_space: Option<crate::free_space_wipe::Summary>,
     pub benchmark: Option<BenchmarkProgress>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_benchmark_runs: Vec<FileBenchmarkRun>,
     pub disk_left_offline: bool,
 }
 pub(crate) static REPORT: Mutex<Option<Report>> = Mutex::new(None);
@@ -205,5 +252,33 @@ mod tests {
             bad[field] = serde_json::json!(false);
             assert!(serde_json::from_value::<Operation>(bad).is_err());
         }
+    }
+
+    #[test]
+    fn file_benchmark_requires_ack_for_writes_and_accepts_no_ipc_paths() {
+        let read = serde_json::json!({"kind":"fileBenchmark","options":{"access":"sequential","blockSize":4096,"operations":8,"write":false},"fileSize":1048576,"zeroFill":false});
+        let op = serde_json::from_value::<Operation>(read.clone()).unwrap();
+        assert!(!op.requires_acknowledgment());
+        let mut write = read;
+        write["options"]["write"] = serde_json::json!(true);
+        let op = serde_json::from_value::<Operation>(write.clone()).unwrap();
+        assert!(op.requires_acknowledgment());
+        assert!(!op.destructive());
+        for field in ["file", "directory", "path"] {
+            let mut injected = write.clone();
+            injected[field] = serde_json::json!("arbitrary");
+            assert!(serde_json::from_value::<Operation>(injected).is_err());
+        }
+        let suite = serde_json::json!({
+            "kind":"fileBenchmark",
+            "options":{"access":"random","blockSize":4096,"operations":0,"durationSeconds":5,"write":false,"queueDepth":4},
+            "additionalWorkloads":[write["options"].clone()],
+            "repetitions":2,
+            "fileSize":1048576,
+            "zeroFill":false
+        });
+        let op = serde_json::from_value::<Operation>(suite).unwrap();
+        assert!(op.requires_acknowledgment());
+        assert!(!op.destructive());
     }
 }

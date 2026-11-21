@@ -14,14 +14,18 @@ import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle, partitionTitle } from "./LocalDiskView";
 import { formatSize, type Disk } from "./types";
 import {
+  benchmarkFileSize,
   benchmarkOptions,
+  benchmarkRates,
   benchmarkThroughput,
   maintenanceRange,
   maintenanceTarget,
   wipePattern,
-  type BenchmarkAccess,
+  type BenchmarkForm,
   type BenchmarkMode,
+  type BenchmarkOptions,
   type BenchmarkSample,
+  type BenchmarkUnit,
   type MaintenanceMode,
   type MaintenanceOperation,
   type MaintenancePreview,
@@ -41,6 +45,28 @@ const modes = [
   { id: "wipeFree", title: "清除空闲空间", icon: Brush },
   { id: "trim", title: "TRIM", icon: Activity },
 ] as const;
+const initialWorkload: BenchmarkForm = {
+  mode: "read",
+  access: "sequential",
+  blockSize: 1048576,
+  operations: "256",
+  queueDepth: "1",
+  threadCount: "1",
+  readPercent: "70",
+  limit: "requests",
+  duration: "5",
+};
+
+function workloadMode(options: BenchmarkOptions): BenchmarkMode {
+  if (!options.write) return "read";
+  return options.readPercent == null ? "write" : "mixed";
+}
+
+const workloadModeLabel = {
+  read: "读取测速",
+  write: "写入测速",
+  mixed: "混合读写",
+} as const;
 function ThroughputChart({
   samples,
   showRead,
@@ -81,15 +107,21 @@ function ThroughputChart({
       ctx.lineTo(x(total), y(rate));
     }
     ctx.stroke();
-    for (const [visible, field, color] of [
-      [showRead, "readMiBPerSecond", "--benchmark-read"],
-      [showWrite, "writeMiBPerSecond", "--benchmark-write"],
+    for (const [visible, field, color, dash] of [
+      [showRead, "readMiBPerSecond", "--benchmark-read", []],
+      [
+        showWrite,
+        "writeMiBPerSecond",
+        "--benchmark-write",
+        showRead ? [7, 5] : [],
+      ],
     ] as const) {
       if (!visible) continue;
       ctx.strokeStyle = getComputedStyle(element)
         .getPropertyValue(color)
         .trim();
       ctx.lineWidth = 2;
+      ctx.setLineDash([...dash]);
       ctx.beginPath();
       intervals.forEach((interval, index) => {
         const point = x(interval.startSeconds);
@@ -100,6 +132,7 @@ function ThroughputChart({
       });
       ctx.stroke();
     }
+    ctx.setLineDash([]);
   }, [intervals, total, peak, showRead, showWrite]);
   if (!total) return null;
   return (
@@ -158,12 +191,15 @@ export function MaintenanceDialog({
     [count, setCount] = useState(
       String((first?.size ?? disk.size) / disk.sectorSize),
     );
-  const [benchmarkMode, setBenchmarkMode] = useState<BenchmarkMode>("read"),
-    [access, setAccess] = useState<BenchmarkAccess>("sequential");
-  const [block, setBlock] = useState(1048576),
-    [operations, setOperations] = useState("256"),
-    [queueDepth, setQueueDepth] = useState("1"),
-    [readPercent, setReadPercent] = useState("70");
+  const [rawWorkload, setRawWorkload] = useState(initialWorkload);
+  const [fileWorkloads, setFileWorkloads] = useState([initialWorkload]),
+    [workloadIndex, setWorkloadIndex] = useState(0),
+    [rounds, setRounds] = useState(1);
+  const [resultIndex, setResultIndex] = useState<number | null>(null),
+    [resultUnit, setResultUnit] = useState<BenchmarkUnit>("MiB/s");
+  const [benchmarkScope, setBenchmarkScope] = useState<"disk" | "file">("disk"),
+    [fileSize, setFileSize] = useState("64"),
+    [zeroFill, setZeroFill] = useState(false);
   const [random, setRandom] = useState(false),
     [hex, setHex] = useState("00"),
     [passes, setPasses] = useState(1);
@@ -199,6 +235,7 @@ export function MaintenanceDialog({
     setError("");
     setSaved("");
     setReport(null);
+    setResultIndex(null);
   }
   useEffect(() => {
     active.current = true;
@@ -264,17 +301,38 @@ export function MaintenanceDialog({
       );
     }
   }
-  const modifies = mode !== "benchmark" || benchmarkMode !== "read";
+  const fileBenchmark = mode === "benchmark" && benchmarkScope === "file";
+  const form = fileBenchmark ? fileWorkloads[workloadIndex]! : rawWorkload;
+  const modeIsTimed = fileBenchmark && form.limit === "duration";
+  const fileWrites = fileWorkloads.some((workload) => workload.mode !== "read");
+  const partitionRequired =
+    fileBenchmark || mode === "trim" || mode === "wipeFree";
+  const modifies =
+    mode !== "benchmark" || (fileBenchmark ? fileWrites : form.mode !== "read");
   const unavailable =
     !disk.hardware?.identity ||
     !disk.hardware.layoutKey ||
+    (fileBenchmark && disk.hardware.offline !== false) ||
     (modifies &&
-      (disk.hardware.isSystem || disk.hardware.deviceReadOnly !== false));
+      ((!fileBenchmark && disk.hardware.isSystem) ||
+        disk.hardware.deviceReadOnly !== false));
+  function updateWorkload(update: Partial<BenchmarkForm>) {
+    invalidate();
+    if (fileBenchmark) {
+      setFileWorkloads((current) =>
+        current.map((workload, index) =>
+          index === workloadIndex ? { ...workload, ...update } : workload,
+        ),
+      );
+    } else {
+      setRawWorkload((current) => ({ ...current, ...update }));
+    }
+  }
   async function run(execute: boolean) {
     if (
       phase.current !== "idle" ||
       unavailable ||
-      (execute && (!token.current || (modifies && !ack)))
+      (execute && (!token.current || (preview?.requiresAcknowledgment && !ack)))
     )
       return;
     setError("");
@@ -284,12 +342,9 @@ export function MaintenanceDialog({
     let refresh = false;
     try {
       const target = maintenanceTarget(disk, partition);
-      const range = maintenanceRange(
-        start,
-        count,
-        target.size,
-        disk.sectorSize,
-      );
+      const range = fileBenchmark
+        ? undefined
+        : maintenanceRange(start, count, target.size, disk.sectorSize);
       let operation: MaintenanceOperation;
       if (mode === "wipe" || mode === "wipeFree") {
         if (mode === "wipeFree" && target.source.partition == null)
@@ -304,22 +359,32 @@ export function MaintenanceDialog({
         operation = { kind: "trim" };
       } else {
         if (
-          (target.offset + range.startSector * disk.sectorSize) % 4096 !== 0 ||
-          (range.sectorCount * disk.sectorSize) % 4096 !== 0 ||
-          range.sectorCount * disk.sectorSize < block
+          range &&
+          ((target.offset + range.startSector * disk.sectorSize) % 4096 !== 0 ||
+            (range.sectorCount * disk.sectorSize) % 4096 !== 0 ||
+            range.sectorCount * disk.sectorSize < form.blockSize)
         )
           throw Error(t("测速范围须按 4 KiB 对齐且至少容纳一个测量块。"));
-        operation = {
-          kind: "benchmark",
-          options: benchmarkOptions({
-            access,
-            blockSize: block,
-            operations,
-            mode: benchmarkMode,
-            queueDepth,
-            readPercent,
-          }),
-        };
+        if (fileBenchmark) {
+          if (target.source.partition == null)
+            throw Error(t("请选择一个联机的普通数据分区。"));
+          const size = benchmarkFileSize(fileSize);
+          const options = fileWorkloads.map((workload) => {
+            if (workload.blockSize > size)
+              throw Error(t("测试大小必须容纳所有负载的块。"));
+            return benchmarkOptions(workload, true);
+          });
+          operation = {
+            kind: "fileBenchmark",
+            options: options[0]!,
+            additionalWorkloads: options.slice(1),
+            repetitions: rounds,
+            fileSize: size,
+            zeroFill: fileWrites && zeroFill,
+          };
+        } else {
+          operation = { kind: "benchmark", options: benchmarkOptions(form) };
+        }
       }
       phase.current = execute ? "execute" : "preview";
       setBusy(true);
@@ -329,7 +394,7 @@ export function MaintenanceDialog({
         const once = token.current;
         token.current = null;
         setPreview(null);
-        refresh = modifies;
+        refresh = modifies && !fileBenchmark;
         const next = await invoke<MaintenanceReport>("maintenance_execute", {
           token: once,
         });
@@ -388,10 +453,23 @@ export function MaintenanceDialog({
       onBusy(false);
     }
   }
-  const stats = report?.benchmark,
-    wiped = report?.wipe;
-  const workload =
-    report?.operation.kind === "benchmark" ? report.operation.options : null;
+  const runs = report?.fileBenchmarkRuns ?? [];
+  const selectedRunIndex = resultIndex ?? runs.length - 1;
+  const selectedRun = runs[selectedRunIndex];
+  const stats = selectedRun?.stats ?? report?.benchmark;
+  const wiped = report?.wipe;
+  const reportWorkloads =
+    report?.operation.kind === "fileBenchmark"
+      ? [
+          report.operation.options,
+          ...(report.operation.additionalWorkloads ?? []),
+        ]
+      : [];
+  const workload = selectedRun
+    ? reportWorkloads[selectedRun.workload - 1]
+    : report?.operation.kind === "benchmark"
+      ? report.operation.options
+      : null;
   return (
     <Dialog
       wide
@@ -424,7 +502,11 @@ export function MaintenanceDialog({
           </button>
           <button
             className="button primary"
-            disabled={busy || !!unavailable || (!!preview && modifies && !ack)}
+            disabled={
+              busy ||
+              !!unavailable ||
+              (!!preview?.requiresAcknowledgment && !ack)
+            }
             onClick={() => void run(!!preview)}
           >
             {preview
@@ -452,16 +534,29 @@ export function MaintenanceDialog({
         ))}
       </div>
       <fieldset className="maintenance-fields" disabled={busy}>
+        {mode === "benchmark" && (
+          <label>
+            {t("测速范围")}
+            <select
+              value={benchmarkScope}
+              onChange={(e) => {
+                invalidate();
+                setBenchmarkScope(e.target.value as typeof benchmarkScope);
+              }}
+            >
+              <option value="disk">{t("原始磁盘测速")}</option>
+              <option value="file">{t("文件测速")}</option>
+            </select>
+          </label>
+        )}
         <label>
           {t("目标")}
           <select
             value={partition}
             onChange={(e) => choosePartition(e.target.value)}
           >
-            <option value="" disabled={mode === "trim" || mode === "wipeFree"}>
-              {mode === "trim" || mode === "wipeFree"
-                ? t("请选择数据分区")
-                : t("整个磁盘")}
+            <option value="" disabled={partitionRequired}>
+              {partitionRequired ? t("请选择数据分区") : t("整个磁盘")}
             </option>
             {disk.partitions
               .filter((p) => p.number != null)
@@ -473,7 +568,7 @@ export function MaintenanceDialog({
               ))}
           </select>
         </label>
-        {mode !== "trim" && mode !== "wipeFree" && (
+        {!partitionRequired && (
           <div className="maintenance-grid">
             <label>
               {t("起始扇区（相对目标）")}
@@ -501,29 +596,131 @@ export function MaintenanceDialog({
         )}
         {mode === "benchmark" && (
           <>
+            {fileBenchmark && (
+              <div className="maintenance-grid">
+                <label>
+                  {t("测试大小（MiB）")}
+                  <input
+                    value={fileSize}
+                    inputMode="numeric"
+                    onChange={(e) => {
+                      invalidate();
+                      setFileSize(e.target.value);
+                    }}
+                  />
+                </label>
+                <label>
+                  {t("测试轮数")}
+                  <select
+                    value={rounds}
+                    onChange={(e) => {
+                      invalidate();
+                      setRounds(Number(e.target.value));
+                    }}
+                  >
+                    {[1, 2, 3, 4, 5].map((round) => (
+                      <option key={round}>{round}</option>
+                    ))}
+                  </select>
+                </label>
+                {fileWrites && (
+                  <label>
+                    {t("测试数据")}
+                    <select
+                      value={zeroFill ? "zero" : "random"}
+                      onChange={(e) => {
+                        invalidate();
+                        setZeroFill(e.target.value === "zero");
+                      }}
+                    >
+                      <option value="random">{t("随机")}</option>
+                      <option value="zero">{t("全零")}</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
+            {fileBenchmark && (
+              <div className="maintenance-workloads">
+                <label>
+                  {t("配置负载")}
+                  <select
+                    value={workloadIndex}
+                    onChange={(e) => setWorkloadIndex(Number(e.target.value))}
+                  >
+                    {fileWorkloads.map((workload, index) => (
+                      <option key={index} value={index}>
+                        {t("负载 {number}", { number: index + 1 })} ·{" "}
+                        {t(workloadModeLabel[workload.mode])}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={fileWorkloads.length >= 4}
+                  onClick={() => {
+                    invalidate();
+                    setFileWorkloads([
+                      ...fileWorkloads,
+                      {
+                        ...initialWorkload,
+                        access: "random",
+                        blockSize: 4096,
+                        queueDepth: "4",
+                        limit: "duration",
+                      },
+                    ]);
+                    setWorkloadIndex(fileWorkloads.length);
+                  }}
+                >
+                  {t("添加负载")}
+                </button>
+                {fileWorkloads.length > 1 && (
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => {
+                      invalidate();
+                      setFileWorkloads(
+                        fileWorkloads.filter(
+                          (_, index) => index !== workloadIndex,
+                        ),
+                      );
+                      setWorkloadIndex(
+                        Math.min(workloadIndex, fileWorkloads.length - 2),
+                      );
+                    }}
+                  >
+                    {t("移除负载")}
+                  </button>
+                )}
+              </div>
+            )}
             <div className="maintenance-grid">
               <label>
                 {t("测速方式")}
                 <select
-                  value={benchmarkMode}
-                  onChange={(e) => {
-                    invalidate();
-                    setBenchmarkMode(e.target.value as BenchmarkMode);
-                  }}
+                  value={form.mode}
+                  onChange={(e) =>
+                    updateWorkload({ mode: e.target.value as BenchmarkMode })
+                  }
                 >
                   <option value="read">{t("读取测速")}</option>
                   <option value="write">{t("写入测速")}</option>
-                  <option value="mixed">{t("混合读写测速")}</option>
+                  <option value="mixed">{t("混合读写")}</option>
                 </select>
               </label>
               <label>
                 {t("访问方式")}
                 <select
-                  value={access}
-                  onChange={(e) => {
-                    invalidate();
-                    setAccess(e.target.value as typeof access);
-                  }}
+                  value={form.access}
+                  onChange={(e) =>
+                    updateWorkload({
+                      access: e.target.value as BenchmarkForm["access"],
+                    })
+                  }
                 >
                   <option value="sequential">{t("顺序")}</option>
                   <option value="random">{t("随机")}</option>
@@ -532,11 +729,10 @@ export function MaintenanceDialog({
               <label>
                 {t("块大小")}
                 <select
-                  value={block}
-                  onChange={(e) => {
-                    invalidate();
-                    setBlock(Number(e.target.value));
-                  }}
+                  value={form.blockSize}
+                  onChange={(e) =>
+                    updateWorkload({ blockSize: Number(e.target.value) })
+                  }
                 >
                   {[4, 8, 16, 32, 64, 128, 256, 512].map((kib) => (
                     <option key={kib} value={kib * 1024}>
@@ -544,52 +740,91 @@ export function MaintenanceDialog({
                     </option>
                   ))}
                   <option value={1048576}>1 MiB</option>
+                  {fileBenchmark &&
+                    [2, 4, 8].map((mib) => (
+                      <option key={mib} value={mib * 1048576}>
+                        {mib} MiB
+                      </option>
+                    ))}
                 </select>
               </label>
+              {fileBenchmark && (
+                <label>
+                  {t("测速停止条件")}
+                  <select
+                    value={form.limit}
+                    onChange={(e) =>
+                      updateWorkload({
+                        limit: e.target.value as BenchmarkForm["limit"],
+                      })
+                    }
+                  >
+                    <option value="requests">{t("请求次数")}</option>
+                    <option value="duration">{t("按时长")}</option>
+                  </select>
+                </label>
+              )}
               <label>
-                {t("请求次数")}
+                {modeIsTimed ? t("测量时长（秒）") : t("请求次数")}
                 <input
                   inputMode="numeric"
-                  value={operations}
-                  onChange={(e) => {
-                    invalidate();
-                    setOperations(e.target.value);
-                  }}
+                  value={modeIsTimed ? form.duration : form.operations}
+                  onChange={(e) =>
+                    updateWorkload(
+                      modeIsTimed
+                        ? { duration: e.target.value }
+                        : { operations: e.target.value },
+                    )
+                  }
                 />
               </label>
-              {benchmarkMode === "read" && (
+              {form.mode === "read" && (
                 <label>
                   {t("队列深度")}
                   <input
                     inputMode="numeric"
-                    value={queueDepth}
-                    onChange={(e) => {
-                      invalidate();
-                      setQueueDepth(e.target.value);
-                    }}
+                    value={form.queueDepth}
+                    onChange={(e) =>
+                      updateWorkload({ queueDepth: e.target.value })
+                    }
                   />
                 </label>
               )}
-              {benchmarkMode === "mixed" && (
+              {fileBenchmark && form.mode === "read" && (
+                <label>
+                  {t("读取线程数")}
+                  <input
+                    inputMode="numeric"
+                    value={form.threadCount ?? "1"}
+                    onChange={(e) =>
+                      updateWorkload({ threadCount: e.target.value })
+                    }
+                  />
+                </label>
+              )}
+              {form.mode === "mixed" && (
                 <label>
                   {t("读取比例（%）")}
                   <input
                     inputMode="numeric"
-                    value={readPercent}
-                    onChange={(e) => {
-                      invalidate();
-                      setReadPercent(e.target.value);
-                    }}
+                    value={form.readPercent}
+                    onChange={(e) =>
+                      updateWorkload({ readPercent: e.target.value })
+                    }
                   />
                 </label>
               )}
             </div>
             <p className="maintenance-note">
-              {benchmarkMode === "read"
-                ? t("使用 1–32 个并发读取请求，绕过 Windows 缓存。")
-                : t(
-                    "含写入的测速使用 QD1，会覆盖所选范围中的数据。每次写入刷新后单独回读校验。",
-                  )}
+              {fileBenchmark
+                ? fileWrites
+                  ? t("预览时选择该分区内用于新建临时文件的目录。")
+                  : t("预览时选择该分区内的现有文件。")
+                : form.mode === "read"
+                  ? t("使用 1–32 个并发读取请求，绕过 Windows 缓存。")
+                  : t(
+                      "含写入的测速使用 QD1，会覆盖所选范围中的数据。每次写入刷新后单独回读校验。",
+                    )}
             </p>
           </>
         )}
@@ -670,11 +905,24 @@ export function MaintenanceDialog({
           <strong>{preview.target}</strong>
           <p>
             {catalogText(preview.title)} · {formatSize(preview.size)} ·{" "}
-            {t("绝对起始 LBA")}{" "}
-            {(preview.offset / preview.sectorSize).toLocaleString(language)}
+            {fileBenchmark
+              ? t("从文件开头")
+              : `${t("绝对起始 LBA")} ${(preview.offset / preview.sectorSize).toLocaleString(language)}`}
           </p>
+          {fileBenchmark && (fileWorkloads.length > 1 || rounds > 1) && (
+            <p>
+              {t("{workloads} 组负载 · {rounds} 轮", {
+                workloads: fileWorkloads.length,
+                rounds,
+              })}{" "}
+              ·{" "}
+              {fileWorkloads
+                .map((workload) => t(workloadModeLabel[workload.mode]))
+                .join(" / ")}
+            </p>
+          )}
           <p>{catalogText(preview.warning)}</p>
-          {modifies && (
+          {preview.requiresAcknowledgment && (
             <label className="maintenance-check">
               <input
                 type="checkbox"
@@ -723,6 +971,99 @@ export function MaintenanceDialog({
           <p>
             {report.target} · {formatSize(report.size)}
           </p>
+          {runs.length > 0 &&
+            report.operation.kind === "fileBenchmark" &&
+            (reportWorkloads.length > 1 ||
+              (report.operation.repetitions ?? 1) > 1) && (
+              <div className="maintenance-benchmark-runs">
+                <label>
+                  {t("结果单位")}
+                  <select
+                    value={resultUnit}
+                    onChange={(e) =>
+                      setResultUnit(e.target.value as BenchmarkUnit)
+                    }
+                  >
+                    {(["MiB/s", "MB/s", "IOPS"] as const).map((unit) => (
+                      <option key={unit}>{unit}</option>
+                    ))}
+                  </select>
+                </label>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("配置负载")}</th>
+                      <th>{t("读取")}</th>
+                      <th>{t("写入")}</th>
+                      <th>{t("测量时长（秒）")}</th>
+                      <th>{t("状态")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runs.map((run, index) => {
+                      const options = reportWorkloads[run.workload - 1]!;
+                      const rates = benchmarkRates(run.stats, resultUnit);
+                      const rate = (value: number | undefined) =>
+                        value?.toLocaleString(language, {
+                          maximumFractionDigits: resultUnit === "IOPS" ? 0 : 2,
+                        }) ?? "—";
+                      return (
+                        <tr
+                          key={`${run.round}:${run.workload}`}
+                          className={
+                            index === selectedRunIndex ? "selected" : undefined
+                          }
+                        >
+                          <td>
+                            <button
+                              type="button"
+                              aria-pressed={index === selectedRunIndex}
+                              onClick={() => setResultIndex(index)}
+                            >
+                              {t("第 {round} 轮 · 负载 {workload}", {
+                                round: run.round,
+                                workload: run.workload,
+                              })}
+                              <small>
+                                {t(workloadModeLabel[workloadMode(options)])} ·{" "}
+                                {t(
+                                  options.access === "random" ? "随机" : "顺序",
+                                )}{" "}
+                                · {formatSize(options.blockSize)} · QD
+                                {options.queueDepth}
+                                {options.threadCount != null &&
+                                  ` · T${options.threadCount}`}
+                              </small>
+                            </button>
+                          </td>
+                          <td>{rate(rates?.[0])}</td>
+                          <td>{rate(rates?.[1])}</td>
+                          <td>
+                            {run.stats
+                              ? (run.stats.elapsedMs / 1000).toLocaleString(
+                                  language,
+                                  { maximumFractionDigits: 3 },
+                                )
+                              : "—"}
+                          </td>
+                          <td>
+                            {t(
+                              run.state === "completed"
+                                ? "已完成"
+                                : run.state === "running"
+                                  ? "进行中"
+                                  : run.state === "canceled"
+                                    ? "已取消"
+                                    : "未完成",
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           {stats && workload && (
             <>
               <div className="maintenance-metrics">
@@ -748,24 +1089,38 @@ export function MaintenanceDialog({
                   <span>{t("完成请求")}</span>
                 </div>
               </div>
-              {report.state !== "running" && (
-                <p>
-                  {t(
-                    "P50 {p50} μs · P95 {p95} μs · 最短 {min} μs · 最长 {max} μs",
-                    {
-                      p50: stats.p50Microseconds.toLocaleString(language),
-                      p95: stats.p95Microseconds.toLocaleString(language),
-                      min: stats.minMicroseconds.toLocaleString(language),
-                      max: stats.maxMicroseconds.toLocaleString(language),
-                    },
-                  )}
-                </p>
-              )}
+              {(selectedRun?.state ?? report.state) !== "running" &&
+                stats.operations > 0 && (
+                  <p>
+                    {t(
+                      "P50 {p50} μs · P95 {p95} μs · 最短 {min} μs · 最长 {max} μs",
+                      {
+                        p50: stats.p50Microseconds.toLocaleString(language),
+                        p95: stats.p95Microseconds.toLocaleString(language),
+                        min: stats.minMicroseconds.toLocaleString(language),
+                        max: stats.maxMicroseconds.toLocaleString(language),
+                      },
+                    )}
+                    {stats.approximatePercentiles && (
+                      <> · {t("P50 和 P95 为估算值")}</>
+                    )}
+                  </p>
+                )}
               <p>
                 {t("队列深度 {depth} · 峰值并发 {peak}", {
                   depth: workload.queueDepth.toLocaleString(language),
                   peak: stats.peakQueueDepth.toLocaleString(language),
                 })}
+                {report.operation.kind === "fileBenchmark" &&
+                  !!stats.workerThreads && (
+                    <>
+                      {" "}
+                      ·{" "}
+                      {t("线程 {count}", {
+                        count: stats.workerThreads.toLocaleString(language),
+                      })}
+                    </>
+                  )}
               </p>
               <p>
                 {t(

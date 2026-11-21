@@ -15,9 +15,18 @@ use windows_sys::Win32::{
     Storage::FileSystem::*,
     System::Ioctl::*,
 };
+#[path = "maintenance_file_windows.rs"]
+mod file_benchmark;
 struct Proof {
     request: Request,
     preview: Preview,
+    target: ProofTarget,
+}
+enum ProofTarget {
+    Disk(DiskProof),
+    File(file_benchmark::Prepared),
+}
+struct DiskProof {
     fingerprint: String,
     table: Option<Vec<u8>>,
     whole_wipe: bool,
@@ -82,7 +91,7 @@ fn range(request: &Request, ctx: &TableReadContext) -> Result<Range, String> {
     } else {
         (0, ctx.resolved.size)
     };
-    request.range.range(
+    request.range.as_ref().ok_or("缺少原始磁盘范围。")?.range(
         offset,
         size,
         ctx.resolved
@@ -187,7 +196,8 @@ fn context(
             }
             options.validate(r)?;
         }
-        Operation::Benchmark { options } => options.validate(r)?,
+        Operation::Benchmark { options } => options.validate_raw(r)?,
+        Operation::FileBenchmark { .. } => return Err("请选择文件测速范围。".into()),
         Operation::Trim => {
             let n = request
                 .source
@@ -413,16 +423,28 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
         *pending() = None;
         canceled(cancel)?;
         data_tasks::record_progress(id, "核对设备身份、布局与卷关联", 0, 0);
+        if let Operation::FileBenchmark { .. } = &request.operation {
+            let (preview, prepared) = file_benchmark::prepare(&request, cancel)?;
+            *pending() = Some(Ticket::new(
+                preview.token.clone(),
+                Proof {
+                    request,
+                    preview: preview.clone(),
+                    target: ProofTarget::File(prepared),
+                },
+            ));
+            return Ok(preview);
+        }
         let (r, label, fingerprint, table, whole_wipe) = if matches!(&request.operation,Operation::Benchmark{options} if !options.write)
         {
             let resolved = device::resolve(&request.source, false, false)?;
-            let r = request.range.range(
+            let r = request.range.as_ref().ok_or("缺少原始磁盘范围。")?.range(
                 resolved.offset,
                 resolved.size,
                 resolved.disk.logical_sector_size.ok_or("扇区大小缺失")?,
             )?;
             if let Operation::Benchmark { options } = &request.operation {
-                options.validate(r)?;
+                options.validate_raw(r)?;
                 benchmark_reader(&resolved, options.block_size)?;
             }
             let fingerprint = digest(&resolved.disk)?;
@@ -463,6 +485,7 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
             Operation::WipeFree{..}=>"锁定后检查 NTFS、FAT12/16/32 或 exFAT 的分配信息，仅覆盖确认空闲的簇，不处理文件尾部余量、未知格式或 Ext。已删除内容将无法从已覆盖区域恢复。每轮完整回读，并比对全部保留区域的写前/写后 SHA-256。整盘保持脱机；取消或失败不重试、不回滚。逻辑覆写不能证明 SSD 历史物理页已擦除。",
             Operation::Benchmark{options} if options.write=>"测速包含破坏性原始写入，可能损坏所选范围内的数据。整盘将保持脱机。每次写入都刷新并回读 SHA-256，写入内容永久改变。写入延迟包含刷新，校验回读单独计数。",
             Operation::Benchmark{..}=>"仅读取选定范围。读取请求绕过 Windows 缓存。设备或虚拟化缓存及其他工作负载会影响结果。请求可能重复读取同一位置。",
+            Operation::FileBenchmark { .. } => unreachable!(),
             Operation::Trim=>"由 Windows 对所选 NTFS 卷执行 ReTrim，可能使已删除数据无法恢复。只传 ReTrim，不执行碎片整理。不保证 SSD 物理擦除或清零；提交到 Windows 后无法中途取消，提供者失败不自动重试。",
         }.into();
         let preview = Preview {
@@ -473,6 +496,7 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
             size: r.size,
             sector_size: r.sector,
             destructive: request.operation.destructive(),
+            requires_acknowledgment: request.operation.requires_acknowledgment(),
             warning,
         };
         *pending() = Some(Ticket::new(
@@ -480,9 +504,11 @@ pub fn prepare(request: Request) -> Result<Preview, String> {
             Proof {
                 request,
                 preview: preview.clone(),
-                fingerprint,
-                table,
-                whole_wipe,
+                target: ProofTarget::Disk(DiskProof {
+                    fingerprint,
+                    table,
+                    whole_wipe,
+                }),
             },
         ));
         Ok(preview)
@@ -519,6 +545,7 @@ pub fn execute(token: String) -> Result<Report, String> {
             wipe: None,
             free_space: None,
             benchmark: None,
+            file_benchmark_runs: Vec::new(),
             disk_left_offline: false,
         };
         model::publish(&report);
@@ -571,18 +598,25 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
         size: p.preview.size,
         sector: p.preview.sector_size,
     };
+    let disk = match &p.target {
+        ProofTarget::File(prepared) => {
+            return file_benchmark::execute(prepared, request, expected, report, cancel)
+        }
+        ProofTarget::Disk(disk) => disk,
+    };
     if let Operation::Benchmark { options } = &request.operation {
         if !options.write {
             let resolved = device::resolve(&request.source, false, false)?;
-            if digest(&resolved.disk)? != p.fingerprint
-                || request
-                    .range
-                    .range(resolved.offset, resolved.size, expected.sector)?
-                    != expected
+            if digest(&resolved.disk)? != disk.fingerprint
+                || request.range.as_ref().ok_or("缺少原始磁盘范围。")?.range(
+                    resolved.offset,
+                    resolved.size,
+                    expected.sector,
+                )? != expected
             {
                 return Err("身份或范围与预览不一致".into());
             }
-            options.validate(expected)?;
+            options.validate_raw(expected)?;
             let mut readers = Vec::with_capacity(usize::from(options.queue_depth));
             for _ in 0..options.queue_depth {
                 canceled(cancel)?;
@@ -610,7 +644,7 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
             );
             report.benchmark = Some(stats);
             result?;
-            if digest(&device::resolve(&request.source, false, false)?.disk)? != p.fingerprint {
+            if digest(&device::resolve(&request.source, false, false)?.disk)? != disk.fingerprint {
                 return Err("测速结束时设备状态变化，结果仅对应已读请求。".into());
             }
             return Ok(
@@ -620,7 +654,7 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
         }
     }
     let ctx = context(request, None)?;
-    if ctx.fingerprint != p.fingerprint || range(request, &ctx)? != expected {
+    if ctx.fingerprint != disk.fingerprint || range(request, &ctx)? != expected {
         return Err("身份、布局或保护与预览不同".into());
     }
     canceled(cancel)?;
@@ -637,14 +671,14 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
     if matches!(request.operation, Operation::Trim) {
         phase(report, "核对 TRIM 支持与原生分区表");
         let mut file = device::device(&fresh.resolved, false)?;
-        if capture(&fresh, &mut file, request)? != p.table {
+        if capture(&fresh, &mut file, request)? != disk.table {
             return Err("GPT 与预览不同".into());
         }
         trim_capability(&file)?;
         drop(locks); // Windows Optimize owns its filesystem handles.
         phase(report, "提交前复核 NTFS 卷身份与保护状态");
         let final_ctx = context(request, None)?;
-        if final_ctx.fingerprint != p.fingerprint {
+        if final_ctx.fingerprint != disk.fingerprint {
             return Err("提交前卷身份或保护变化".into());
         }
         let n = request.source.partition.ok_or("没有目标分区")?;
@@ -671,7 +705,9 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
         call::<Volume>(&session, &v.path, "Optimize", TrimParams { re_trim: true })?;
         phase(report, "核对 ReTrim 后的身份与完整分区表");
         let after = context(request, None)?;
-        if after.fingerprint != p.fingerprint || capture(&after, &mut file, request)? != p.table {
+        if after.fingerprint != disk.fingerprint
+            || capture(&after, &mut file, request)? != disk.table
+        {
             return Err("Windows 返回成功，但布局/身份写后核验失败".into());
         }
         return Ok("Windows ReTrim 返回成功，设备身份及完整 GPT 未变。这不证明介质已物理擦除或读取一定为零。".into());
@@ -702,7 +738,7 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
     } else {
         device::exclusive_device(&fresh.resolved)?
     };
-    if capture(&fresh, &mut proof_file, request)? != p.table {
+    if capture(&fresh, &mut proof_file, request)? != disk.table {
         return Err("锁定后 GPT 与预览不同".into());
     }
     canceled(cancel)?;
@@ -710,7 +746,7 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
     device::offline(&file).map_err(|e| format!("磁盘可能已脱机，尚未发送数据写入：{e}"))?;
     report.disk_left_offline = true;
     model::publish(report);
-    if capture(&fresh, &mut proof_file, request)? != p.table {
+    if capture(&fresh, &mut proof_file, request)? != disk.table {
         return Err("脱机后布局变化，未写入".into());
     }
     match &request.operation {
@@ -793,6 +829,7 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
                 cancel,
                 &mut stats,
                 random,
+                random,
                 |f| f.sync_all(),
                 |s| {
                     report.benchmark = Some(s.clone());
@@ -814,10 +851,10 @@ fn execute_inner(p: &Proof, report: &mut Report, cancel: &AtomicBool) -> Result<
             report.benchmark = Some(stats);
             result?;
         }
-        Operation::Trim => unreachable!(),
+        Operation::Trim | Operation::FileBenchmark { .. } => unreachable!(),
     }
     phase(report, "核对写入后的完整分区表与脱机状态");
-    if !p.whole_wipe && capture(&fresh, &mut proof_file, request)? != p.table {
+    if !disk.whole_wipe && capture(&fresh, &mut proof_file, request)? != disk.table {
         return Err("数据写入已完成，但完整 GPT 核验不一致".into());
     }
     let mut attrs = [0u8; 16];

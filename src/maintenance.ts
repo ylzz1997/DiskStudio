@@ -2,13 +2,26 @@ import type { Disk } from "./types";
 export type MaintenanceMode = "benchmark" | "wipe" | "wipeFree" | "trim";
 export type BenchmarkMode = "read" | "write" | "mixed";
 export type BenchmarkAccess = "sequential" | "random";
-interface BenchmarkOptions {
+export interface BenchmarkOptions {
   access: BenchmarkAccess;
   blockSize: number;
   operations: number;
+  durationSeconds?: number;
   write: boolean;
   queueDepth: number;
+  threadCount?: number;
   readPercent?: number;
+}
+export interface BenchmarkForm {
+  access: BenchmarkAccess;
+  blockSize: number;
+  operations: string;
+  mode: BenchmarkMode;
+  queueDepth: string;
+  threadCount?: string;
+  readPercent: string;
+  limit?: "requests" | "duration";
+  duration?: string;
 }
 export type MaintenanceOperation =
   | {
@@ -22,6 +35,14 @@ export type MaintenanceOperation =
       kind: "benchmark";
       options: BenchmarkOptions;
     }
+  | {
+      kind: "fileBenchmark";
+      options: BenchmarkOptions;
+      additionalWorkloads?: BenchmarkOptions[];
+      repetitions?: number;
+      fileSize: number;
+      zeroFill: boolean;
+    }
   | { kind: "trim" };
 export interface MaintenancePreview {
   token: string;
@@ -31,6 +52,7 @@ export interface MaintenancePreview {
   size: number;
   sectorSize: number;
   destructive: boolean;
+  requiresAcknowledgment: boolean;
   warning: string;
 }
 export interface MaintenanceReport {
@@ -62,71 +84,117 @@ export interface MaintenanceReport {
     passSha256: string[];
     elapsedMs: number;
   };
-  benchmark: null | {
-    operations: number;
-    transferredBytes: number;
-    verifiedBytes: number;
-    elapsedMs: number;
-    ioNanoseconds: number;
-    minMicroseconds: number;
-    maxMicroseconds: number;
-    p50Microseconds: number;
-    p95Microseconds: number;
-    mibPerSecond: number;
-    iops: number;
-    readOperations: number;
-    writeOperations: number;
-    readBytes: number;
-    writeBytes: number;
-    peakQueueDepth: number;
-    samples: BenchmarkSample[];
-  };
+  benchmark: BenchmarkStats | null;
+  fileBenchmarkRuns?: FileBenchmarkRun[];
+}
+export interface FileBenchmarkRun {
+  round: number;
+  workload: number;
+  state: "running" | "completed" | "canceled" | "failed";
+  stats: BenchmarkStats | null;
+}
+export interface BenchmarkStats {
+  operations: number;
+  transferredBytes: number;
+  verifiedBytes: number;
+  elapsedMs: number;
+  ioNanoseconds: number;
+  minMicroseconds: number;
+  maxMicroseconds: number;
+  p50Microseconds: number;
+  p95Microseconds: number;
+  mibPerSecond: number;
+  iops: number;
+  readOperations: number;
+  writeOperations: number;
+  readBytes: number;
+  writeBytes: number;
+  peakQueueDepth: number;
+  workerThreads?: number;
+  approximatePercentiles?: boolean;
+  samples: BenchmarkSample[];
 }
 export interface BenchmarkSample {
   elapsedNanoseconds: number;
   readBytes: number;
   writeBytes: number;
 }
-export function benchmarkOptions({
-  access,
-  blockSize,
-  operations,
-  mode,
-  queueDepth,
-  readPercent,
-}: {
-  access: BenchmarkAccess;
-  blockSize: number;
-  operations: string;
-  mode: BenchmarkMode;
-  queueDepth: string;
-  readPercent: string;
-}): BenchmarkOptions {
-  const count = Number(operations);
-  if (!/^\d+$/.test(operations) || count < 1 || count > 65536)
+export function benchmarkOptions(
+  {
+    access,
+    blockSize,
+    operations,
+    mode,
+    queueDepth,
+    threadCount,
+    readPercent,
+    limit,
+    duration,
+  }: BenchmarkForm,
+  file = false,
+): BenchmarkOptions {
+  const timed = limit === "duration";
+  const seconds = Number(duration);
+  const count = timed ? 0 : Number(operations);
+  if (timed && (!/^\d+$/.test(duration ?? "") || seconds < 5 || seconds > 60))
+    throw Error("测速时长须为 5–60 秒，且不能同时指定请求次数。");
+  if (!timed && (!/^\d+$/.test(operations) || count < 1 || count > 65536))
     throw Error("请求次数须为 1–65536。");
   const depth = mode === "read" ? Number(queueDepth) : 1;
+  const threads = mode === "read" && file ? Number(threadCount ?? "1") : 1;
   if (
     mode === "read" &&
-    (!/^\d+$/.test(queueDepth) || depth < 1 || depth > 32 || depth > count)
+    (!/^\d+$/.test(queueDepth) ||
+      depth < 1 ||
+      depth > (file ? 512 : 32) ||
+      (!timed && depth > count) ||
+      (file &&
+        (!/^\d+$/.test(threadCount ?? "1") ||
+          threads < 1 ||
+          threads > 64 ||
+          threads > depth)))
   )
     throw Error(
-      "只读队列深度须为 1–32 且不超过请求次数。含写入的测速使用 QD1。",
+      file
+        ? "文件读取支持 QD1–QD512 与 1–64 个线程。线程数不能超过队列深度，按次数运行时队列深度不能超过请求数。含写入的测速使用单线程 QD1。"
+        : "只读队列深度须为 1–32 且不超过请求次数。含写入的测速使用 QD1。",
     );
   const percent = Number(readPercent);
   if (
     mode === "mixed" &&
-    (!/^\d+$/.test(readPercent) || percent < 1 || percent > 99 || count < 2)
+    (!/^\d+$/.test(readPercent) ||
+      percent < 1 ||
+      percent > 99 ||
+      (!timed && count < 2))
   )
     throw Error("混合测速至少需要两个请求，读取比例须为 1–99%。");
   return {
     access,
     blockSize,
     operations: count,
+    ...(timed ? { durationSeconds: seconds } : {}),
     write: mode !== "read",
     queueDepth: depth,
+    ...(file && mode === "read" ? { threadCount: threads } : {}),
     ...(mode === "mixed" ? { readPercent: percent } : {}),
   };
+}
+
+export type BenchmarkUnit = "MiB/s" | "MB/s" | "IOPS";
+
+export function benchmarkRates(
+  stats: BenchmarkStats | null,
+  unit: BenchmarkUnit,
+) {
+  const seconds = (stats?.samples.at(-1)?.elapsedNanoseconds ?? 0) / 1e9;
+  if (!stats || seconds <= 0) return null;
+  if (unit === "IOPS")
+    return [stats.readOperations / seconds, stats.writeOperations / seconds];
+  const divisor = unit === "MiB/s" ? 1048576 : 1000000;
+  return [
+    stats.readBytes / seconds / divisor,
+    stats.writeBytes / seconds / divisor,
+  ];
 }
 export function benchmarkThroughput(samples: BenchmarkSample[]) {
   let previous: BenchmarkSample = {
@@ -154,6 +222,12 @@ export function benchmarkThroughput(samples: BenchmarkSample[]) {
     previous = sample;
     return [interval];
   });
+}
+export function benchmarkFileSize(input: string) {
+  const size = Number(input);
+  if (!/^\d+$/.test(input) || size < 1 || size > 4095)
+    throw Error("文件大小须为 1–4095 MiB 的整数。");
+  return size * 1048576;
 }
 export function maintenanceRange(
   start: string,

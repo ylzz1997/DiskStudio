@@ -284,6 +284,8 @@ fn cancellation_keeps_partial_wipe_counts_and_never_rolls_back() {
 }
 fn bench(write: bool, access: Access) -> BenchmarkOptions {
     BenchmarkOptions {
+        duration_seconds: None,
+        thread_count: None,
         write,
         access,
         operations: 5,
@@ -304,6 +306,7 @@ fn sequential_benchmark_wraps_within_range_and_never_writes_in_read_mode() {
         &AtomicBool::new(false),
         &mut p,
         |_| panic!("no random needed"),
+        |_| panic!("no write fill for reads"),
         |_| panic!("no sync for reads"),
         |_| {},
     )
@@ -337,11 +340,11 @@ fn random_write_benchmark_verifies_each_request_and_preserves_outside_bytes() {
         &mut p,
         |b| {
             seed += 1;
-            if b.len() == 8 {
-                b.copy_from_slice(&seed.to_le_bytes())
-            } else {
-                b.fill(seed as u8)
-            };
+            b.copy_from_slice(&seed.to_le_bytes());
+            Ok(())
+        },
+        |b| {
+            b.fill(42);
             Ok(())
         },
         |_| Ok(()),
@@ -374,6 +377,7 @@ fn mixed_benchmark_separates_workload_reads_writes_and_required_readback() {
         &opt,
         &AtomicBool::new(false),
         &mut p,
+        |_| panic!("sequential positions need no random seed"),
         |bytes| {
             bytes.fill(42);
             Ok(())
@@ -415,6 +419,7 @@ fn benchmark_invalid_alignment_short_write_and_corruption_fail_closed() {
         &mut p,
         |_| Ok(()),
         |_| Ok(()),
+        |_| Ok(()),
         |_| {}
     )
     .is_err());
@@ -429,6 +434,7 @@ fn benchmark_invalid_alignment_short_write_and_corruption_fail_closed() {
             &bench(true, Access::Sequential),
             &AtomicBool::new(false),
             &mut p,
+            |_| panic!("sequential positions need no random seed"),
             |b| {
                 b.fill(42);
                 Ok(())

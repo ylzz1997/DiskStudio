@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  benchmarkFileSize,
   benchmarkOptions,
   benchmarkThroughput,
   maintenanceRange,
@@ -8,6 +9,66 @@ import {
 } from "./maintenance";
 import type { Disk } from "./types";
 describe("maintenance request boundaries", () => {
+  it("validates a file read queue independently of thread count and raw limits", () => {
+    const input = {
+      access: "random",
+      blockSize: 4096,
+      operations: "512",
+      mode: "read",
+      queueDepth: "512",
+      threadCount: "3",
+      readPercent: "70",
+    } as const;
+    expect(benchmarkOptions(input, true)).toMatchObject({
+      queueDepth: 512,
+      threadCount: 3,
+    });
+    expect(() => benchmarkOptions(input)).toThrow();
+    expect(() =>
+      benchmarkOptions({ ...input, threadCount: "65" }, true),
+    ).toThrow();
+    expect(() =>
+      benchmarkOptions({ ...input, queueDepth: "2" }, true),
+    ).toThrow();
+    expect(benchmarkOptions({ ...input, mode: "write" }, true)).toMatchObject({
+      queueDepth: 1,
+    });
+  });
+  it("converts only bounded whole MiB values for file benchmarks", () => {
+    expect(benchmarkFileSize("1")).toBe(1048576);
+    expect(benchmarkFileSize("4095")).toBe(4095 * 1048576);
+    for (const input of ["", "0", "1.5", "1e2", "4096", "-1"]) {
+      expect(() => benchmarkFileSize(input)).toThrow();
+    }
+  });
+  it("sends timed file workloads without a competing request count", () => {
+    const timed = {
+      access: "random",
+      blockSize: 4096,
+      operations: "256",
+      mode: "read",
+      queueDepth: "32",
+      readPercent: "70",
+      limit: "duration",
+      duration: "5",
+    } as const;
+    expect(benchmarkOptions(timed)).toMatchObject({
+      operations: 0,
+      durationSeconds: 5,
+      queueDepth: 32,
+    });
+    expect(
+      benchmarkOptions({ ...timed, mode: "mixed", duration: "60" }),
+    ).toMatchObject({
+      operations: 0,
+      durationSeconds: 60,
+      queueDepth: 1,
+      readPercent: 70,
+    });
+    for (const duration of ["", "4", "61", "5.5"]) {
+      expect(() => benchmarkOptions({ ...timed, duration })).toThrow();
+    }
+  });
   it("binds queue depth to read-only workloads and validates mixed reads", () => {
     const input = {
       access: "random",

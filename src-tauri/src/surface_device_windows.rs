@@ -74,6 +74,20 @@ impl Drop for Pending<'_> {
 }
 
 impl SurfaceReader {
+    pub(crate) fn new(file: File, timeout_seconds: Option<u16>) -> Result<Self, String> {
+        // SAFETY: create an unnamed manual-reset event with no security override.
+        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(format!("无法创建读取事件：{}", io::Error::last_os_error()));
+        }
+        Ok(Self {
+            file,
+            // SAFETY: the successful creation returned an owned kernel handle.
+            event: unsafe { OwnedHandle::from_raw_handle(event) },
+            timeout: timeout_seconds.map(|seconds| Duration::from_secs(seconds.into())),
+        })
+    }
+
     fn execute(
         &self,
         offset: u64,
@@ -194,17 +208,7 @@ pub(crate) fn surface_scan_device(
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED,
     )?;
-    // SAFETY: create an unnamed, unshared manual-reset event with no security override.
-    let event = unsafe { CreateEventW(null(), 1, 0, null()) };
-    if event.is_null() {
-        return Err(format!("无法创建读取事件：{}", io::Error::last_os_error()));
-    }
-    // SAFETY: the successful creation returned an owned kernel handle.
-    let device = SurfaceReader {
-        file,
-        event: unsafe { OwnedHandle::from_raw_handle(event) },
-        timeout: timeout_seconds.map(|seconds| Duration::from_secs(seconds.into())),
-    };
+    let device = SurfaceReader::new(file, timeout_seconds)?;
     verify_device(resolved, |code, input, output| {
         device.control(code, input, output)
     })?;

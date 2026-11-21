@@ -10,8 +10,8 @@ use std::{
 
 pub const BLOCK: usize = 1024 * 1024;
 #[repr(align(4096))]
-struct Buffer([u8; BLOCK]);
-fn buffer() -> Box<Buffer> {
+pub(crate) struct Buffer(pub(crate) [u8; BLOCK]);
+pub(crate) fn buffer() -> Box<Buffer> {
     let mut b = Box::<Buffer>::new_uninit();
     // SAFETY: Buffer has the required alignment and its byte array accepts zero.
     unsafe {
@@ -225,6 +225,8 @@ mod benchmark_engine;
 #[cfg(test)]
 use benchmark_engine::Access;
 pub use benchmark_engine::{benchmark, benchmark_reads, BenchmarkOptions, BenchmarkProgress};
+#[cfg(windows)]
+pub(crate) use benchmark_engine::{benchmark_file_queues, BenchmarkReadQueue, ReadWorker};
 
 #[cfg(test)]
 #[path = "maintenance_io_tests.rs"]
