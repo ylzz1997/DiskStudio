@@ -101,6 +101,21 @@ test('clone and restore fixtures use independent NVMe images and start paused', 
   assert.deepEqual(blocks.filter(b => b.driver === 'qcow2').map(b => b.file.filename),
     ['system.qcow2', 'test-a-ext-copy.qcow2', 'test-b-ext-copy.qcow2'].map(file => path.join(root, 'windows', file)));
 });
+test('dynamic-disk fixtures isolate the Windows-created 512-byte and 4Kn layouts', () => {
+  for (const fourKn of [false, true]) {
+    const options = { fixture: 'ldm', fourKn };
+    const args = buildArgs(options);
+    assert.equal(args[args.indexOf('-nic') + 1], 'none');
+    assert.ok(args.includes('-S'));
+    const backends = args.flatMap((arg, index) =>
+      arg === '-blockdev' ? [JSON.parse(args[index + 1])] : []);
+    assert.deepEqual(backends.filter(backend => backend.driver === 'qcow2').map(backend => backend.file.filename),
+      ['system.qcow2', ...['a', 'b'].map(slot => `test-${slot}-ldm${fourKn ? '-4kn' : ''}.qcow2`)]
+        .map(file => path.join(root, 'windows', file)));
+    assert.throws(() => buildArgs({ ...options, network: true }), /installed offline guest/);
+  }
+  assert.throws(() => buildArgs({ fixture: 'ldm', fourKn: true, sectorFault: true }), /unmodified disk I\/O/);
+});
 test('running-test preflight rejects replaced disks, wrong capacities and extra devices', () => {
   const args = buildArgs();
   const blocks = args.flatMap((value, i) => {

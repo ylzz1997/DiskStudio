@@ -33,6 +33,11 @@ import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
 import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
+import {
+  DynamicDiskDialog,
+  type DynamicDiskCandidate,
+  type DynamicDiskView,
+} from "./DynamicDiskDialog";
 import { SignatureOptions } from "./SignatureOptions";
 import {
   defaultSignatureSettings,
@@ -189,6 +194,9 @@ export function DataTools({
   const [previewUrl, setPreviewUrl] = useState("");
   const [lvmOpen, setLvmOpen] = useState(false);
   const [lvmView, setLvmView] = useState<LvmView | null>(null);
+  const [dynamicDiskOpen, setDynamicDiskOpen] = useState(false);
+  const [dynamicDiskView, setDynamicDiskView] = useState<DynamicDiskView | null>(null);
+  const [dynamicDiskCandidates, setDynamicDiskCandidates] = useState<DynamicDiskCandidate[] | null>(null);
   const callbacks = useRef({ onBusy, onRefresh });
   callbacks.current = { onBusy, onRefresh };
   const previousJob = useRef("");
@@ -856,6 +864,18 @@ export function DataTools({
                       }}
                     >
                       {t("虚拟 RAID")}
+                    </button>
+                    <button
+                      className="button"
+                      disabled={busy || !native}
+                      onClick={() => {
+                        setError("");
+                        setDynamicDiskView(null);
+                        setDynamicDiskCandidates(null);
+                        setDynamicDiskOpen(true);
+                      }}
+                    >
+                      {t("浏览动态卷")}
                     </button>
                   </div>
                   <div className="scan-modes">
@@ -1886,6 +1906,46 @@ export function DataTools({
               setOwnJobId(id);
               setJob(await invoke<Job>("data_status"));
               setLvmOpen(false);
+            })
+          }
+        />
+      )}
+      {dynamicDiskOpen && page === "recovery" && (
+        <DynamicDiskDialog
+          candidates={dynamicDiskCandidates}
+          busy={busy}
+          error={error}
+          view={dynamicDiskView}
+          onLoadCandidates={() =>
+            void action(async () => {
+              setDynamicDiskCandidates(null);
+              setDynamicDiskCandidates(await invoke<DynamicDiskCandidate[]>("data_dynamic_disk_candidates"));
+            })
+          }
+          onReselect={() => {
+            setError("");
+            setDynamicDiskView(null);
+          }}
+          onClose={() => {
+            setError("");
+            setDynamicDiskOpen(false);
+          }}
+          onInspect={(request) =>
+            void action(async () => {
+              const view = await invoke<DynamicDiskView | null>("data_dynamic_disk_inspect", { request });
+              if (view) setDynamicDiskView(view);
+            })
+          }
+          onBrowse={(sessionId, volume, deleted, allowDegraded) =>
+            void action(async () => {
+              const id = await invoke<string>("data_dynamic_disk_browse", {
+                request: { sessionId, volume, deleted, allowDegraded },
+              });
+              setProgressNotice("");
+              setScanId(id);
+              setOwnJobId(id);
+              setJob(await invoke<Job>("data_status"));
+              setDynamicDiskOpen(false);
             })
           }
         />

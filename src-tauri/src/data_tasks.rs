@@ -44,6 +44,7 @@ pub(crate) enum ScanSource {
     Disk(Selection),
     BitLocker { source: Selection, volume: String },
     Lvm(crate::lvm_tasks::Source),
+    DynamicDisk(crate::ldm_tasks::Source),
     BtrfsMembers {
         members: Vec<Selection>,
         allow_missing: bool,
@@ -215,6 +216,9 @@ impl ScanSource {
                 source.reader(locks, cancel)?,
             )));
         }
+        if let Self::DynamicDisk(source) = self {
+            return Ok(RecoveryReaders::Single(source.reader(cancel)?));
+        }
         if let Self::VirtualRaid(source) = self {
             let reader = source.reader(locks, cancel)?;
             return Ok(if source.found_btrfs() {
@@ -310,6 +314,7 @@ impl ScanSource {
                 Err("Btrfs 须按整组读取成员。".into())
             }
             Self::Lvm(_) => Err("LVM2 须按卷组读取成员。".into()),
+            Self::DynamicDisk(_) => Err("动态卷须使用已核对的磁盘组读取。".into()),
             Self::Backup { opened, partition } => {
                 opened.validate()?;
                 Ok(Box::new(opened.browser.reader(*partition)?))
@@ -327,6 +332,7 @@ impl ScanSource {
             Self::Reconstructed { source, .. } => source.forbidden_disks(),
             Self::Disk(s) | Self::BitLocker { source: s, .. } => vec![s.target.clone()],
             Self::Lvm(source) => source.members.iter().map(|s| s.target.clone()).collect(),
+            Self::DynamicDisk(source) => source.disks(),
             Self::Lost(s) => vec![s.selection.target.clone()],
             Self::LostBtrfs { members, .. } => {
                 let mut seen = std::collections::HashSet::new();
@@ -359,6 +365,7 @@ impl ScanSource {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(format!("{} · {}", source.label, labels.join(" + ")))
             }
+            Self::DynamicDisk(source) => Ok(source.label().into()),
             Self::LostBtrfs { members, .. } => Ok(members
                 .iter()
                 .map(|member| member.label())
@@ -414,11 +421,17 @@ impl ScanSource {
         if sources.is_empty() {
             return Err("缺少来源文件所在磁盘身份".into());
         }
-        let mut result = None;
-        for source in sources {
-            result = Some(platform::destination_folder(path, &source, size)?);
+        platform::destination_location_excluding(path, &sources, &self.forbidden_disk_numbers(), size)
+            .map(|(path, _)| path)
+    }
+
+    #[cfg(windows)]
+    fn forbidden_disk_numbers(&self) -> Vec<u32> {
+        match self {
+            Self::Reconstructed { source, .. } => source.forbidden_disk_numbers(),
+            Self::DynamicDisk(source) => source.disk_numbers(),
+            _ => Vec::new(),
         }
-        Ok(result.unwrap())
     }
 }
 
@@ -666,6 +679,7 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
             ScanSource::Disk(_)
             | ScanSource::BitLocker { .. }
             | ScanSource::Lvm(_)
+            | ScanSource::DynamicDisk(_)
             | ScanSource::BtrfsMembers { .. } => None,
             ScanSource::Lost(source) => Some(lost_status(source, 1)),
             ScanSource::LostBtrfs { members, .. } => {
@@ -1165,6 +1179,25 @@ pub fn scan_lvm(request: crate::lvm_tasks::BrowseRequest) -> Result<String, Stri
             ScanMode::AllFiles
         };
         scan_source_mode(source, None, label, "读取 LVM2 逻辑卷", mode, guard)
+    }
+}
+
+pub fn scan_dynamic_disk(request: crate::ldm_tasks::BrowseRequest) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = request;
+        Err("动态磁盘恢复当前仅支持 Windows。".into())
+    }
+    #[cfg(windows)]
+    {
+        let guard = crate::OPERATION
+            .try_lock()
+            .map_err(|_| "另一项磁盘操作正在运行")?;
+        idle(&state())?;
+        let mode = if request.deleted { ScanMode::Deleted } else { ScanMode::AllFiles };
+        let source = crate::ldm_tasks::selected(request)?;
+        let label = source.label().to_owned();
+        scan_source_mode(ScanSource::DynamicDisk(source), None, label, "读取动态卷", mode, guard)
     }
 }
 
@@ -2536,6 +2569,8 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                                 "读取期间锁定 Windows 已解锁的 BitLocker 卷。导出文件由目标卷的保护设置决定。"
                             } else if matches!(&source, ScanSource::VirtualRaid(raid) if raid.physical()) {
                                 "读取虚拟 RAID 时会锁定所选物理成员的卷。已删除内容可能已被覆盖，请独立核对导出文件。"
+                            } else if matches!(&source, ScanSource::DynamicDisk(_)) {
+                                "导出前重新核对动态卷的成员及已提交的元数据。已删除内容可能被覆盖，请独立核对导出文件。"
                             } else if matches!(source, ScanSource::Image { .. } | ScanSource::ImageLvm(_) | ScanSource::VirtualRaid(_)) {
                                 "源镜像以禁止共享写入的文件句柄保持打开，不挂载、不修改源。已删除内容可能已被覆盖，导出成功不代表原内容完整。"
                             } else if browsing {
@@ -2551,6 +2586,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                                 .text("此 LVM2 卷使用缺盘读取。请独立核对导出文件内容。")
                                 .to_owned(),
                         );
+                    }
+                    if matches!(&source, ScanSource::DynamicDisk(ldm) if ldm.degraded) {
+                        warnings.push(locale.text("此动态卷将使用降级读取。请独立核对导出文件内容。").to_owned());
                     }
                     if let Some(raid) = &export.virtual_raid_source {
                         let message = if raid.md_metadata.is_some() {
@@ -3065,7 +3103,7 @@ pub(crate) fn run(
                 // Confirm the selected partition or filesystem evidence under the job's locks.
                 raid.reader(&locked, cancel)?;
             }
-            if matches!(&source, ScanSource::BitLocker { .. })
+            if matches!(&source, ScanSource::BitLocker { .. } | ScanSource::DynamicDisk(_))
                 || (source.reconstruction().is_some() && !matches!(&source, ScanSource::VirtualRaid(_)))
             {
                 // Revalidate specialized read views before creating any output.
@@ -3075,9 +3113,13 @@ pub(crate) fn run(
             let root = source.destination(&folder, total.saturating_add(32 * 1024 * 1024))?;
             let (_, expected) = platform::folder_location(&root)?;
             let forbidden = source.forbidden_disks();
+            let forbidden_numbers = source.forbidden_disk_numbers();
             let mut output = crate::recovery_output::Destination::new_checked(&root, |parent| {
                 let actual = platform::file_location(parent)?;
-                if actual.target != expected || forbidden.contains(&actual.target) {
+                if actual.target != expected
+                    || forbidden.contains(&actual.target)
+                    || forbidden_numbers.contains(&actual.disk_number())
+                {
                     return Err("输出目录实际所在磁盘已变化或与源盘相同，未创建输出".into());
                 }
                 Ok(())

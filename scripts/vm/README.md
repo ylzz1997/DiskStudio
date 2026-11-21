@@ -711,3 +711,19 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 高级 RAID10 验收使用 `seed-virtual-raid-md10-advanced-4kn` 和 `virtual-raid-md10-advanced-4kn`。Ubuntu 在 tmpfs 上创建四套 4Kn RAID10 基线并停用阵列，确认 loop 成员无持有者后设置混合 near/far、混合 offset、旧式分组或固定混合分组的超级块布局和校验和。Linux 内核重新组装这些临时成员，写入并读回完整逻辑内容。混合 offset 样本另用 `e2fsck` 和 `debugfs` 检查 Ext4 和 `nested/proof.bin`。`extract-md6.mjs` 提取成员及 Linux 摘要。
 
 用 `build-virtual-raid.ps1 -Md10Advanced` 和 `make-tools-iso.ps1 -Live -GuestTools @('Virtual-Raid-Md10-Advanced-Stage.exe','Virtual-Raid-Md10-Advanced-Verify.exe')` 制备只读来宾光盘。Stage 将六份混合 offset 成员写入它核对过的 A 盘现有数据卷。选择成员 0、2、4，使用 4096 B 逻辑扇区识别 Linux md，确认两个近端副本、两个远端副本、offset 模式、跨全部成员和三个缺失槽位。组装后读取 Ext4 目录，把 `nested` 跨盘导出到 Stage 指定的 B 盘卷。Verify 检查导出目录结构、文件摘要、超级块元数据及导出清单、六份源镜像和受保护分区布局。
+
+### Windows 动态卷镜像验收
+
+从 libldm 的测试夹具提取 `ldm-2008r2-mirrored-1.img` 和 `ldm-2008r2-mirrored-2.img` 到 `.vm/ldm-reference-fixtures`。归档的 SHA-256 为 `981e7e2c39baf7351faf44b88f0b17941cad3e0255f734ce255295e722d2d7d9`。用 `make-tools-iso.ps1 -Live -LdmFixture` 核对两份成员摘要，并将匹配的正式构建放入只读光盘。 [libldm 测试夹具](https://github.com/mdbooth/libldm/tree/master/test/data)
+
+启动标准 4Kn Windows 来宾，先核对 VM 身份、盘序列号和分区对应关系。将两份 50 MiB 镜像复制到已核对的联机测试盘 B/2 的新目录，逐份比对 SHA-256。文件恢复页选择「浏览动态卷」，选择 RAW/IMG 来源及 512 B 扇区，使用原生对话框同时选择两份镜像。打开成员齐全的 `Volume3` 镜像卷并预览 `test.txt`。另选其中一份时，镜像卷显示可降级读取，启用对应选项后才可浏览。准备夹具后单独记录 QMP 计数，核对读取和预览期间 A/B 写入计数，退出后再次确认源文件摘要。
+
+正式构建 `e1c40c44…` 在两成员和仅 GPT 成员的两次浏览中均找到 15 字节的 `test.txt`，预览内容为 `Filesystem test`。两次均列出 10 个名称及数据流，并报告 231 个未解析的文件记录或数据流。在降级结果中选择同盘目录时，应用在预览阶段拒绝导出。独立后验确认目录中只有两份镜像、完整 SHA-256 与基线一致。QMP 记录核对期间 A 写入未增加，B 新增 7 次写入共 36,864 字节，来源未归因。完整证据见 `.vm/ldm-batch-status.json`。
+
+### Windows 原生动态盘验收
+
+用 `node scripts/vm/lab.mjs start --ldm --4kn` 启动专用 A/B 夹具。宿主运行 `node scripts/vm/lab.mjs preflight` 核对 QMP 身份、隔离配置和容量。在来宾中核对设备序列号和几何参数。通过 `make-tools-iso.ps1 -Live -LdmFixture` 挂载与本次桌面构建 SHA-256 一致的只读光盘。来宾执行光盘上的 `ldm-fixture.ps1`。此脚本要求专用 A/B 均为空白，在 A 上创建带确定性数据的 NTFS 卷，再用 Windows DiskPart 转为动态并脱机。在 B 上创建导出目录 `R:\out` 并保存预期文件摘要。脚本只执行一次。
+
+记录 QMP 读写基线。用光盘上的正式程序打开「文件恢复 → 浏览动态卷 → 脱机磁盘」，选已核对的 A 盘，浏览简单卷并预览 `nested\ldm-witness.bin`。通过应用的确认对话框把文件导出至 B 盘的 `R:\out`，再运行 `ldm-fixture.ps1 -Verify` 核对长度和 SHA-256。记录 A/B 的 QMP 计数差值及来宾磁盘元数据。
+
+正式构建 `ecc768e6…` 成功读取脱机 A 上由 Windows 创建的 256 MiB 4Kn GPT 简单卷，预览并导出一个 196,625 字节的文件至 B 上的原始子目录。独立校验与准备阶段的文件 SHA-256 一致。自打开应用到完成验收，A 无新增写入。完整证据见 `.vm/ldm-native-status.json`。

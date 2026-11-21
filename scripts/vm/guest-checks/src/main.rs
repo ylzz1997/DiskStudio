@@ -81,6 +81,8 @@ mod lost_partition_restore;
 mod lost_partition_tasks;
 #[path = "../../../../src-tauri/src/lost_partitions.rs"]
 mod lost_partitions;
+#[path = "../../../../src-tauri/src/ldm_tasks.rs"]
+mod ldm_tasks;
 #[path = "../../../../src-tauri/src/lvm_tasks.rs"]
 mod lvm_tasks;
 #[path = "../../../../src-tauri/src/maintenance_io.rs"]

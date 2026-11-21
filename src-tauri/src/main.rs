@@ -41,6 +41,7 @@ mod image_files;
 mod lost_partition_restore;
 mod lost_partition_tasks;
 mod lost_partitions;
+mod ldm_tasks;
 mod lvm_tasks;
 mod maintenance_io;
 mod maintenance_tasks;
@@ -323,6 +324,25 @@ async fn data_lvm_inspect(request: lvm_tasks::InspectRequest) -> Result<lvm_task
 #[tauri::command]
 async fn data_lvm_browse(request: lvm_tasks::BrowseRequest) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::scan_lvm(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_dynamic_disk_candidates() -> Result<Vec<ldm_tasks::DeviceCandidate>, String> {
+    tauri::async_runtime::spawn_blocking(ldm_tasks::device_candidates)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn data_dynamic_disk_inspect(request: ldm_tasks::InspectRequest) -> Result<Option<ldm_tasks::View>, String> {
+    tauri::async_runtime::spawn_blocking(move || ldm_tasks::inspect(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_dynamic_disk_browse(request: ldm_tasks::BrowseRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::scan_dynamic_disk(request))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1072,6 +1092,9 @@ fn main() {
             data_scan_btrfs_members,
             data_lvm_inspect,
             data_lvm_browse,
+            data_dynamic_disk_candidates,
+            data_dynamic_disk_inspect,
+            data_dynamic_disk_browse,
             data_results,
             data_folders,
             data_select_results,

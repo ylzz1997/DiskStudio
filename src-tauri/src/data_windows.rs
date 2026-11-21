@@ -447,35 +447,50 @@ fn open_device_flags(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Res
 }
 
 fn open_device_file(r: &Resolved, write: bool, sharing: u32, flags: u32) -> Result<File, String> {
+    open_numbered_device(r.disk.number, write, sharing, flags)
+}
+
+fn open_numbered_device(number: u32, write: bool, sharing: u32, flags: u32) -> Result<File, String> {
     OpenOptions::new()
         .read(true)
         .write(write)
         .share_mode(sharing)
         .custom_flags(flags)
-        .open(format!("\\\\.\\PhysicalDrive{}", r.disk.number))
+        .open(format!("\\\\.\\PhysicalDrive{number}"))
         .map_err(|e| format!("无法打开所选设备：{e}。程序不会自动提权。"))
 }
 
 fn verify_device(
     r: &Resolved,
+    control: impl FnMut(u32, &[u8], &mut [u8]) -> Result<usize, String>,
+) -> Result<(), String> {
+    verify_device_identity(r.disk.number, r.disk.size, r.disk.logical_sector_size,
+        r.disk.serial_number.as_deref(), control)
+}
+
+fn verify_device_identity(
+    expected_number: u32,
+    size: u64,
+    sector: Option<u64>,
+    serial: Option<&str>,
     mut control: impl FnMut(u32, &[u8], &mut [u8]) -> Result<usize, String>,
 ) -> Result<(), String> {
     let mut number = [0; 12];
     if control(IOCTL_STORAGE_GET_DEVICE_NUMBER, &[], &mut number)? < 12
-        || u32::from_le_bytes(number[4..8].try_into().unwrap()) != r.disk.number
+        || u32::from_le_bytes(number[4..8].try_into().unwrap()) != expected_number
     {
         return Err("设备句柄编号与选择不一致。".into());
     }
     let mut length = [0; 8];
     if control(IOCTL_DISK_GET_LENGTH_INFO, &[], &mut length)? < 8
-        || u64::from_le_bytes(length) != r.disk.size
+        || u64::from_le_bytes(length) != size
     {
         return Err("设备句柄容量与选择不一致。".into());
     }
     let mut geometry = [0u8; 24];
     if control(IOCTL_DISK_GET_DRIVE_GEOMETRY, &[], &mut geometry)? < 24
         || Some(u32::from_le_bytes(geometry[20..24].try_into().unwrap()) as u64)
-            != r.disk.logical_sector_size
+            != sector
     {
         return Err("设备句柄扇区大小与选择不一致。".into());
     }
@@ -488,7 +503,7 @@ fn verify_device(
     if start < 36 || start >= n {
         return Err("设备未提供可核验的序列号。".into());
     }
-    let serial = String::from_utf8_lossy(
+    let observed = String::from_utf8_lossy(
         &descriptor[start..n]
             .split(|b| *b == 0)
             .next()
@@ -496,10 +511,57 @@ fn verify_device(
     )
     .trim()
     .to_string();
-    if Some(serial.as_str()) != r.disk.serial_number.as_deref().map(policy::clean) {
+    if Some(observed.as_str()) != serial.map(policy::clean) {
         return Err("设备句柄序列号与 Windows 元数据不一致，已拒绝 I/O。".into());
     }
     Ok(())
+}
+
+/// Explicit read-only recovery for a disk corroborated by the legacy and
+/// physical-drive providers even when MSFT_Disk omits its dynamic volumes.
+pub(crate) fn offline_physical_reader(
+    number: u32,
+    size: u64,
+    sector: u64,
+    serial: &str,
+) -> Result<Region<OfflinePhysical>, String> {
+    let file = open_numbered_device(number, false, FILE_SHARE_READ | FILE_SHARE_WRITE, 0)?;
+    verify_device_identity(number, size, Some(sector), Some(serial), |code, input, output| {
+        control(&file, code, input, output)
+    })?;
+    let disk = OfflinePhysical { file };
+    disk.verify()?;
+    Region::new(disk, 0, size).map_err(err)
+}
+
+pub(crate) struct OfflinePhysical {
+    file: File,
+}
+
+impl OfflinePhysical {
+    fn verify(&self) -> Result<(), String> {
+        let mut bytes = [0; 16];
+        if control(&self.file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)? != bytes.len()
+            || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != 16
+            || u64::from_le_bytes(bytes[8..].try_into().unwrap()) & 1 == 0
+        {
+            return Err("请先将所选动态磁盘脱机，已停止读取。".into());
+        }
+        Ok(())
+    }
+}
+
+impl Read for OfflinePhysical {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.verify().map_err(io::Error::other)?;
+        self.file.read(out)
+    }
+}
+
+impl Seek for OfflinePhysical {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        self.file.seek(from)
+    }
 }
 pub fn reader(r: &Resolved) -> Result<Region<File>, String> {
     Region::new(device(r, false)?, r.offset, r.size).map_err(err)
@@ -854,6 +916,11 @@ fn set_offline(file: &File, persist: bool) -> Result<(), String> {
     Ok(())
 }
 pub fn folder_location(path: &Path) -> Result<(PathBuf, Target), String> {
+    let (path, target, _) = numbered_folder_location(path)?;
+    Ok((path, target))
+}
+
+fn numbered_folder_location(path: &Path) -> Result<(PathBuf, Target, u32), String> {
     let canonical = path.canonicalize().map_err(err)?;
     for p in canonical.ancestors() {
         if p.metadata().map_err(err)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -892,7 +959,7 @@ pub fn folder_location(path: &Path) -> Result<(PathBuf, Target), String> {
         .ok_or("输出磁盘信息缺失")?;
     policy::corroborate(disk, &inv.legacy)?;
     let target = policy::identity(disk).ok_or("不能唯一确认目录所在磁盘身份")?;
-    Ok((canonical, target))
+    Ok((canonical, target, disk.number))
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct FileLocation {
@@ -902,6 +969,10 @@ pub struct FileLocation {
     extent: (u32, u64, u64),
 }
 impl FileLocation {
+    pub(crate) fn disk_number(&self) -> u32 {
+        self.extent.0
+    }
+
     /// Compare a retained ordinary handle's observed location to an already
     /// validated partition. This grants no device access or write authority.
     pub(crate) fn confirm_partition(
@@ -1232,8 +1303,17 @@ pub(crate) fn destination_location(
     sources: &[Target],
     required: u64,
 ) -> Result<(PathBuf, Target), String> {
-    let (canonical, target) = folder_location(path)?;
-    if sources.contains(&target) {
+    destination_location_excluding(path, sources, &[], required)
+}
+
+pub(crate) fn destination_location_excluding(
+    path: &Path,
+    sources: &[Target],
+    excluded_numbers: &[u32],
+    required: u64,
+) -> Result<(PathBuf, Target), String> {
+    let (canonical, target, number) = numbered_folder_location(path)?;
+    if sources.contains(&target) || excluded_numbers.contains(&number) {
         return Err("输出必须位于另一块物理磁盘，不能写回恢复/备份源盘。".into());
     }
     if required == 0 {

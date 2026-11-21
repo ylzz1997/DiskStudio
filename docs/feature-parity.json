@@ -572,8 +572,9 @@
     },
     {
       "id": "dynamic-disks",
-      "status": "planned",
-      "detail": "动态卷读取恢复、转换为基本磁盘"
+      "status": "in-progress",
+      "detail": "文件恢复页支持 Windows LDM 动态卷的只读检查、扫描、预览和跨盘导出。可显式选择同组 RAW/IMG 整盘镜像或脱机设备。校验 MBR 或主备 GPT、PRIVHEAD 和 TOCBLOCK 副本、VMDB 提交版本及 VBLK 分片与引用。支持简单、跨区、带区、镜像及 RAID-5 卷。缺盘镜像和缺一盘的 RAID-5 需要显式允许降级读取。扫描、预览和导出前复核源身份、布局及数据库。19 份 Windows Server 2003 R2/2008 R2 参考镜像覆盖 MBR/GPT 成员组合，11 个卷读出的 NTFS 文件与夹具预期一致，10 个降级组合的完整逻辑卷 SHA-256 与齐全成员一致，另拒绝 6 个成员不足的组合及重复成员、混组。e1c40c44 正式构建在 4Kn 来宾读取两份 512 B 镜像和仅 GPT 成员的降级组合，预览预期的 15 字节文件，拒绝同盘导出。后验确认两份源镜像摘要一致。ecc768e6 正式构建在隔离 Windows 来宾读取 A 盘经 DiskPart 创建的 4Kn GPT 简单卷，预览并向 B 盘导出 196,625 字节文件，保留子目录。来宾独立复核完整 SHA-256，A 盘在验收期间无新增写入。动态盘转回基本磁盘仍待实现。",
+      "evidence": ".vm/ldm-native-status.json"
     },
     {
       "id": "storage-spaces",

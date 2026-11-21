@@ -601,10 +601,10 @@ fn check_impl(continuation: bool) -> Result<String, String> {
             phase(&mut log, case.fs, "free-wipe")?;
             let preview = maintenance_tasks::prepare(maintenance_tasks::Request {
                 source: s.clone(),
-                range: surface_scan::Options {
+                range: Some(surface_scan::Options {
                     start_sector: 0,
                     sector_count: case.size / 512,
-                },
+                }),
                 operation: maintenance_tasks::Operation::WipeFree {
                     options: maintenance_io::WipeOptions {
                         passes: case.passes,

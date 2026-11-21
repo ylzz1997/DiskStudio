@@ -12,6 +12,7 @@ param(
     [switch]$BtrfsLostFixture,
     [switch]$BtrfsLostMembersFixture,
     [switch]$LvmFixture,
+    [switch]$LdmFixture,
     [switch]$DesktopOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -27,9 +28,10 @@ if (!$Live -and (Test-Path -LiteralPath (Join-Path $diskStudioVmRoot 'run.json')
     $diskStudioRun = Get-Content -LiteralPath (Join-Path $diskStudioVmRoot 'run.json') -Raw | ConvertFrom-Json
     if (Get-Process -Id $diskStudioRun.pid -ErrorAction SilentlyContinue) { throw 'Shut down the VM before replacing its optical media' }
 }
-if (($GuestTools -or $DesktopOnly) -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
+if (($GuestTools -or $DesktopOnly -or $LdmFixture) -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
 $diskStudioFixtures = @($BtrfsMoveFixture.IsPresent, $BtrfsCloneFixture.IsPresent, $BtrfsSnapshotFixture.IsPresent, $BtrfsRetainedFixture.IsPresent, $BtrfsSha256Fixture.IsPresent, $BtrfsMembersFixture.IsPresent, $BtrfsParityFixture.IsPresent, $BtrfsAllocationFixture.IsPresent, $BtrfsLostFixture.IsPresent, $BtrfsLostMembersFixture.IsPresent) | Where-Object { $_ }
-if ($DesktopOnly -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture)) { throw 'A desktop-only ISO cannot include guest tools or fixtures' }
+if ($DesktopOnly -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture -or $LdmFixture)) { throw 'A desktop-only ISO cannot include guest tools or fixtures' }
+if ($LdmFixture -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture)) { throw 'The LDM fixture requires its own immutable optical media' }
 if (@($diskStudioFixtures).Count -gt 1) { throw 'Choose one Btrfs fixture for this ISO' }
 $diskStudioLvmMedia = @{
     'Lvm-Lab-4Kn-Prepare.exe' = @{ MemberFiles = $true }
@@ -84,7 +86,7 @@ foreach ($diskStudioDirectory in @($diskStudioVmRoot, $diskStudioPayload, (Join-
     } else { New-Item -ItemType Directory -Path $diskStudioDirectory | Out-Null }
 }
 if (Test-Path -LiteralPath $diskStudioIso) { throw 'Tools ISO already exists; preserve it or remove that single file after shutting down the VM' }
-if ($GuestTools -or $DesktopOnly) {
+if ($GuestTools -or $DesktopOnly -or $LdmFixture) {
     # Use a fresh staging directory. Older payloads and ISO files may still be
     # needed for failure diagnosis and must not be changed.
     $diskStudioSelected = @{}
@@ -214,6 +216,30 @@ if ($GuestTools -or $DesktopOnly) {
                 throw 'Invalid immutable Linux md zoned RAID0 fixture'
             }
             $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ($LdmFixture) {
+        $diskStudioHelper = Get-Item -LiteralPath (Join-Path $PSScriptRoot 'ldm-fixture.ps1')
+        if ($diskStudioHelper.PSIsContainer -or ($diskStudioHelper.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Invalid LDM fixture setup script'
+        }
+        $diskStudioSelected.Add('ldm-fixture.ps1', $diskStudioHelper.FullName)
+        $diskStudioImages = @{
+            'ldm-2008r2-mirrored-1.img' = '127E9BF88AD601EF20A8295E897EC51A947011F34BC0E7A6F9CB248869AB0020'
+            'ldm-2008r2-mirrored-2.img' = '91557031AC32D5EB90FD9D1F54F6CCBE871580612CCA1116E40038F7989E5169'
+        }
+        $diskStudioReference = Get-Item -LiteralPath (Join-Path $diskStudioVmRoot 'ldm-reference-fixtures')
+        if (!$diskStudioReference.PSIsContainer -or ($diskStudioReference.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'LDM reference fixture directory must be an ordinary directory'
+        }
+        foreach ($diskStudioName in $diskStudioImages.Keys) {
+            $diskStudioImageFile = Get-Item -LiteralPath (Join-Path $diskStudioReference.FullName $diskStudioName)
+            if ($diskStudioImageFile.PSIsContainer -or ($diskStudioImageFile.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $diskStudioImageFile.Length -ne 50MB -or
+                (Get-FileHash -LiteralPath $diskStudioImageFile.FullName -Algorithm SHA256).Hash -ne $diskStudioImages[$diskStudioName]) {
+                throw "Unexpected LDM reference image: $diskStudioName"
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioImageFile.FullName)
         }
     }
     $diskStudioStage = Join-Path $diskStudioVmRoot ('payload-selected-' + [guid]::NewGuid().ToString('N'))

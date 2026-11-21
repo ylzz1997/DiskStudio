@@ -3,7 +3,8 @@
 use crate::mbr::{self, EbrSector, Scan};
 use crate::{parse_image, Disk, MIB};
 use serde::Serialize;
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::{collections::HashSet, ops::Range};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -223,6 +224,49 @@ fn entries(g: &Gpt<'_>, sector: u64) -> Result<(usize, usize), String> {
         }
     }
     Ok((ranges.len(), unaligned))
+}
+
+pub(crate) struct CheckedGpt {
+    pub(crate) partitions: Vec<([u8; 16], Range<u64>)>,
+    pub(crate) digest: [u8; 32],
+}
+
+/// Return typed byte ranges and the layout digest from independently validated GPT copies.
+pub(crate) fn checked_gpt(
+    head: &[u8],
+    tail: &[u8],
+    size: u64,
+    sector: u64,
+) -> Result<CheckedGpt, String> {
+    let ends = Ends { head, tail, size };
+    let primary = gpt(&ends, sector, false).map_err(|(_, reason)| reason)?;
+    let backup = gpt(&ends, sector, true).map_err(|(_, reason)| reason)?;
+    if primary.guid != backup.guid
+        || primary.first != backup.first
+        || primary.last != backup.last
+        || primary.count != backup.count
+        || primary.stride != backup.stride
+        || primary.table != backup.table
+    {
+        return Err("主备 GPT 的磁盘身份、范围或分区条目不一致。".into());
+    }
+    entries(&primary, sector)?;
+    let partitions = primary
+        .table
+        .chunks_exact(primary.stride)
+        .filter(|entry| entry[..16].iter().any(|byte| *byte != 0))
+        .map(|entry| {
+            let start = u64le(entry, 32) * sector;
+            let end = (u64le(entry, 40) + 1) * sector;
+            (entry[..16].try_into().unwrap(), start..end)
+        })
+        .collect();
+    let mut digest = Sha256::new();
+    digest.update(size.to_le_bytes());
+    digest.update(&head[..2 * sector as usize]);
+    digest.update(&tail[tail.len() - sector as usize..]);
+    digest.update(primary.table);
+    Ok(CheckedGpt { partitions, digest: digest.finalize().into() })
 }
 
 /// Head and tail are bytes from the same file, capped separately at 1 MiB.

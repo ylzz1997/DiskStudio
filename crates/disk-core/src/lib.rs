@@ -3,6 +3,7 @@
 pub mod btrfs;
 pub mod fat_format;
 mod image;
+pub mod ldm;
 pub mod lvm;
 pub mod mbr;
 pub mod md_raid;
