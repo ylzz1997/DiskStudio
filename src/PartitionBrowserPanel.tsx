@@ -71,7 +71,7 @@ export function PartitionBrowserPanel({
       ) : (
         <>
           <div className="data-action-row">
-            <span>{t("使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。")}</span>
+            <span>{t("使用 NTFS、FAT32、exFAT 或 Ext4 的备用元数据读取文件，提取前重新核对。")}</span>
             <button
               className="button"
               disabled={busy || !available || partition?.number === undefined}

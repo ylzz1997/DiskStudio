@@ -140,21 +140,22 @@ fn wof_file_backing_survives_clone_with_a_full_valid_data_length() {
     });
     let descriptor = fixture_acl();
     let mut plan = 8u32.to_le_bytes().to_vec();
-    for (algorithm, chunk) in [4096u32, 32768, 8192, 16384].into_iter().enumerate() {
+    let compressed: &[&[u8]] = &[
+        include_bytes!("../../tests/fixtures/ntfs-wof-0.bin"),
+        include_bytes!("../../tests/fixtures/ntfs-wof-1.bin"),
+        include_bytes!("../../tests/fixtures/ntfs-wof-2.bin"),
+        include_bytes!("../../tests/fixtures/ntfs-wof-3.bin"),
+    ];
+    for (algorithm, bytes) in compressed.iter().enumerate() {
         let name = format!("wof-{algorithm}.bin");
-        let (size, backing) = if let Some(directory) = &corpus {
-            (
-                192 * 1024 + 123,
-                std::fs::read(directory.join(&name)).unwrap(),
-            )
+        let size = 192 * 1024u64 + 123;
+        let backing = if let Some(directory) = &corpus {
+            std::fs::read(directory.join(&name)).unwrap()
         } else {
-            let size = chunk + 59;
-            let mut backing = chunk.to_le_bytes().to_vec();
-            backing.extend((0..size).map(|index| (index % 97) as u8));
-            (size, backing)
+            bytes.to_vec()
         };
         record(&mut plan, 2, 0, 0, &name, 3);
-        sparse_stream(&mut plan, "", size.into(), &[]);
+        sparse_stream(&mut plan, "", size, &[]);
         stream(&mut plan, "WofCompressedData", &backing);
         stream(&mut plan, "comment", b"ordinary alternate stream");
         let reparse = [metadata::WOF_TAG, 20, 1, 2, 1, algorithm as u32, 0]
@@ -171,7 +172,7 @@ fn wof_file_backing_survives_clone_with_a_full_valid_data_length() {
     let cancel = AtomicBool::new(false);
     let tool = crate::ntfs_file_clone::Plan::engine().unwrap();
     for sector in [512, 4096] {
-        let size = if sector == 4096 && corpus.is_some() {
+        let size = if sector == 4096 {
             96 * 1024 * 1024
         } else {
             SIZE
@@ -179,6 +180,7 @@ fn wof_file_backing_survives_clone_with_a_full_valid_data_length() {
         let mut image = vec![0; size];
         assert!(serve(&engine, sector, &mut image, &plan, false).0);
         let mut source = Cursor::new(image);
+        check_wof_recovery(&mut source);
         let catalogue = merge::catalogue_file_clone(&mut source, &cancel).unwrap();
         assert!(merge::catalogue(&mut source, None, &cancel).is_err());
         for algorithm in 0..4 {
@@ -206,6 +208,7 @@ fn wof_file_backing_survives_clone_with_a_full_valid_data_length() {
             )
             .unwrap();
         clone.verify(&mut target, &cancel).unwrap();
+        check_wof_recovery(&mut target);
         if let Some(directory) = &corpus {
             if sector == 4096 {
                 let mut image =
@@ -224,6 +227,60 @@ fn wof_file_backing_survives_clone_with_a_full_valid_data_length() {
                     .unwrap();
             }
         }
+    }
+}
+
+fn check_wof_recovery(source: &mut Cursor<Vec<u8>>) {
+    use crate::{ntfs_checkpoint, ntfs_scan, recovery, recovery_tree::Catalog};
+
+    let mut files = Vec::new();
+    let mut catalog = Catalog::default();
+    let mut cursor = ntfs_scan::Checkpoint::default();
+    let mode = recovery::ScanMode::Existing;
+    ntfs_scan::continue_scan(
+        source,
+        mode,
+        &mut cursor,
+        |_, _| Ok(()),
+        |file| files.push(file),
+        |dir| catalog.insert(dir),
+    )
+    .unwrap();
+    assert!(!files
+        .iter()
+        .any(|file| file.name.contains("WofCompressedData")));
+    let records: Vec<_> = files
+        .iter()
+        .map(|file| ntfs_checkpoint::Record::capture(file).unwrap())
+        .collect();
+    let encoded = serde_json::to_vec(&records).unwrap();
+    let loaded: Vec<ntfs_checkpoint::Record> = serde_json::from_slice(&encoded).unwrap();
+    let (files, _) = ntfs_checkpoint::restore(&loaded, &catalog.snapshot(), &cursor, mode).unwrap();
+    for algorithm in 0..4 {
+        let name = format!("wof-{algorithm}.bin");
+        let candidate = files.iter().find(|file| file.name == name).unwrap();
+        assert!(candidate.supported, "{name}: {}", candidate.note);
+        let expected: Vec<u8> = (0..192 * 1024 + 123)
+            .map(|i| ((i / 113 + i % 41 + algorithm * 17) % 251) as u8)
+            .collect();
+        let mut preview = Vec::new();
+        recovery::extract(source, candidate, &mut preview, 4101, |_| Ok(())).unwrap();
+        assert_eq!(preview, expected[..4101]);
+        let mut full = Vec::new();
+        recovery::extract(source, candidate, &mut full, u64::MAX, |_| Ok(())).unwrap();
+        assert_eq!(full, expected);
+        let mut stale = candidate.clone();
+        let recovery::Locator::Ntfs {
+            wof: Some(signature),
+            ..
+        } = &mut stale.locator
+        else {
+            panic!("expected WOF identity");
+        };
+        signature[0] ^= 1;
+        assert!(
+            recovery::extract(source, &stale, &mut std::io::sink(), u64::MAX, |_| Ok(())).is_err()
+        );
     }
 }
 

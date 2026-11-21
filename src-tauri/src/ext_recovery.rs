@@ -90,22 +90,28 @@ struct Geometry {
     checksum_seed: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SuperblockLayout {
+    block: u64,
+    size: u64,
+    inodes: u32,
+    first: u64,
+    bpg: u64,
+    per_group: u32,
+    groups: u64,
+    descriptor_size: usize,
+    metadata_csum: bool,
+    checksum_seed: u32,
+}
+
 pub(crate) fn validate_existing<R: Read + Seek>(mut reader: R) -> Result<(), String> {
     let length = reader.seek(SeekFrom::End(0)).map_err(err)?;
     geometry(&mut Source { reader, length, cancel: Arc::new(AtomicBool::new(false)), reads: 0 }).map(|_| ())
 }
 
-fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> {
-    let mut s = [0; 1024];
-    source.read_at(1024, &mut s)?;
-    if u16le(&s, 0x38) != 0xef53 {
-        return Err("不是可识别的 Ext 文件系统。".into());
-    }
-    let inc = u32le(&s, 0x60);
-    let ro = u32le(&s, 0x64);
-    if u16le(&s, 0x3a) != 1 || inc & 4 != 0 || u32le(&s, 0xe8) != 0 {
-        return Err("Ext 文件系统未干净卸载或需要日志恢复；只读扫描不会重放日志。".into());
-    }
+fn superblock_layout(s: &[u8; 1024], length: u64) -> Result<SuperblockLayout, String> {
+    let inc = u32le(s, 0x60);
+    let ro = u32le(s, 0x64);
     if inc & !(0x2 | 0x40 | 0x80 | 0x200 | 0x2000 | 0x10000) != 0
         || inc & 2 == 0
         || ro & !(0x1 | 0x2 | 0x4 | 0x8 | 0x20 | 0x40 | 0x100 | 0x400) != 0
@@ -114,19 +120,19 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
             "Ext 文件系统包含当前未支持的特性（incompat={inc:#x}, ro_compat={ro:#x}）。"
         ));
     }
-    let log = u32le(&s, 0x18);
-    if log > 2 || u32le(&s, 0x1c) != log {
+    let log = u32le(s, 0x18);
+    if log > 2 || u32le(s, 0x1c) != log {
         return Err("Ext 读取当前支持 1/2/4 KiB 块。".into());
     }
     let block = 1024u64 << log;
-    let blocks = u32le(&s, 4) as u64 | ((u32le(&s, 0x150) as u64) << 32);
+    let blocks = u32le(s, 4) as u64 | ((u32le(s, 0x150) as u64) << 32);
     let size = blocks.checked_mul(block).ok_or("Ext 容量溢出。")?;
-    let first = u32le(&s, 0x14) as u64;
-    let bpg = u32le(&s, 0x20) as u64;
-    let per_group = u32le(&s, 0x28);
-    let inodes = u32le(&s, 0);
-    let inode_size = u16le(&s, 0x58) as u64;
-    if size > source.length
+    let first = u32le(s, 0x14) as u64;
+    let bpg = u32le(s, 0x20) as u64;
+    let per_group = u32le(s, 0x28);
+    let inodes = u32le(s, 0);
+    let inode_size = u16le(s, 0x58) as u64;
+    if size > length
         || size < 4096
         || first != u64::from(block == 1024)
         || bpg == 0
@@ -139,13 +145,13 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
         || inode_size > block
         || !inode_size.is_power_of_two()
         || (ro & 0x400 != 0 && inode_size < 256)
-        || (inc & 0x80 == 0 && u32le(&s, 0x150) != 0)
+        || (inc & 0x80 == 0 && u32le(s, 0x150) != 0)
     {
         return Err("Ext 容量、inode 或块组几何无效或超过支持范围。".into());
     }
     let groups = (blocks - first).div_ceil(bpg);
     let descriptor_size = if inc & 0x80 != 0 {
-        u16le(&s, 0xfe) as usize
+        u16le(s, 0xfe) as usize
     } else {
         32
     };
@@ -157,9 +163,37 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
     {
         return Err("Ext 块组数量或描述符大小不支持。".into());
     }
-    source.length = size;
-    let mut descriptors = vec![0; groups as usize * descriptor_size];
-    let start = (first + 1) * block;
+    Ok(SuperblockLayout {
+        block,
+        size,
+        inodes,
+        first,
+        bpg,
+        per_group,
+        groups,
+        descriptor_size,
+        metadata_csum: ro & 0x400 != 0,
+        checksum_seed: if inc & 0x2000 != 0 {
+            u32le(s, 0x270)
+        } else {
+            crc(!0, &s[0x68..0x78])
+        },
+    })
+}
+
+fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> {
+    let mut s = [0; 1024];
+    source.read_at(1024, &mut s)?;
+    if u16le(&s, 0x38) != 0xef53 {
+        return Err("不是可识别的 Ext 文件系统。".into());
+    }
+    if u16le(&s, 0x3a) != 1 || u32le(&s, 0x60) & 4 != 0 || u32le(&s, 0xe8) != 0 {
+        return Err("Ext 文件系统未干净卸载或需要日志恢复；只读扫描不会重放日志。".into());
+    }
+    let layout = superblock_layout(&s, source.length)?;
+    source.length = layout.size;
+    let mut descriptors = vec![0; layout.groups as usize * layout.descriptor_size];
+    let start = (layout.first + 1) * layout.block;
     for (i, chunk) in descriptors.chunks_mut(1024 * 1024).enumerate() {
         source.read_at(start + i as u64 * 1024 * 1024, chunk)?;
     }
@@ -169,20 +203,19 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
     Ok(Geometry {
         creator_os: u32le(&s, 0x48),
         fingerprint: hash.finalize().into(),
-        block,
-        size,
-        inodes,
-        per_group,
+        block: layout.block,
+        size: layout.size,
+        inodes: layout.inodes,
+        per_group: layout.per_group,
         descriptors,
-        descriptor_size,
-        metadata_csum: ro & 0x400 != 0,
-        checksum_seed: if inc & 0x2000 != 0 {
-            u32le(&s, 0x270)
-        } else {
-            crc(!0, &s[0x68..0x78])
-        },
+        descriptor_size: layout.descriptor_size,
+        metadata_csum: layout.metadata_csum,
+        checksum_seed: layout.checksum_seed,
     })
 }
+
+#[path = "ext_reconstruct.rs"]
+pub(crate) mod reconstruct;
 struct Session<R> {
     fs: Ext4,
     source: Rc<RefCell<Source<R>>>,

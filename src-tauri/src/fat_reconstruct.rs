@@ -331,7 +331,7 @@ mod tests {
     fn check_file(image: &[u8], sector: usize, format: Format, expected_bytes: &[u8]) {
         let cancel = AtomicBool::new(false);
         let (mut view, proof) =
-            recovery::view::Proof::open(Cursor::new(image), sector as u64, &cancel).unwrap();
+            recovery::view::Proof::open_boot(Cursor::new(image), sector as u64, &cancel).unwrap();
         assert!(matches!(&proof, recovery::view::Proof::Fat(proof) if proof.filesystem == format));
         let mut files = Vec::new();
         super::super::scan(
@@ -342,7 +342,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(files.len(), 1);
-        let mut reopened = proof.reopen(Cursor::new(image), &cancel).unwrap();
+        let mut reopened = proof.reopen_boot(Cursor::new(image), &cancel).unwrap();
         let mut content = Vec::new();
         recovery::extract(&mut reopened, &files[0], &mut content, u64::MAX, |_| Ok(())).unwrap();
         assert_eq!(content, expected_bytes);
@@ -387,9 +387,9 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut image = fixture::exfat(sector);
         image[11 * sector] ^= 1;
-        let (_, proof) = recovery::view::Proof::open(Cursor::new(&image), 512, &cancel).unwrap();
+        let (_, proof) = recovery::view::Proof::open_boot(Cursor::new(&image), 512, &cancel).unwrap();
         image[106] = 2;
-        assert!(proof.reopen(Cursor::new(&image), &cancel).is_err());
+        assert!(proof.reopen_boot(Cursor::new(&image), &cancel).is_err());
         image[100] ^= 1;
         assert!(inspect(&mut Cursor::new(&image), 512, &cancel).is_err());
         image[..12 * sector].fill(0);

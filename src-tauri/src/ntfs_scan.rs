@@ -292,7 +292,15 @@ pub fn continue_scan<R: Read + Seek>(
                     break 'record;
                 }
             };
+            struct Content {
+                size: u64,
+                compression: Option<[u8; 32]>,
+                wof: Option<[u8; 32]>,
+                stream: Option<crate::ntfs_streams::Identity>,
+                unsupported: Option<String>,
+            }
             let mut contents = vec![];
+            let mut wof = None;
             if let Some(data) = file.data(reader, "") {
                 let data = match data {
                     Ok(d) => d,
@@ -312,7 +320,14 @@ pub fn continue_scan<R: Read + Seek>(
                 let unsupported = if crate::ntfs_compression::is_reparse(reader, &file)
                     .unwrap_or(true)
                 {
-                    Some("重解析文件或无法核对的属性暂不支持（含 WOF/云端占位文件）".to_string())
+                    match crate::ntfs_wof::Plan::read(reader, &file) {
+                        Ok(plan) if plan.size() == attr.value_length() => {
+                            wof = Some(plan.signature);
+                            None
+                        }
+                        Ok(_) => Some("NTFS WOF 逻辑容量不一致。".into()),
+                        Err(e) => Some(format!("无法读取 NTFS 重解析文件：{e}")),
+                    }
                 } else if attr.flags().contains(NtfsAttributeFlags::ENCRYPTED) {
                     Some("EFS 加密数据暂不支持".into())
                 } else if attr.record_bytes()[12] > 1 {
@@ -328,12 +343,27 @@ pub fn continue_scan<R: Read + Seek>(
                 } else {
                     None
                 };
-                contents.push((attr.value_length(), compression, None, unsupported));
+                contents.push(Content {
+                    size: attr.value_length(),
+                    compression,
+                    wof,
+                    stream: None,
+                    unsupported,
+                });
             }
             match crate::ntfs_streams::enumerate(reader, &file) {
                 Ok(streams) => {
                     for s in streams {
-                        contents.push((s.size, None, Some(s.identity), s.reason));
+                        if wof.is_some() && s.identity.name == crate::ntfs_wof::STREAM {
+                            continue;
+                        }
+                        contents.push(Content {
+                            size: s.size,
+                            compression: None,
+                            wof: None,
+                            stream: Some(s.identity),
+                            unsupported: s.reason,
+                        });
                     }
                 }
                 Err(_) => {
@@ -369,7 +399,7 @@ pub fn continue_scan<R: Read + Seek>(
                 if !directory_note.is_empty() {
                     notes.push(directory_note);
                 }
-                for (size, compression, stream, unsupported) in &contents {
+                for Content { size, compression, wof, stream, unsupported } in &contents {
                     let supported = unsupported.is_none();
                     pending_files.push(Candidate {
                     id: count as u32,
@@ -377,13 +407,21 @@ pub fn continue_scan<R: Read + Seek>(
                     name: stream.as_ref().map_or_else(|| link.display(), |s| s.display(&link.display())),
                     size: *size,
                     deleted,
-                    method: if stream.is_some() { "NTFS 命名数据流" } else { "NTFS 文件表" }.into(),
+                    method: if stream.is_some() {
+                        "NTFS 命名数据流"
+                    } else if wof.is_some() {
+                        "NTFS WOF 压缩文件"
+                    } else {
+                        "NTFS 文件表"
+                    }.into(),
                     note: if let Some(reason) = unsupported {
                         reason.as_str()
                     } else if stream.is_some() {
                         "命名数据流；单独保存为普通文件，不附加到原文件。属性时间属于所属文件；内容可能变化，删除内容可能被覆盖"
                     } else if compression.is_some() {
                         "NTFS LZNT1 压缩文件；提取时解码，内容可能已变化或被覆盖"
+                    } else if wof.is_some() {
+                        "提取时解码卷内 WOF 压缩数据；内容可能已变化或被覆盖"
                     } else if deleted {
                         "可能已被覆盖；请先预览并核对恢复内容"
                     } else {
@@ -398,6 +436,7 @@ pub fn continue_scan<R: Read + Seek>(
                         sequence: file.sequence_number(),
                         link: link.clone(),
                         compression: *compression,
+                        wof: *wof,
                         stream: stream.clone(),
                     },
                 });

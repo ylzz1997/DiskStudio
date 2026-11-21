@@ -14,6 +14,7 @@ mod raid_parity;
 pub mod storage_spaces;
 pub mod table_check;
 pub mod virtual_raid;
+pub mod wof;
 pub use image::parse_image;
 use serde::{Deserialize, Serialize};
 

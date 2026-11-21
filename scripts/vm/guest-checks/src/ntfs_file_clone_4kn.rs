@@ -86,6 +86,10 @@ fn profile() -> Result<(), String> {
 }
 
 fn witness_root() -> Result<Dir, String> {
+    witness_volume().map(|(root, _)| root)
+}
+
+pub(in super::super) fn witness_volume() -> Result<(Dir, PathBuf), String> {
     let part = reallocation_checks::metadata_partition(
         A,
         Some(WITNESS_LABEL),
@@ -101,7 +105,7 @@ fn witness_root() -> Result<Dir, String> {
         return Err("Expected exactly one A witness volume".into());
     };
     let path = PathBuf::from(format!("{letter}:\\"));
-    let root = Dir::open_ambient_dir(path, cap_std::ambient_authority()).map_err(err)?;
+    let root = Dir::open_ambient_dir(&path, cap_std::ambient_authority()).map_err(err)?;
     data_windows::file_location(&root.try_clone().map_err(err)?.into_std_file())?
         .confirm_partition(
             &selection.target,
@@ -109,7 +113,7 @@ fn witness_root() -> Result<Dir, String> {
             volume,
             (bound.disk.number, WITNESS_OFFSET, WITNESS_SIZE),
         )?;
-    Ok(root)
+    Ok((root, path))
 }
 
 fn read_record<T: serde::de::DeserializeOwned>(dir: &Dir, name: &str) -> Result<T, String> {

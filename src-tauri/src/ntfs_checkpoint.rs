@@ -17,6 +17,8 @@ pub struct Record {
     link: Name,
     compression: Option<[u8; 32]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    wof: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     stream: Option<crate::ntfs_streams::Identity>,
     size: u64,
     deleted: bool,
@@ -33,6 +35,7 @@ impl Record {
             sequence,
             link,
             compression,
+            wof,
             stream,
         } = &c.locator
         else {
@@ -43,6 +46,7 @@ impl Record {
             sequence: *sequence,
             link: link.clone(),
             compression: *compression,
+            wof: *wof,
             stream: stream.clone(),
             size: c.size,
             deleted: c.deleted,
@@ -66,6 +70,9 @@ impl Record {
             if self.compression.is_some() {
                 return Err("数据流保存身份冲突".into());
             }
+        }
+        if self.wof.is_some() && (self.compression.is_some() || self.stream.is_some()) {
+            return Err("NTFS WOF 保存身份冲突。".into());
         }
         self.metadata.validate_snapshot()?;
         if self.record >= cursor.next
@@ -99,6 +106,8 @@ impl Record {
             deleted: self.deleted,
             method: if self.stream.is_some() {
                 "NTFS 命名数据流"
+            } else if self.wof.is_some() {
+                "NTFS WOF 压缩文件"
             } else {
                 "NTFS 文件表"
             }
@@ -120,6 +129,7 @@ impl Record {
                 sequence: self.sequence,
                 link: self.link.clone(),
                 compression: self.compression,
+                wof: self.wof,
                 stream: self.stream.clone(),
             },
         })

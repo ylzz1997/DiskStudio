@@ -1,5 +1,6 @@
 //! A bounded, read-only view that substitutes verified copies in memory.
 use super::ntfs_reconstruct as ntfs;
+use crate::ext_recovery::reconstruct as ext;
 use crate::fat_recovery::reconstruct as fat;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::AtomicBool;
@@ -8,10 +9,24 @@ use std::sync::atomic::AtomicBool;
 pub(crate) enum Proof {
     Ntfs(ntfs::Proof),
     Fat(fat::Proof),
+    Ext(ext::Proof),
 }
 
 impl Proof {
-    pub(crate) fn open<R: Read + Seek>(
+    pub(crate) fn open<R: Read + Seek + 'static>(
+        mut reader: R,
+        sector: u64,
+        cancel: &AtomicBool,
+    ) -> Result<(Reader<R>, Self), String> {
+        if let Some(evidence) = ext::inspect(&mut reader, sector, cancel)? {
+            return evidence
+                .open(reader, sector, cancel)
+                .map(|(reader, proof)| (reader, Self::Ext(proof)));
+        }
+        Self::open_boot(reader, sector, cancel)
+    }
+
+    pub(crate) fn open_boot<R: Read + Seek>(
         mut reader: R,
         sector: u64,
         cancel: &AtomicBool,
@@ -23,7 +38,7 @@ impl Proof {
         ntfs::open(reader, sector, cancel).map(|(reader, proof)| (reader, Self::Ntfs(proof)))
     }
 
-    pub(crate) fn reopen<R: Read + Seek>(
+    pub(crate) fn reopen<R: Read + Seek + 'static>(
         &self,
         reader: R,
         cancel: &AtomicBool,
@@ -31,8 +46,26 @@ impl Proof {
         let sector = match self {
             Self::Ntfs(proof) => proof.sector_size,
             Self::Fat(proof) => proof.sector_size,
+            Self::Ext(proof) => proof.sector_size,
         };
         let (reader, observed) = Self::open(reader, sector, cancel)?;
+        if observed != *self {
+            return Err("文件视图的重建依据已变化，请重新读取。".into());
+        }
+        Ok(reader)
+    }
+
+    pub(crate) fn reopen_boot<R: Read + Seek>(
+        &self,
+        reader: R,
+        cancel: &AtomicBool,
+    ) -> Result<Reader<R>, String> {
+        let sector = match self {
+            Self::Ntfs(proof) => proof.sector_size,
+            Self::Fat(proof) => proof.sector_size,
+            Self::Ext(_) => return Err("当前候选没有备用引导凭据。".into()),
+        };
+        let (reader, observed) = Self::open_boot(reader, sector, cancel)?;
         if observed != *self {
             return Err("文件视图的重建依据已变化，请重新读取。".into());
         }
@@ -50,6 +83,7 @@ impl Proof {
                     fat::Format::ExFat => "已采用 exFAT 备用引导区。",
                 })
                 .to_owned(),
+            Self::Ext(_) => locale.text("已采用 Ext4 备用超级块。").to_owned(),
         }
     }
 }

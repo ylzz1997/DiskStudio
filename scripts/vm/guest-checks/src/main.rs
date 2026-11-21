@@ -46,6 +46,7 @@ mod ext_copy_checks;
 mod signature_scope_checks;
 #[path = "../../../../src-tauri/src/ext_recovery.rs"]
 mod ext_recovery;
+mod ext_reconstruct_checks;
 mod ext_resume_checks;
 #[path = "../../../../src-tauri/src/extfs.rs"]
 mod extfs;
@@ -115,6 +116,8 @@ mod ntfs_stream_checks;
 mod ntfs_stream_evidence;
 #[path = "../../../../src-tauri/src/ntfs_streams.rs"]
 mod ntfs_streams;
+#[path = "../../../../src-tauri/src/ntfs_wof.rs"]
+mod ntfs_wof;
 #[path = "../../../../src-tauri/src/partition_attributes.rs"]
 mod partition_attributes;
 #[path = "../../../../src-tauri/src/partition_move.rs"]
@@ -162,6 +165,7 @@ mod surface_scan;
 #[path = "../../../../src-tauri/src/table_archive.rs"]
 mod table_archive;
 mod table_mbr_checks;
+mod ntfs_wof_recovery_checks;
 #[path = "../../../../src-tauri/src/table_restore.rs"]
 mod table_restore;
 #[path = "../../../../src-tauri/src/used_space.rs"]
@@ -671,6 +675,8 @@ fn main() {
                 | "Table-MBR-4Kn-Prepare"
                 | "Table-MBR-4Kn-Verify"
                 | "Table-MBR-4Kn-Record"
+                | "Ntfs-Wof-Recovery-4Kn-Baseline"
+                | "Ntfs-Wof-Recovery-4Kn-Verify"
                 | "Surface-Refinement-4Kn-Verify"
                 | "Surface-Refinement-4Kn-Inspect"
                 | "Surface-Refinement-4Kn-Prepare"
@@ -852,6 +858,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
         Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
         Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),
+        Some("Ntfs-Wof-Recovery-4Kn-Baseline") => ntfs_wof_recovery_checks::baseline(),
+        Some("Ntfs-Wof-Recovery-4Kn-Verify") => ntfs_wof_recovery_checks::verify(),
         Some("Surface-Refinement-4Kn-Verify") => sector_copy_checks::verify_surface_refinement(),
         Some("Surface-Refinement-4Kn-Inspect") => sector_copy_checks::inspect_surface_refinement(),
         Some("Surface-Refinement-4Kn-Prepare") => sector_copy_checks::prepare_surface_refinement(),
@@ -1197,6 +1205,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Ntfs-Reconstruct-Verify") => ntfs_reconstruction_checks::verify(),
         Some("Fat-Reconstruct-Prepare") => fat_reconstruction_checks::prepare(),
         Some("Fat-Reconstruct-Verify") => fat_reconstruction_checks::verify(),
+        Some("Ext-Reconstruct-Prepare") => ext_reconstruct_checks::prepare(),
+        Some("Ext-Reconstruct-Verify") => ext_reconstruct_checks::verify(),
         Some("Lost-Backup-Boot-Prepare") => lost_backup_boot_checks::prepare(),
         Some("Lost-Backup-Boot-Verify") => lost_backup_boot_checks::verify(),
         Some("BitLocker-Marker-Prepare") => bitlocker_checks::prepare(),

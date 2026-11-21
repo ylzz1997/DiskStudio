@@ -317,6 +317,7 @@ mod tests {
                 record: 8491,
                 sequence: 7,
                 compression: None,
+                wof: None,
                 stream: None,
             },
         }

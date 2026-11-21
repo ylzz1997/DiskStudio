@@ -59,6 +59,7 @@ pub enum Locator {
         sequence: u16,
         link: crate::ntfs_names::Name,
         compression: Option<[u8; 32]>,
+        wof: Option<[u8; 32]>,
         stream: Option<crate::ntfs_streams::Identity>,
     },
     Signature {
@@ -299,6 +300,7 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
             sequence,
             link,
             compression,
+            wof,
             stream,
         } => {
             let ntfs = Ntfs::new(reader).map_err(err)?;
@@ -313,6 +315,18 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
                 || (!file.flags().contains(NtfsFileFlags::IN_USE)) != c.deleted
             {
                 return Err("文件记录已被复用或状态已变化，请重新扫描。".into());
+            }
+            if let Some(signature) = wof {
+                if compression.is_some() || stream.is_some() {
+                    return Err("NTFS WOF 候选身份冲突。".into());
+                }
+                let plan = crate::ntfs_wof::Plan::read(reader, &file)?;
+                if plan.size() != c.size || &plan.signature != signature {
+                    return Err("NTFS WOF 文件属性或卷身份已变化，请重新扫描。".into());
+                }
+                metadata = crate::file_metadata::ntfs(&file);
+                return plan.extract(reader, &file, out, limit, tick)
+                    .map(|bytes| Extraction { bytes, metadata });
             }
             if let Some(stream) = stream {
                 if compression.is_some() {

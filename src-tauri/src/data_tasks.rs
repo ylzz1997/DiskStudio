@@ -445,6 +445,8 @@ enum RecoveryReaders {
     #[cfg(windows)]
     ReconstructedNtfs(Box<dyn backup_archive::Source>),
     #[cfg(windows)]
+    ReconstructedExt(Box<dyn backup_archive::Source>),
+    #[cfg(windows)]
     Btrfs {
         readers: Vec<Box<dyn backup_archive::Source>>,
         access: BtrfsRead,
@@ -480,6 +482,7 @@ impl RecoveryReaders {
         match proof {
             view::Proof::Ntfs(_) => Self::ReconstructedNtfs(reader),
             view::Proof::Fat(_) => Self::Single(reader),
+            view::Proof::Ext(_) => Self::ReconstructedExt(reader),
         }
     }
 
@@ -500,6 +503,10 @@ impl RecoveryReaders {
                 crate::ntfs_scan::scan_reconstructed(&mut reader, mode, tick, found, directory)
             }
             #[cfg(windows)]
+            Self::ReconstructedExt(reader) => {
+                crate::ext_recovery::scan(reader, mode, cancel, tick, found, directory)
+            }
+            #[cfg(windows)]
             Self::Btrfs { readers, access } => {
                 let volume = open_btrfs(readers, access, &cancel)?;
                 crate::btrfs_recovery::scan_volume(volume, mode, &cancel, tick, found, directory)
@@ -517,7 +524,7 @@ impl RecoveryReaders {
         tick: impl FnMut(u64) -> Result<(), String>,
     ) -> Result<recovery::Extraction, String> {
         match self {
-            Self::Single(reader) | Self::ReconstructedNtfs(reader) => {
+            Self::Single(reader) | Self::ReconstructedNtfs(reader) | Self::ReconstructedExt(reader) => {
                 recovery::extract_owned_with_metadata(reader, candidate, out, limit, cancel, tick)
             }
             Self::Btrfs { readers, access } => {
@@ -542,7 +549,7 @@ impl RecoveryReaders {
         cancel: Arc<AtomicBool>,
     ) -> Result<crate::file_metadata::Metadata, String> {
         match self {
-            Self::Single(reader) | Self::ReconstructedNtfs(reader) => crate::directory_metadata::read(reader, directory, cancel),
+            Self::Single(reader) | Self::ReconstructedNtfs(reader) | Self::ReconstructedExt(reader) => crate::directory_metadata::read(reader, directory, cancel),
             Self::Btrfs { readers, access } => {
                 let Some(crate::directory_metadata::Proof::Btrfs(location)) =
                     directory.metadata.directory_proof.as_ref()
@@ -2530,6 +2537,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         match proof {
                             view::Proof::Ntfs(proof) => export.ntfs_reconstruction = Some(proof.clone()),
                             view::Proof::Fat(proof) => export.fat_reconstruction = Some(proof.clone()),
+                            view::Proof::Ext(proof) => export.ext_reconstruction = Some(proof.clone()),
                         }
                     }
                     if let ScanSource::Backup { opened, partition } = source.original() {

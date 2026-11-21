@@ -92,7 +92,7 @@ pub(super) fn probe<R: Read + Seek>(
     };
     let region = Region::for_metadata(&mut evidence, anchor.start, anchor.size)
         .map_err(|e| e.to_string())?;
-    let checked = view::Proof::open(region, sector, cancel).map(|(_, proof)| proof);
+    let checked = view::Proof::open_boot(region, sector, cancel).map(|(_, proof)| proof);
     if let Some(message) = evidence.read_error {
         return Err(message);
     }

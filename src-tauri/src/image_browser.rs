@@ -249,7 +249,7 @@ impl Browser {
     }
     pub fn reader(&self, id: u32) -> Result<Region<Box<dyn Source>>, String> {
         let part = self.part(id)?;
-        Region::new(self.logical_reader()?, part.start, part.size).map_err(|e| e.to_string())
+        Region::for_image_files(self.logical_reader()?, part.start, part.size).map_err(|e| e.to_string())
     }
     pub fn readers(&self, ids: &[u32]) -> Result<Vec<Region<Box<dyn Source>>>, String> {
         let parts = ids

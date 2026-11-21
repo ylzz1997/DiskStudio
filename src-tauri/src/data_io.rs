@@ -1,5 +1,6 @@
 //! Bounded, aligned reads and verified streaming copies. No device discovery here.
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
@@ -8,20 +9,32 @@ pub struct Region<R> {
     start: u64,
     len: u64,
     pos: u64,
-    cache_start: u64,
-    cache: Vec<u8>,
-    valid: usize,
+    window_size: usize,
+    max_windows: usize,
+    windows: VecDeque<Window>,
+}
+struct Window {
+    start: u64,
+    bytes: Vec<u8>,
 }
 impl<R: Read + Seek> Region<R> {
     pub fn new(inner: R, start: u64, len: u64) -> io::Result<Self> {
-        Self::with_cache(inner, start, len, 1024 * 1024)
+        Self::with_cache(inner, start, len, 1024 * 1024, 1)
     }
 
     pub(crate) fn for_metadata(inner: R, start: u64, len: u64) -> io::Result<Self> {
-        Self::with_cache(inner, start, len, 4096)
+        Self::with_cache(inner, start, len, 4096, 1)
     }
 
-    fn with_cache(inner: R, start: u64, len: u64, cache_size: usize) -> io::Result<Self> {
+    pub(crate) fn for_image_files(inner: R, start: u64, len: u64) -> io::Result<Self> {
+        // Directory lookups alternate among indexes, inodes and allocation
+        // maps. Preserve their windows without charging the bridge repeatedly.
+        Self::with_cache(inner, start, len, 1024 * 1024, 8)
+    }
+
+    fn with_cache(
+        inner: R, start: u64, len: u64, window_size: usize, max_windows: usize,
+    ) -> io::Result<Self> {
         if start.checked_add(len).is_none() || len == 0 || start % 512 != 0 || len % 512 != 0 {
             return Err(io::Error::other("Invalid aligned source range"));
         }
@@ -30,9 +43,9 @@ impl<R: Read + Seek> Region<R> {
             start,
             len,
             pos: 0,
-            cache_start: u64::MAX,
-            cache: vec![0; cache_size],
-            valid: 0,
+            window_size,
+            max_windows,
+            windows: VecDeque::new(),
         })
     }
 }
@@ -41,24 +54,27 @@ impl<R: Read + Seek> Read for Region<R> {
         if self.pos >= self.len || out.is_empty() {
             return Ok(0);
         }
-        if self.cache_start == u64::MAX
-            || self.pos < self.cache_start
-            || self.pos >= self.cache_start + self.valid as u64
-        {
-            let cache_start = self.pos / self.cache.len() as u64 * self.cache.len() as u64;
-            let valid = (self.len - cache_start).min(self.cache.len() as u64) as usize;
-            self.cache_start = u64::MAX;
-            self.valid = 0;
-            self.inner.seek(SeekFrom::Start(self.start + cache_start))?;
-            self.inner.read_exact(&mut self.cache[..valid]).map_err(|e| {
-                io::Error::new(e.kind(), format!("读取所选范围失败：相对偏移 {cache_start}，请求 {valid} 字节，范围 {} 字节：{e}", self.len))
+        let start = self.pos / self.window_size as u64 * self.window_size as u64;
+        let window = if let Some(i) = self.windows.iter().position(|w| w.start == start && !w.bytes.is_empty()) {
+            self.windows.remove(i).unwrap()
+        } else {
+            let mut bytes = if self.windows.len() == self.max_windows {
+                self.windows.pop_back().unwrap().bytes
+            } else {
+                Vec::new()
+            };
+            let valid = (self.len - start).min(self.window_size as u64) as usize;
+            bytes.resize(valid, 0);
+            self.inner.seek(SeekFrom::Start(self.start + start))?;
+            self.inner.read_exact(&mut bytes).map_err(|e| {
+                io::Error::new(e.kind(), format!("读取所选范围失败：相对偏移 {start}，请求 {valid} 字节，范围 {} 字节：{e}", self.len))
             })?;
-            self.cache_start = cache_start;
-            self.valid = valid;
-        }
-        let offset = (self.pos - self.cache_start) as usize;
-        let n = out.len().min(self.valid - offset);
-        out[..n].copy_from_slice(&self.cache[offset..offset + n]);
+            Window { start, bytes }
+        };
+        let offset = (self.pos - start) as usize;
+        let n = out.len().min(window.bytes.len() - offset);
+        out[..n].copy_from_slice(&window.bytes[offset..offset + n]);
+        self.windows.push_front(window);
         self.pos += n as u64;
         Ok(n)
     }
@@ -88,8 +104,9 @@ impl Write for Region<File> {
         if self.pos % 512 != 0 || end % 512 != 0 {
             return Err(io::Error::other("Unaligned write in selected range"));
         }
-        self.cache_start = u64::MAX;
-        self.valid = 0;
+        for window in &mut self.windows {
+            window.bytes.clear();
+        }
         self.inner.seek(SeekFrom::Start(self.start + self.pos))?;
         self.inner.write_all(bytes)?;
         self.pos = end;

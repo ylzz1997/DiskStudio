@@ -199,6 +199,28 @@ struct Ext4Inner {
 pub struct Ext4(Rc<Ext4Inner>);
 
 impl Ext4 {
+    /// Read the first 1024 bytes of this filesystem's internal journal.
+    /// The caller can inspect the header without replaying the journal.
+    pub fn internal_journal_header(
+        &self,
+        inode_number: u32,
+        data: &mut [u8; 1024],
+    ) -> Result<Metadata, Ext4Error> {
+        let index = crate::inode::InodeIndex::new(inode_number).ok_or(CorruptKind::JournalInode)?;
+        let inode = crate::inode::Inode::read(self, index)?;
+        if !inode.metadata.file_type.is_regular_file() {
+            return Err(CorruptKind::JournalInode.into());
+        }
+        let block = crate::iters::file_blocks::FileBlocks::new(self.clone(), &inode)?
+            .next()
+            .ok_or(CorruptKind::JournalSize)??;
+        if block == 0 {
+            return Err(CorruptKind::JournalSize.into());
+        }
+        self.read_from_block(block, 0, data)?;
+        Ok(inode.metadata)
+    }
+
     /// Load an `Ext4` instance from the given `reader`.
     ///
     /// This reads and validates the superblock, block group

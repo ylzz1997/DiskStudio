@@ -167,6 +167,7 @@ mod tests {
             virtual_raid_source: None,
             ntfs_reconstruction: None,
             fat_reconstruction: None,
+            ext_reconstruction: None,
             lvm_degraded_raid: false,
         };
         (parent, destination, plan)

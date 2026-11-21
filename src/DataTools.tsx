@@ -946,7 +946,7 @@ export function DataTools({
                       {
                         id: "reconstruct",
                         title: t("重建文件视图"),
-                        body: t("使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。"),
+                        body: t("使用 NTFS、FAT32、exFAT 或 Ext4 的备用元数据读取文件，提取前重新核对。"),
                       },
                       {
                         id: "signatures",
@@ -995,7 +995,7 @@ export function DataTools({
                               "NTFS、FAT、exFAT 支持现存文件和删除候选。Btrfs 可从只读快照或保留事务查找删除候选。Ext2/3/4 支持干净卸载卷的现存文件。",
                             )
                           : t(
-                              "支持 NTFS（含常规 LZNT1 压缩与普通文件的命名数据流）、FAT12/16/32 和 exFAT。命名数据流单独导出为普通文件；EFS、WOF 与云端占位文件暂不支持，删除内容可能已被覆盖。",
+                              "支持 NTFS、FAT12/16/32 和 exFAT。NTFS 支持 LZNT1、卷内 WOF 压缩和普通文件的命名数据流。命名流单独导出。EFS、WIM 外部支撑文件和云端占位文件暂不支持。删除内容可能已被覆盖。",
                             ) +
                             " " +
                             t(

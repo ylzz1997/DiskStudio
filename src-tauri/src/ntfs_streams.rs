@@ -372,6 +372,108 @@ struct Plan {
     runs: Vec<Run>,
     content: Content,
 }
+
+pub(crate) struct WofStreams {
+    pub size: u64,
+    pub stored: u64,
+    pub identity: [u8; 32],
+    data: Plan,
+}
+
+impl WofStreams {
+    pub(crate) fn read<R: Read + Seek>(reader: &mut R, file: &NtfsFile<'_>) -> Result<Self, String> {
+        let scope = Scope::CloneReparse;
+        let mut placeholder = Vec::new();
+        let mut backing = Vec::new();
+        for record in records(reader, file, scope)? {
+            match attribute_name(&record.1)? {
+                [] => placeholder.push(record),
+                crate::ntfs_wof::STREAM => backing.push(record),
+                _ => {}
+            }
+        }
+        let invalid = "NTFS WOF 缺少完整的卷内压缩数据流或稀疏占位数据流。";
+        let main = plan(reader, file, &[], &placeholder, scope)?;
+        if u16le(&placeholder[0].1, 12) != SPARSE
+            || main.size == 0
+            || main.initialized != main.size
+            || !matches!(main.content, Content::Plain)
+            || main.runs.iter().any(|r| r.physical.is_some())
+        {
+            return Err(invalid.into());
+        }
+        let name = crate::ntfs_wof::STREAM;
+        let data = plan(reader, file, name, &backing, scope)?;
+        if u16le(&backing[0].1, 12) != 0
+            || data.size == 0
+            || data.initialized != data.size
+            || !matches!(data.content, Content::Plain | Content::Resident(_))
+        {
+            return Err(invalid.into());
+        }
+        let mut hash = Sha256::new();
+        hash.update(signature(file, &[], &placeholder));
+        hash.update(signature(file, name, &backing));
+        Ok(Self {
+            size: main.size,
+            stored: data.size,
+            identity: hash.finalize().into(),
+            data,
+        })
+    }
+
+    pub(crate) fn verify_allocation<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        file: &NtfsFile<'_>,
+        tick: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        allocation(reader, file, &self.data.runs, tick)
+    }
+
+    pub(crate) fn read_at(
+        &self,
+        reader: &mut (impl Read + Seek),
+        offset: u64,
+        mut output: &mut [u8],
+    ) -> Result<(), String> {
+        let invalid = "NTFS WOF 压缩流读取范围无效。";
+        if offset
+            .checked_add(output.len() as u64)
+            .is_none_or(|end| end > self.stored)
+        {
+            return Err(invalid.into());
+        }
+        if let Content::Resident(value) = &self.data.content {
+            let start = offset as usize;
+            output.copy_from_slice(&value[start..start + output.len()]);
+            return Ok(());
+        }
+        let mut position = offset;
+        let first = self
+            .data
+            .runs
+            .partition_point(|run| run.start + run.bytes <= position);
+        for run in &self.data.runs[first..] {
+            if output.is_empty() {
+                break;
+            }
+            let within = position.checked_sub(run.start).ok_or(invalid)?;
+            let count = (run.bytes - within).min(output.len() as u64) as usize;
+            let start = run.physical.ok_or(invalid)? + within;
+            reader.seek(SeekFrom::Start(start)).map_err(err)?;
+            let (part, rest) = output.split_at_mut(count);
+            reader.read_exact(part).map_err(err)?;
+            output = rest;
+            position += count as u64;
+        }
+        if !output.is_empty() {
+            return Err(invalid.into());
+        }
+        Ok(())
+    }
+}
+
 fn plan<R: Read + Seek>(
     reader: &mut R,
     file: &NtfsFile<'_>,

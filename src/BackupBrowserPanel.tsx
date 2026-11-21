@@ -167,7 +167,7 @@ export function BackupBrowserPanel({
               disabled={busy || !available || partition === ""}
               onClick={() => onReconstruct(Number(partition))}
               title={t(
-                "使用 NTFS、FAT32 或 exFAT 的备用元数据读取文件，提取前重新核对。",
+                "使用 NTFS、FAT32、exFAT 或 Ext4 的备用元数据读取文件，提取前重新核对。",
               )}
             >
               {t("重建文件视图")}

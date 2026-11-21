@@ -15,6 +15,8 @@ The tests serve the entire target from synthetic memory. A separate Rust parser 
 
 To exercise real compressed chunks, use the checksum-verified wimlib 1.14.5 Windows library with `wof-fixture.py generate DLL CORPUS`. Use a new corpus directory inside `.vm`. Set `DISKSTUDIO_TEST_WOF_CORPUS` to that directory and run the same engine tests. Then run `wof-fixture.py verify DLL CORPUS` to decompress streams extracted from both cloned geometries and compare the original logical bytes. The 4Kn test also saves the 96 MiB source image as `Ntfs-Wof-Source.raw` for the isolated disk acceptance. [wimlib release and SHA-256 checksums](https://www.wimlib.net/forums/viewtopic.php?t=1133)
 
+The checked-in `tests/fixtures/ntfs-wof-0.bin` through `ntfs-wof-3.bin` are the synthetic backing streams from that generator. Core tests compare the decoded SHA-256 for all four algorithms. The engine test also scans the formatted and cloned volumes, reloads their saved candidates, and compares preview and extracted bytes with the generator's original payload.
+
 ## Pipe protocol
 
 All integer fields are little endian. The parent starts with the four-byte magic `DSN6`, a 32-bit logical sector size, three 64-bit values for the volume length in bytes, partition start LBA and volume serial, and a 32-bit cluster size in bytes. The parent supplies an initially zeroed target view. Formatting writes the new filesystem structures.

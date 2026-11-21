@@ -14,8 +14,7 @@ pub(crate) const EFS: u32 = NtfsAttributeType::LoggedUtilityStream as u32;
 pub(crate) const EFS_NAME: &[u8] = b"$\0E\0F\0S\0";
 pub(crate) const EFS_LIMIT: u64 = 256 * 1024;
 pub(crate) const REPARSE_LIMIT: u64 = 16 * 1024;
-pub(crate) const WOF_TAG: u32 = 0x80000017;
-pub(crate) const WOF_STREAM: &[u8] = b"W\0o\0f\0C\0o\0m\0p\0r\0e\0s\0s\0e\0d\0D\0a\0t\0a\0";
+pub(crate) use crate::ntfs_wof::{wof_chunk_size, WofOffsets, STREAM as WOF_STREAM, TAG as WOF_TAG};
 const EA_INFO: u32 = NtfsAttributeType::EAInformation as u32;
 const EA: u32 = NtfsAttributeType::EA as u32;
 
@@ -130,118 +129,6 @@ pub(crate) fn reparse_tag(data: &[u8], directory: bool) -> Result<u32, String> {
         }
     }
     Ok(tag)
-}
-
-pub(crate) fn wof_chunk_size(data: &[u8]) -> Result<u64, String> {
-    let invalid = "NTFS WOF 压缩的提供程序、版本或算法不受支持。";
-    if !matches!(data.len(), 24 | 28)
-        || data[..4] != WOF_TAG.to_le_bytes()
-        || data[4..8] != ((data.len() - 8) as u32).to_le_bytes()
-        || data[8..12] != 1u32.to_le_bytes()
-        || data[12..16] != 2u32.to_le_bytes()
-        || data[16..20] != 1u32.to_le_bytes()
-        || data.len() == 28 && data[24..28] != [0; 4]
-    {
-        return Err(invalid.into());
-    }
-    match u32::from_le_bytes(data[20..24].try_into().unwrap()) {
-        0 => Ok(4096),
-        1 => Ok(32768),
-        2 => Ok(8192),
-        3 => Ok(16384),
-        _ => Err(invalid.into()),
-    }
-}
-
-/// Check WOF's offset table in the same pass that hashes the stored stream.
-/// The first chunk starts immediately after the table. The last ends at EOF.
-pub(crate) struct WofOffsets {
-    remaining: u64,
-    width: usize,
-    chunk: u64,
-    last: u64,
-    payload: u64,
-    previous: u64,
-    pending: [u8; 8],
-    filled: usize,
-}
-
-impl WofOffsets {
-    pub(crate) fn new(size: u64, stored: u64, chunk: u64) -> Result<Self, String> {
-        let invalid = "NTFS WOF 压缩流的区块表长度无效。";
-        let remaining = size.div_ceil(chunk).checked_sub(1).ok_or(invalid)?;
-        let width = if size < 1 << 32 { 4 } else { 8 };
-        let payload = stored
-            .checked_sub(remaining * width as u64)
-            .ok_or(invalid)?;
-        if payload <= remaining || payload > size {
-            return Err(invalid.into());
-        }
-        Ok(Self {
-            remaining,
-            width,
-            chunk,
-            last: (size - 1) % chunk + 1,
-            payload,
-            previous: 0,
-            pending: [0; 8],
-            filled: 0,
-        })
-    }
-
-    pub(crate) fn consume(&mut self, mut data: &[u8]) -> std::io::Result<()> {
-        while self.remaining != 0 && !data.is_empty() {
-            let count = (self.width - self.filled).min(data.len());
-            self.pending[self.filled..self.filled + count].copy_from_slice(&data[..count]);
-            data = &data[count..];
-            self.filled += count;
-            if self.filled == self.width {
-                let offset = u64::from_le_bytes(self.pending);
-                if offset <= self.previous
-                    || offset >= self.payload
-                    || offset - self.previous > self.chunk
-                {
-                    return Err(std::io::Error::other("NTFS WOF 压缩流的区块偏移无效。"));
-                }
-                self.previous = offset;
-                self.filled = 0;
-                self.remaining -= 1;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn finish(self) -> Result<(), String> {
-        if self.remaining != 0 || self.payload - self.previous > self.last {
-            return Err("NTFS WOF 压缩流末端区块的范围无效。".into());
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn wof_offsets_check_monotonic_bounds_and_partial_reads() {
-    let mut offsets = WofOffsets::new(8200, 901, 4096).unwrap();
-    let data = [400u32.to_le_bytes(), 887u32.to_le_bytes()].concat();
-    for piece in data.chunks(3) {
-        offsets.consume(piece).unwrap();
-    }
-    offsets.finish().unwrap();
-
-    let mut offsets = WofOffsets::new(8200, 901, 4096).unwrap();
-    offsets.consume(&400u32.to_le_bytes()).unwrap();
-    assert!(offsets.consume(&399u32.to_le_bytes()).is_err());
-    let mut offsets = WofOffsets::new(8200, 901, 4096).unwrap();
-    offsets.consume(&400u32.to_le_bytes()).unwrap();
-    offsets.consume(&884u32.to_le_bytes()).unwrap();
-    assert!(offsets.finish().is_err());
-
-    let count = (1u64 << 32) / 32768 - 1;
-    let mut wide = WofOffsets::new(1 << 32, count * 8 + 524288, 32768).unwrap();
-    wide.consume(&400u64.to_le_bytes()).unwrap();
-    assert_eq!(wide.remaining, count - 1);
-    assert_eq!(wide.previous, 400);
 }
 
 pub(crate) fn short_name_links<'a>(

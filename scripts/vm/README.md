@@ -100,6 +100,8 @@ RAID10 far 和 offset 验收使用 Ubuntu 的 `seed-lvm-raid10-layouts-4kn` 和 
 
 FAT32 和 exFAT 备用引导验收使用 `build-guest-checks.ps1 -FatReconstruction` 和默认 512 字节配置。只读工具光盘包含匹配的正式程序、`Fat-Reconstruct-Prepare.exe` 和 `Fat-Reconstruct-Verify.exe`。Prepare 在已验证的 A/2 卷上新建 `DS-FAT-Reconstruction` 和三个普通镜像文件。以 512 字节分区镜像分别打开 `damaged-fat32.img` 和 `damaged-exfat.img`，在「重建文件视图」预览 `FATVIEW.TXT` 和 `exfat-view.txt` 并核对文件字节。打开 `conflicting-exfat.img` 验证主备身份冲突会停止重建。Verify 独立比较三个完整源文件、两盘 GPT、客体系统盘布局及 B 的在线和只读状态。
 
+Ext4 备用超级块验收使用 `build-guest-checks.ps1 -ExtReconstruction` 和默认 512 字节配置。核对来宾身份与只读光盘上的正式程序摘要后，Prepare 在 A/2 创建普通测试镜像，在经过核对的 B 盘 NTFS 卷建立输出目录。以 512 字节分区镜像打开 `damaged-ext4.img`，运行「重建文件视图」，预览 `small_file` 并以平铺方式将它导出到 B 的 `DS-Ext-Reconstruction`。Verify 独立比对原始文件内容、导出摘要、清单中的备用块组及位置、完整源镜像与三块盘的布局。
+
 丢失分区的备用引导验收使用 `build-guest-checks.ps1 -LostBackupBoot` 和默认 512 字节配置。只读光盘包含同一正式程序、`Lost-Backup-Boot-Prepare.exe` 和 `Lost-Backup-Boot-Verify.exe`。Prepare 核对两盘 GPT、B 的原生布局和准确的全零空闲区，再锁定卷和脱机 B。仅在 13.5 GiB 起点的专用 48 MiB 范围写入三个未登记的损坏卷，A/2 上的 `DS-LostBackupBoot` 保存基线和导出文件。在正式程序中选 B，按 Prepare 报告的 LBA 和数量搜索。分别打开 NTFS、FAT32 和 exFAT 候选，并核对「仅浏览与提取」及预览。将 `FATVIEW.TXT` 和 `exfat-view.txt` 各导出一次至 A 的夹具目录。Verify 比较两个文件的字节、SHA-256 和备用引导清单，并复核 B 的完整夹具、填充区、相邻扇区、脱机状态、两盘 GPT 及来宾系统盘布局。
 
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
@@ -585,6 +587,14 @@ NTFS 用例使用 `-FileCloneNtfs`。Prepare 在核对两盘布局和专用空�
 初次准备在镜像写入前停止时，`-FileCloneNtfsWofImageContinue` 仅在原 A 分区及 B 计划范围仍全零、布局和相邻扇区完整时继续。镜像写入并读回完成、Windows 报告联机成功而卷关联尚未通过时，`-FileCloneNtfsWofImageAfterOnline` 重新核对 A 的当前卷身份、四种压缩流及 B 的空白范围，随后准备 B，对应的两个 Settled 入口保存基线和执行后验。
 
 EFS 用例使用 `-FileCloneNtfsEfs`。Prepare 在新建的 `DSNT4KEFS` 上调用 Windows EFS API 加密测试文件和目录，在同一账户下核对逻辑内容，再准备 B 上的 48 MiB `NT4KEFS`。Baseline 核对加密标志、命名流、密文和 `$EFS` 元数据，记录稳定源分区及布局。使用正式界面执行按文件克隆。Verify 通过脱机读回比较完整密文、元数据、目标分区摘要和布局。
+
+### NTFS WOF 文件恢复验收
+
+使用标准 4Kn 隔离来宾和此前验证的脱机 NTFS 克隆。验收工具按 B 盘上原克隆的起始字节和容量定位分区，现场确认对应 B/10。完成 QMP、完整设备序列号及载荷 SHA-256 核对后，在与当前桌面程序匹配的只读光盘运行 `Ntfs-Wof-Recovery-4Kn-Baseline.exe`。也可运行 `Ntfs-Wof-Recovery-4Kn-Verify.exe Ntfs-Wof-Recovery-4Kn-Baseline`。它确认 B 上的 48 MiB 范围、四个 WOF 样本和 A 上已验证的 128 MiB NTFS 验收卷，并在 A 建立 `DS-WofRecovery` 目录。
+
+在文件恢复页对验收工具确认的分区选择「扫描全部文件」，将进度保存为 `Wof.dsrecover`。重新加载进度，预览样本，再选择四项 WOF 文件并用平面布局导出到 A 的 `DS-WofRecovery`。Verify 独立比较四份文件的逻辑字节、导出摘要、进度里的 WOF 身份、B 源范围和三盘布局。
+
+正式构建 `fcd9b573…` 在 4Kn Windows 来宾用「扫描全部文件」识别现存 WOF 样本，保存并加载进度，预览解压字节，跨盘导出四份共 786,924 字节。独立工具复核全部字节、清单 SHA-256、进度和源盘完整 48 MiB 范围。A/B 和系统盘分区布局保持原样，B 始终脱机且无新增写入。加载后个别历史说明仍使用中文。证据见 `.vm/ntfs-wof-recovery-status.json`。
 
 ### FAT 与 exFAT 不同容量克隆验收
 

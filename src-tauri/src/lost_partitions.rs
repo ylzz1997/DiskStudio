@@ -543,7 +543,7 @@ pub(crate) fn candidate_reader<R: Read + Seek>(
     let mut reader =
         Region::new(reader, candidate.offset, candidate.size).map_err(|e| e.to_string())?;
     if let Some(proof) = candidate.reconstruction() {
-        return proof.reopen(reader, cancel);
+        return proof.reopen_boot(reader, cancel);
     }
     let local = Candidate {
         offset: 0,

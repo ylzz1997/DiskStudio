@@ -58,6 +58,7 @@ mod ntfs_file_clone;
 mod ntfs_names;
 mod ntfs_scan;
 mod ntfs_streams;
+mod ntfs_wof;
 mod partition_attributes;
 #[cfg(any(test, windows))]
 mod partition_move;

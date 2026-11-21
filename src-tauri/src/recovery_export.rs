@@ -157,6 +157,8 @@ pub struct Plan {
     pub(crate) ntfs_reconstruction: Option<crate::recovery::ntfs_reconstruct::Proof>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fat_reconstruction: Option<crate::fat_recovery::reconstruct::Proof>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ext_reconstruction: Option<crate::ext_recovery::reconstruct::Proof>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub lvm_degraded_raid: bool,
 }
@@ -405,6 +407,7 @@ fn plan_with_directories(
         virtual_raid_source: None,
         ntfs_reconstruction: None,
         fat_reconstruction: None,
+        ext_reconstruction: None,
         lvm_degraded_raid: false,
     };
     let mut map = HashMap::from([(ROOT.to_string(), 0)]);
@@ -582,6 +585,8 @@ impl Plan {
             ntfs_reconstruction: Option<&'a crate::recovery::ntfs_reconstruct::Proof>,
             #[serde(skip_serializing_if = "Option::is_none")]
             fat_reconstruction: Option<&'a crate::fat_recovery::reconstruct::Proof>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ext_reconstruction: Option<&'a crate::ext_recovery::reconstruct::Proof>,
             #[serde(skip_serializing_if = "std::ops::Not::not")]
             lvm_degraded_raid: bool,
             completed: bool,
@@ -608,6 +613,7 @@ impl Plan {
             virtual_raid_source: self.virtual_raid_source.as_ref(),
             ntfs_reconstruction: self.ntfs_reconstruction.as_ref(),
             fat_reconstruction: self.fat_reconstruction.as_ref(),
+            ext_reconstruction: self.ext_reconstruction.as_ref(),
             lvm_degraded_raid: self.lvm_degraded_raid,
             saved_files: outcomes.iter().filter(|o| o.saved).count(),
             failed_files: outcomes.iter().filter(|o| !o.saved).count(),

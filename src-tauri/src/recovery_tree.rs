@@ -440,6 +440,7 @@ mod tests {
                 sequence: 1,
                 link: crate::ntfs_names::Name::fixture("文件.PDF"),
                 compression: None,
+                wof: None,
                 stream: None,
             },
         }
