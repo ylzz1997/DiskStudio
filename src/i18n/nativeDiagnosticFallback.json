@@ -372,5 +372,15 @@
   "已取消转换，未写入分区表。": "Conversion was canceled before the partition table write.",
   "此磁盘是存储池成员，不能作为独立磁盘操作。": "This disk belongs to a storage pool and cannot be operated on as a standalone disk.",
   "存储空间不能作为独立物理盘操作。": "This storage space is not available for standalone physical disk operations.",
-  "Windows 返回的存储池对象或关联过多。": "Windows returned too many storage pool objects or associations."
+  "Windows 返回的存储池对象或关联过多。": "Windows returned too many storage pool objects or associations.",
+  "存储空间成员镜像浏览当前仅支持 Windows。": "Browsing Storage Spaces member images currently requires Windows.",
+  "存储空间的成员或分配记录已变化，请重新选择成员镜像。": "Storage Spaces members or allocations changed. Select the member images again.",
+  "请选择有效的存储空间逻辑扇区大小。": "Select a valid Storage Spaces logical sector size.",
+  "所选存储空间当前无法重组。": "The selected storage space cannot be reconstructed.",
+  "此存储空间缺少镜像副本，请明确选择降级读取。": "This storage space is missing a mirror copy. Allow degraded reads explicitly.",
+  "存储空间的逻辑布局超出当前重组支持范围。": "This Storage Spaces logical layout is unsupported for reconstruction.",
+  "存储空间镜像副本内容不一致。": "The Storage Spaces mirror copies disagree.",
+  "请选择 1–64 个 RAW/IMG 成员镜像。": "Select 1–64 RAW/IMG member images.",
+  "请选择 RAW/IMG 成员镜像。": "Select RAW/IMG member images.",
+  "存储空间缓存含待回放的记录或无法确认，请先通过 Windows 核对此空间。": "Storage Spaces has pending cache records or unknown cache state. Check the space in Windows first."
 }

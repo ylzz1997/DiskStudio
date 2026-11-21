@@ -745,3 +745,27 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 运行同一光盘中的 DiskStudio，从「磁盘 → 存储池与存储空间」检查池成员、容量、配置、数据所在成员及 Windows 关联的磁盘。在来宾中用 `storage-spaces-fixture.ps1 -Verify` 独立核对。记录打开面板前后 A/B 读写计数。Windows 空间和池成员继续受独立物理盘操作的保护。
 
 正式构建 `21cdab6a…` 在隔离 4Kn Windows 来宾显示了无池时的空状态。建池后，应用显示两个 16 GiB 成员、已挂接的 1 GiB 固定双副本镜像和未挂接的 1 GiB 精简双列空间。来宾独立核对成员关系、布局和挂接状态。刷新后保留所选空间。镜像可定位到磁盘 3，初始化按钮不可用。未挂接空间没有磁盘跳转。打开已建池面板、切换、刷新及跳转期间，A/B 的 QMP 读写计数均无变化。成员身份冲突和缺失的拒绝行为另由合成测试覆盖。完整证据见 `.vm/storage-spaces-status.json`。
+
+### 存储空间脱机元数据夹具
+
+完成 Windows 存储空间验收并关闭 Windows 来宾后，执行 `node scripts/vm/ubuntu.mjs seed-storage-spaces-metadata-4kn` 和 `node scripts/vm/ubuntu.mjs storage-spaces-metadata-4kn`。Ubuntu 启动前通过 QMP 核对 VM UUID、只读种子和只读 A/B 的文件、容量及访问模式。来宾核对完整 Linux 设备序列号、4Kn 几何和两个未挂载的存储空间成员分区，通过串口记录有限的 GPT 和 SPACEDB 区段及 SHA-256。设备仅以只读方式打开。
+
+用 `node scripts/vm/extract-storage-spaces-fixture.mjs <日志文件名>` 校验并提取串口捕获。把 `DISKSTUDIO_SPACES_CAPTURE` 指向命令报告的 `.vm` 捕获目录，再运行 `cargo test -p disk-core --test storage_spaces_capture windows_mirror_and_thin_offline_metadata -- --ignored`。测试把来宾捕获当作只读字节输入，拒绝读取未捕获的区段。2026-11-21 的夹具校验了双份 GPT、两种池元数据头的 CRC32、两个成员及其一致的数据库、两个已命名的逻辑空间、三个内部分配对象和 20 条分配记录。测试同时拒绝重复成员、损坏的元数据和内容分歧的数据库。证据在 `.vm/storage-spaces-metadata-1795274025487/manifest.json`。
+
+### 存储空间固定镜像逻辑扇区验收
+
+在原 Windows 4Kn 存储空间夹具中，通过 QMP 预检并核对 A/B 序列号、容量、扇区大小及工具光盘后，用 `storage-spaces-fixture.ps1 -Verify` 核对存储池，再执行一次 `storage-spaces-fixture.ps1 -SeedWitness`。脚本复核两个空间确实由 A/B 提供，验证打开的设备是预期的未分区逻辑盘，再写入 18 个跨布局边界的 4 KiB 校验扇区并回读 SHA-256。原始扇区均为空才写入。两个逻辑盘随后保持脱机，精简空间恢复未挂接状态。
+
+关闭 Windows 来宾后，用 `node scripts/vm/ubuntu.mjs seed-storage-spaces-witness-4kn` 和 `node scripts/vm/ubuntu.mjs storage-spaces-witness-4kn` 启动只读采集，使用同一提取脚本得到捕获目录。把 `DISKSTUDIO_SPACES_WITNESS_CAPTURE` 指向该目录，执行 `cargo test -p disk-core --test storage_spaces_capture reconstruct_windows_fixed_mirror_bytes -- --ignored`。
+
+固定镜像的 18 个扇区均在两个成员上独立找到。Rust 按逻辑空间的直接分配记录重组逻辑字节，双盘、仅 A 或仅 B 的摘要均匹配 Windows 的 `e2c8ccaa…`。测试覆盖跨分配边界的连续读取、拒绝分配范围不完整的固定镜像、默认拒绝缺副本，并拒绝内容分歧的副本。用 `seed-storage-spaces-cache-complete-4kn` 和 `storage-spaces-cache-complete-4kn` 采集完整缓存目录，把提取结果设为 `DISKSTUDIO_SPACES_CACHE_CAPTURE` 后再运行同一测试。验收用的固定镜像缓存副本一致，1024 个槽位只有空槽和不含用户数据的控制记录。实现逐槽核对缓存目录，拒绝待回放或无法识别的记录。证据分别在 `.vm/storage-spaces-witness-1795275425251/manifest.json` 和 `.vm/storage-spaces-cache-complete-1795277977962/manifest.json`。
+
+精简空间可用 `seed-storage-spaces-witness-full-4kn` 和 `storage-spaces-witness-full-4kn` 在 Ubuntu 只读扫描两个池成员分区。提取结果后，将 `DISKSTUDIO_SPACES_FULL_CAPTURE` 指向捕获目录，执行 `cargo test -p disk-core --test storage_spaces_capture windows_thin_markers_extend_beyond_direct_allocations -- --ignored`。完整扫描找到精简空间的全部 18 个校验扇区，汇总 SHA-256 与 Windows 的 `8956dc0a…` 一致。逻辑偏移从 512 MiB 起的 6 个扇区位于直接分配范围之外。用 `seed-storage-spaces-internal-4kn` 和 `storage-spaces-internal-4kn` 采集内部记录，将提取路径设为 `DISKSTUDIO_SPACES_INTERNAL_CAPTURE`，运行同一测试文件的 `windows_thin_checkpoint_describes_cached_witnesses`。测试核对 `SPCACHE`、`SPSLOT`、`SPCHECK` 的归属及 CRC，并从检查点定位全部 6 个额外扇区。精简映射与缓存回放尚未实现。证据在 `.vm/storage-spaces-witness-full-1795275716269/manifest.json` 和 `.vm/storage-spaces-internal-1795277104183/manifest.json`。
+
+### 存储空间成员镜像文件恢复
+
+执行 `node scripts/vm/build-storage-spaces-recovery-fixture.mjs <校验扇区捕获目录名> <完整缓存捕获目录名>`。脚本使用真实的 GPT、池数据库和完整干净缓存，在已校验的固定镜像逻辑范围放入合成的 GPT/FAT16 分区，含一个现存文件和一个删除候选。生成的区段描述留在 `.vm`。单独启动 `node scripts/vm/lab.mjs start --4kn --storage-spaces-recovery`，挂载 `make-tools-iso.ps1 -Live -StorageSpacesRecovery` 生成的只读光盘。通过 QMP 和来宾身份、几何、载荷摘要检查后，在来宾只执行一次 `stage-storage-spaces-recovery.ps1`，由独立的 A/B 数据盘分别承载只读打开的成员镜像和导出目录。
+
+运行同一光盘上的正式可执行文件。在「文件恢复」中选择「浏览存储空间成员镜像」，选中 `S:\spaces` 中的两个镜像，打开固定镜像并读取现存文件与删除候选。浏览、预览后导出到 `R:\out`。在来宾执行 `stage-storage-spaces-recovery.ps1 -Verify`，独立复核两份成员镜像的夹具区段、两个导出文件的字节数及 SHA-256。
+
+2026-11-22 的正式构建 `3e8f0d28…` 在隔离 4Kn Windows 来宾打开 1 GiB 固定镜像并识别 64 MiB FAT16 分区，预览 `WITNESS.BIN`，将它和删除候选 `_RASED.BIN` 从 A 盘镜像导出到 B 盘。两个文件分别为 8,233 字节和 5,709 字节，程序回读和来宾独立复核的完整 SHA-256 均匹配。成员镜像夹具区段复核通过，确认到完成期间 A 盘无新增写入。导出清单记录了两个文件的时间或属性保留提示。证据在 `.vm/storage-spaces-recovery-status.json`。

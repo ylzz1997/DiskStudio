@@ -2113,5 +2113,14 @@
   "存储池成员": "Miembros del grupo",
   "热备": "Repuesto activo",
   "已停用": "Retirado",
-  "存有此空间的数据": "Contiene datos de este espacio"
+  "存有此空间的数据": "Contiene datos de este espacio",
+  "浏览存储空间成员镜像": "Explorar imágenes de miembros de Espacios de almacenamiento",
+  "没有可重组的存储空间": "No hay espacios de almacenamiento reconstruibles",
+  "无法重组": "No se puede reconstruir",
+  "存储空间逻辑扇区大小": "Tamaño de sector lógico del espacio de almacenamiento",
+  "允许缺少镜像副本时降级读取": "Permitir lectura degradada si falta una copia del espejo",
+  "打开存储空间": "Abrir espacio de almacenamiento",
+  "关闭存储空间": "Cerrar espacio de almacenamiento",
+  "选择存储空间成员的 RAW/IMG 文件": "Seleccionar archivos RAW/IMG de los miembros de Espacios de almacenamiento",
+  "此存储空间正在降级读取，部分镜像副本不可用。": "El espacio de almacenamiento se lee en modo degradado. Faltan algunas copias del espejo."
 }

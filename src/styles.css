@@ -515,6 +515,12 @@
 .data-panel .section-heading {
   margin-bottom: 19px;
 }
+.recovery-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
 .btrfs-member-selector {
   border: 1px solid var(--line);
   border-radius: 9px;

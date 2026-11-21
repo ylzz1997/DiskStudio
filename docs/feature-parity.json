@@ -580,8 +580,16 @@
     {
       "id": "storage-spaces",
       "status": "in-progress",
-      "detail": "磁盘菜单可只读检查 Windows 报告的存储池、成员盘、虚拟盘配置、数据所在成员和已确认关联的磁盘。要求独立物理盘的操作会拒绝池成员及逻辑空间。21cdab6a 正式构建在隔离 4Kn Windows 来宾验证了空状态、双成员存储池、已挂接的固定双副本镜像及未挂接的精简双列空间。可定位镜像关联的磁盘，未挂接空间不提供跳转。面板读取、刷新和跳转期间 A/B 无新增读写。脱机成员的独立重组、逻辑空间恢复、备份与管理仍待实现。",
-      "evidence": ".vm/storage-spaces-status.json"
+      "detail": "磁盘菜单可只读检查 Windows 报告的存储池、成员盘、虚拟盘配置、数据所在成员和已确认关联的磁盘。要求独立物理盘的操作会拒绝池成员及逻辑空间。21cdab6a 正式构建在隔离 4Kn Windows 来宾验证了空状态、双成员存储池、已挂接固定镜像和未挂接精简双列空间，面板读取、刷新和跳转期间 A/B 无新增读写。文件恢复页可选择 4Kn RAW/IMG 成员镜像，重组单列双副本固定镜像，浏览分区、预览和跨盘导出。缺一成员须显式允许降级读取。重组前核对主备 GPT、SPACEDB 和 SDBC 的 CRC32、池和成员身份、数据库副本及分配，检查完整缓存目录。拒绝分配范围不完整、镜像数据分歧或缓存待回放。双成员和任一单独成员重组的 18 个跨分配边界的校验扇区摘要均匹配 Windows。3e8f0d28 正式构建在隔离 4Kn Windows 来宾预览镜像内 FAT16 文件，将一个现存文件和一个删除候选从 A 导出到 B，程序回读与来宾独立核对的 SHA-256 均匹配。精简空间的内部缓存记录和检查点可定位直接分配外的 6 个校验扇区。精简映射、缓存回放、其他布局的脱机重组及存储空间备份与管理仍待实现。",
+      "evidence": [
+        ".vm/storage-spaces-status.json",
+        ".vm/storage-spaces-metadata-1795274025487/manifest.json",
+        ".vm/storage-spaces-witness-1795275425251/manifest.json",
+        ".vm/storage-spaces-witness-full-1795275716269/manifest.json",
+        ".vm/storage-spaces-internal-1795277104183/manifest.json",
+        ".vm/storage-spaces-cache-complete-1795277977962/manifest.json",
+        ".vm/storage-spaces-recovery-status.json"
+      ]
     },
     {
       "id": "network-disk",

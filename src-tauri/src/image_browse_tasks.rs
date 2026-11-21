@@ -5,12 +5,14 @@ use crate::image_browser::{Browser, Info, Options};
 pub mod sessions;
 #[path = "image_lvm_tasks.rs"]
 pub mod lvm;
+#[path = "image_spaces_tasks.rs"]
+pub mod spaces;
 
 #[derive(Clone)]
 pub(crate) struct Opened {
     pub browser: Arc<Browser>,
     pub source_disks: Vec<Target>,
-    pub bridge: Arc<crate::image_bridge::Bridge>,
+    pub bridge: Option<Arc<crate::image_bridge::Bridge>>,
     #[cfg(windows)]
     pub group: Arc<crate::image_files::Group>,
 }
@@ -18,7 +20,9 @@ impl Opened {
     pub(crate) fn validate(&self) -> Result<(), String> {
         #[cfg(windows)]
         self.group.validate()?;
-        self.bridge.healthy()?;
+        if let Some(bridge) = &self.bridge {
+            bridge.healthy()?;
+        }
         Ok(())
     }
 }
@@ -96,14 +100,17 @@ fn commit(s: &mut State, job_id: &str, opened: Opened) -> Result<(), String> {
     {
         return Err("镜像打开已取消或任务失效；保留原镜像及目录。".into());
     }
-    clear_results(s);
-    lvm::clear_for_image(s);
-    s.opened_image = Some(opened);
+    replace(s, opened);
     let job = s.job.as_mut().unwrap();
     job.state = "completed".into();
     job.phase = "完成".into();
     job.message = "镜像已打开。选择分区并读取目录；没有挂载或修改镜像。".into();
     Ok(())
+}
+fn replace(s: &mut State, opened: Opened) {
+    clear_results(s);
+    lvm::clear_for_image(s);
+    s.opened_image = Some(opened);
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

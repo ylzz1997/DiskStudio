@@ -2113,5 +2113,14 @@
   "存储池成员": "Pool members",
   "热备": "Hot spare",
   "已停用": "Retired",
-  "存有此空间的数据": "Stores data for this space"
+  "存有此空间的数据": "Stores data for this space",
+  "浏览存储空间成员镜像": "Browse Storage Spaces member images",
+  "没有可重组的存储空间": "No reconstructable spaces",
+  "无法重组": "Cannot reconstruct",
+  "存储空间逻辑扇区大小": "Storage space logical sector size",
+  "允许缺少镜像副本时降级读取": "Allow degraded reads with a missing mirror copy",
+  "打开存储空间": "Open storage space",
+  "关闭存储空间": "Close storage space",
+  "选择存储空间成员的 RAW/IMG 文件": "Select RAW/IMG files for Storage Spaces members",
+  "此存储空间正在降级读取，部分镜像副本不可用。": "This storage space is being read in degraded mode. Some mirror copies are unavailable."
 }

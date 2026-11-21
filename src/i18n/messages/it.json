@@ -2113,5 +2113,14 @@
   "存储池成员": "Membri del pool",
   "热备": "Ricambio a caldo",
   "已停用": "Ritirato",
-  "存有此空间的数据": "Contiene dati di questo spazio"
+  "存有此空间的数据": "Contiene dati di questo spazio",
+  "浏览存储空间成员镜像": "Esplora le immagini dei membri di Spazi di archiviazione",
+  "没有可重组的存储空间": "Nessuno spazio di archiviazione ricostruibile",
+  "无法重组": "Ricostruzione impossibile",
+  "存储空间逻辑扇区大小": "Dimensione del settore logico dello spazio di archiviazione",
+  "允许缺少镜像副本时降级读取": "Consenti la lettura degradata se manca una copia del mirror",
+  "打开存储空间": "Apri spazio di archiviazione",
+  "关闭存储空间": "Chiudi spazio di archiviazione",
+  "选择存储空间成员的 RAW/IMG 文件": "Seleziona i file RAW/IMG dei membri di Spazi di archiviazione",
+  "此存储空间正在降级读取，部分镜像副本不可用。": "Lo spazio di archiviazione viene letto in modalità degradata. Alcune copie del mirror non sono disponibili."
 }

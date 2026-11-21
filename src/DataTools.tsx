@@ -25,6 +25,7 @@ import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
+import { StorageSpacesOpenDialog, StorageSpacesRecoveryPanel, type StorageSpacesView } from "./StorageSpacesRecovery";
 import { SectorCopyPanel } from "./SectorCopyPanel";
 import { ImageLvmDialog, type ImageLvmInfo } from "./ImageLvmDialog";
 import { VirtualRaidDialog, type RaidDetection, type RaidEdit, type RaidFiles, type RaidView } from "./VirtualRaidDialog";
@@ -173,6 +174,12 @@ export function DataTools({
   const [browsingBackup, setBrowsingBackup] = useState(false);
   const [browsingImage, setBrowsingImage] = useState(false);
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
+  const [spacesView, setSpacesView] = useState<StorageSpacesView | null>(null);
+  useEffect(() => {
+    const id = spacesView?.id;
+    if (!id) return;
+    return () => { void invoke("data_image_spaces_discard", { id }).catch(() => {}); };
+  }, [spacesView?.id]);
   const [imageCopy, setImageCopy] = useState<{ id: string; partition: string } | null>(null);
   const [imageCopyBusy, setImageCopyBusy] = useState(false);
   const imageCopyPart = imageInfo?.partitions.find((part) => String(part.id) === imageCopy?.partition);
@@ -215,7 +222,7 @@ export function DataTools({
           ? (backupInfo?.scanId ?? "")
           : ""
       : page === "recovery"
-        ? (raidInfo?.scanId ?? scanId)
+        ? (imageInfo?.format === "Storage Spaces" ? (imageInfo.scanId ?? "") : (raidInfo?.scanId ?? scanId))
         : scanId;
   useEffect(() => {
     setSourceExpanded(!resultsScanId);
@@ -377,8 +384,8 @@ export function DataTools({
     setAllowMissingMembers(false);
   }, [disk?.id, partition]);
   useEffect(() => {
-    callbacks.current.onBusy(!!busy || !!imageDraft || imageCopyBusy);
-  }, [busy, imageDraft, imageCopyBusy]);
+    callbacks.current.onBusy(!!busy || !!imageDraft || imageCopyBusy || !!spacesView);
+  }, [busy, imageDraft, imageCopyBusy, spacesView]);
   useEffect(() => () => callbacks.current.onBusy(false), []);
   useEffect(() => {
     if (!native) return;
@@ -812,6 +819,24 @@ export function DataTools({
           >
             {memberSelector}
           </PartitionBrowserPanel>
+        ) : page === "recovery" && imageInfo?.format === "Storage Spaces" ? (
+          <StorageSpacesRecoveryPanel
+            key={imageInfo.id}
+            info={imageInfo}
+            busy={!!busy}
+            onClose={() => void action(async () => {
+              await invoke("data_close_image", { id: imageInfo.id });
+              setImageInfo(null);
+              setScanId("");
+            })}
+            onRead={(partition, mode) => void action(async () => {
+              const id = await invoke<string>("data_scan_image", { request: { id: imageInfo.id, partition, mode } });
+              setScanId(id);
+              setOwnJobId(id);
+              setImageInfo(await invoke<ImageBrowseInfo>("data_image_status"));
+              setJob(await invoke<Job>("data_status"));
+            })}
+          />
         ) : page === "recovery" ? (
           <>
             {lostSource && (
@@ -848,6 +873,8 @@ export function DataTools({
                     <span className="section-caption">
                       {t("扫描不会修改源盘")}
                     </span>
+                  </div>
+                  <div className="recovery-source-actions">
                     <button
                       className="button"
                       disabled={busy || !native}
@@ -881,6 +908,12 @@ export function DataTools({
                       }}
                     >
                       {t("浏览动态卷")}
+                    </button>
+                    <button className="button" disabled={busy || !native} onClick={() => void action(async () => {
+                      const view = await invoke<StorageSpacesView | null>("data_image_spaces_select");
+                      if (view) setSpacesView(view);
+                    })}>
+                      {t("浏览存储空间成员镜像")}
                     </button>
                   </div>
                   <div className="scan-modes">
@@ -1993,6 +2026,28 @@ export function DataTools({
             )}
           </Hint>
         )}
+      {spacesView && page === "recovery" && (
+        <StorageSpacesOpenDialog
+          key={spacesView.id}
+          view={spacesView}
+          busy={!!busy}
+          error={error}
+          onClose={() => {
+            if (busy) return;
+            setError("");
+            setSpacesView(null);
+          }}
+          onOpen={(space, sector, allowDegraded) => void action(async () => {
+            const opened = await invoke<ImageBrowseInfo>("data_image_spaces_open", {
+              request: { id: spacesView.id, space, sector, allowDegraded },
+            });
+            setImageInfo(opened);
+            setScanId("");
+            setSourceExpanded(true);
+            setSpacesView(null);
+          })}
+        />
+      )}
       {imageDraft && (
         <ImageBrowseOpenDialog
           initial={imageDraft.group}

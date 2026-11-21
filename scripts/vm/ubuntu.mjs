@@ -15,7 +15,8 @@ const mdRaidZones = 'virtual-raid-md-zones-4kn';
 const mdRaid10 = 'virtual-raid-md10-4kn';
 const mdFixtures = [mdRaid6, mdRaidMetadata, mdRaidZones, mdRaid10, 'virtual-raid-md10-advanced-4kn'];
 const imageFixtures = [...btrfsImages, 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn', ...mdFixtures];
-const phases = ['populate', 'verify', 'ext-populate', 'ext-verify', 'btrfs-verify', 'btrfs-move-verify', 'btrfs-sha256-verify', ...imageFixtures];
+const spacesFixtures = ['storage-spaces-metadata-4kn', 'storage-spaces-witness-4kn', 'storage-spaces-witness-full-4kn', 'storage-spaces-internal-4kn', 'storage-spaces-cache-4kn', 'storage-spaces-cache-complete-4kn'];
+const phases = ['populate', 'verify', 'ext-populate', 'ext-verify', 'btrfs-verify', 'btrfs-move-verify', 'btrfs-sha256-verify', ...spacesFixtures, ...imageFixtures];
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 function stopped() {
   for (const file of [path.join(root, 'run.json'), path.join(base, 'run.json')]) {
@@ -61,9 +62,10 @@ async function main() {
     const stage = safePath(path.join(base, `seed-${phase}`), root, false);
     fs.mkdirSync(stage);
     const mdFixture = mdFixtures.includes(phase);
-    const scriptName = mdFixture ? 'ubuntu-md6.py' : phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
+    const spacesFixture = spacesFixtures.includes(phase);
+    const scriptName = spacesFixture ? 'ubuntu-storage-spaces.py' : mdFixture ? 'ubuntu-md6.py' : phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
     const script = fs.readFileSync(path.join(project, 'scripts/vm', scriptName)).toString('base64');
-    const seedRevision = mdFixture ? crypto.createHash('sha256').update(script).digest('hex').slice(0, 12) : '1';
+    const seedRevision = mdFixture || spacesFixture ? crypto.createHash('sha256').update(script).digest('hex').slice(0, 12) : '1';
     fs.writeFileSync(path.join(stage, 'meta-data'), `instance-id: diskstudio-ext4-${phase}-${seedRevision}\nlocal-hostname: diskstudio-ubuntu\n`);
     fs.writeFileSync(path.join(stage, 'user-data'), `#cloud-config
 users: []
@@ -131,8 +133,10 @@ power_state:
     '-drive', `file=${safePath(path.join(base, command === 'probe' ? 'seed.iso' : `seed-${command}.iso`))},format=raw,media=cdrom,readonly=on`];
   if (attachesTests) {
     for (const [name, serial, id] of [['test-a.qcow2','DS-TEST-A-0001','test_a'],['test-b.qcow2','DS-TEST-B-0001','test_b']]) {
-      const fourKn = command.startsWith('btrfs-');
-      const file = safePath(path.join(root, 'windows', fourKn ? name.replace('.qcow2', '-4kn.qcow2') : name));
+      const spacesFixture = spacesFixtures.includes(command);
+      const fourKn = spacesFixture || command.startsWith('btrfs-');
+      const suffix = spacesFixture ? '-storage-spaces-4kn' : fourKn ? '-4kn' : '';
+      const file = safePath(path.join(root, 'windows', name.replace('.qcow2', `${suffix}.qcow2`)));
       if (checkQcowHeader(file) !== 16*1024**3) throw Error('Unexpected test disk capacity');
       const geometry = fourKn ? ',logical_block_size=4096,physical_block_size=4096' : '';
       const options = {driver:'qcow2','node-name':id,file:{driver:'file',filename:file}};

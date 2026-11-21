@@ -163,7 +163,7 @@ pub fn attach(
                 let opened = Opened {
                     browser: Arc::new(browser),
                     source_disks: group.disks(),
-                    bridge,
+                    bridge: Some(bridge),
                     group,
                 };
                 opened.validate()?;

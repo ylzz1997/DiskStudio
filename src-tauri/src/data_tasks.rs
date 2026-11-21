@@ -1300,7 +1300,7 @@ fn scan_source_input(
     #[cfg(windows)]
     let source_for_io = source.clone();
     let image_bridge = match &source {
-        ScanSource::Image { opened, .. } => Some(opened.bridge.clone()),
+        ScanSource::Image { opened, .. } => opened.bridge.clone(),
         _ => None,
     };
     let image_lvm = match &source {

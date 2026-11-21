@@ -382,6 +382,25 @@ fn data_backup_status() -> Option<data_tasks::BackupStatus> {
 fn data_image_status() -> Option<data_tasks::image_browse_tasks::Status> {
     data_tasks::image_browse_tasks::status()
 }
+use data_tasks::image_browse_tasks::spaces as image_spaces_tasks;
+#[tauri::command]
+async fn data_image_spaces_select() -> Result<Option<image_spaces_tasks::View>, String> {
+    tauri::async_runtime::spawn_blocking(image_spaces_tasks::select)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn data_image_spaces_open(
+    request: image_spaces_tasks::OpenRequest,
+) -> Result<data_tasks::image_browse_tasks::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || image_spaces_tasks::open(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn data_image_spaces_discard(id: String) {
+    image_spaces_tasks::discard(id);
+}
 use data_tasks::image_browse_tasks::lvm as image_lvm_tasks;
 #[tauri::command]
 fn data_image_lvm_status() -> Option<image_lvm_tasks::Status> {
@@ -1085,6 +1104,9 @@ fn main() {
             data_reconstruct_filesystem,
             data_backup_status,
             data_image_status,
+            data_image_spaces_select,
+            data_image_spaces_open,
+            data_image_spaces_discard,
             data_image_lvm_status,
             data_image_lvm_inspect,
             data_image_lvm_open,

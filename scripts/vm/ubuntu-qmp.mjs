@@ -26,9 +26,9 @@ export async function verifyUbuntu(resume = false) {
     const blocks=await execute('query-block');
     const state=JSON.parse(fs.readFileSync(safePath(path.join(root,'ubuntu/run.json')),'utf8'));
     const noTestDiskSeeds = ['seed.iso', 'seed-btrfs-snapshot-image.iso', 'seed-btrfs-retained-image.iso', 'seed-btrfs-checksum-images.iso', 'seed-btrfs-members-images.iso', 'seed-btrfs-parity-images.iso', 'seed-btrfs-allocation-image.iso', 'seed-lvm-images-4kn.iso', 'seed-lvm-raid-matrix-4kn.iso', 'seed-lvm-thin-snapshots-4kn.iso', 'seed-lvm-cow-persistent-4kn.iso', 'seed-lvm-cross-deleted-4kn.iso', 'seed-lvm-raid10-layouts-4kn.iso', 'seed-virtual-raid-md6-4kn.iso', 'seed-virtual-raid-md-metadata-4kn.iso', 'seed-virtual-raid-md-zones-4kn.iso', 'seed-virtual-raid-md10-4kn.iso','seed-virtual-raid-md10-advanced-4kn.iso'];
-    const seed=[...noTestDiskSeeds,'seed-populate.iso','seed-verify.iso','seed-ext-populate.iso','seed-ext-verify.iso','seed-btrfs-verify.iso','seed-btrfs-move-verify.iso','seed-btrfs-sha256-verify.iso'].find(name=>state.args.some(arg=>arg.includes(`file=${path.join(root,'ubuntu',name)},`)));
+    const seed=[...noTestDiskSeeds,'seed-populate.iso','seed-verify.iso','seed-ext-populate.iso','seed-ext-verify.iso','seed-btrfs-verify.iso','seed-btrfs-move-verify.iso','seed-btrfs-sha256-verify.iso','seed-storage-spaces-metadata-4kn.iso','seed-storage-spaces-witness-4kn.iso','seed-storage-spaces-witness-full-4kn.iso','seed-storage-spaces-internal-4kn.iso','seed-storage-spaces-cache-4kn.iso','seed-storage-spaces-cache-complete-4kn.iso'].find(name=>state.args.some(arg=>arg.includes(`file=${path.join(root,'ubuntu',name)},`)));
     if(!seed)throw Error('Unknown Ubuntu read-only seed');
-    const suffix=seed.startsWith('seed-btrfs-')?'-4kn':'';
+    const suffix=seed.startsWith('seed-storage-spaces-')?'-storage-spaces-4kn':seed.startsWith('seed-btrfs-')?'-4kn':'';
     const expected=new Map([
       [safePath(path.join(root,'ubuntu/system.qcow2')).toLowerCase(),[16*1024**3,false,'qcow2']],
     ]);

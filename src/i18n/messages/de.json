@@ -2113,5 +2113,14 @@
   "存储池成员": "Poolmitglieder",
   "热备": "Hot Spare",
   "已停用": "Außer Betrieb",
-  "存有此空间的数据": "Speichert Daten dieses Speicherplatzes"
+  "存有此空间的数据": "Speichert Daten dieses Speicherplatzes",
+  "浏览存储空间成员镜像": "Mitgliedsabbilder von Speicherplätzen durchsuchen",
+  "没有可重组的存储空间": "Keine rekonstruierbaren Speicherplätze",
+  "无法重组": "Rekonstruktion nicht möglich",
+  "存储空间逻辑扇区大小": "Logische Sektorgröße des Speicherplatzes",
+  "允许缺少镜像副本时降级读取": "Lesen mit fehlender Spiegelkopie zulassen",
+  "打开存储空间": "Speicherplatz öffnen",
+  "关闭存储空间": "Speicherplatz schließen",
+  "选择存储空间成员的 RAW/IMG 文件": "RAW/IMG-Dateien der Speicherplatzmitglieder auswählen",
+  "此存储空间正在降级读取，部分镜像副本不可用。": "Der Speicherplatz wird mit fehlenden Spiegelkopien gelesen."
 }

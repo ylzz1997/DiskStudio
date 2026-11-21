@@ -11,6 +11,7 @@ pub mod partition_move;
 mod raid10;
 mod raid_field;
 mod raid_parity;
+pub mod storage_spaces;
 pub mod table_check;
 pub mod virtual_raid;
 pub use image::parse_image;

@@ -252,7 +252,7 @@ mod platform {
             return Ok(None);
         };
         if !(1..=disk_core::lvm::MAX_MEMBERS).contains(&paths.len()) {
-            return Err("请选择 1–64 个 LVM2 物理卷来源。".into());
+            return Err("请选择 1–64 个 RAW/IMG 成员镜像。".into());
         }
         let mut identities = HashSet::new();
         let entries = paths
@@ -265,7 +265,7 @@ mod platform {
                         ext.eq_ignore_ascii_case("raw") || ext.eq_ignore_ascii_case("img")
                     })
                 {
-                    return Err("请选择 RAW/IMG 物理卷镜像。".into());
+                    return Err("请选择 RAW/IMG 成员镜像。".into());
                 }
                 let entry = opened(path)?;
                 let mut info = BY_HANDLE_FILE_INFORMATION::default();
