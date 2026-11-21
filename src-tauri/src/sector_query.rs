@@ -1,5 +1,7 @@
 //! Bounded, fixed-width byte conditions. No device access in this module.
-use crate::sector_data::{self, CompiledPattern, Pattern, SearchResult, MAX_HITS};
+use crate::sector_data::{
+    self, compile_atoms, expression, CompiledPattern, Pattern, SearchResult, MAX_HITS,
+};
 pub use crate::surface_scan::Direction;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,6 +25,10 @@ pub struct Condition {
     pub offset: u32,
     #[serde(default)]
     pub ignore_ascii_case: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_wildcard: Option<char>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector_byte: Option<u32>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,6 +42,7 @@ pub enum CompiledQuery {
         regex: regex::bytes::Regex,
         span: usize,
         origin: usize,
+        placement: Option<Placement>,
     },
 }
 impl CompiledQuery {
@@ -46,71 +53,118 @@ impl CompiledQuery {
         }
     }
 }
-fn expression(atoms: &[(u8, u8)]) -> String {
-    let mut output = String::new();
-    let mut i = 0;
-    while i < atoms.len() {
-        let (value, mask) = atoms[i];
-        if mask == 0 {
-            let begin = i;
-            while i < atoms.len() && atoms[i].1 == 0 {
-                i += 1;
+pub struct PlacedCondition {
+    offset: usize,
+    atoms: Vec<(u8, u8)>,
+    base_remainder: Option<u64>,
+}
+
+pub enum Placement {
+    All {
+        sector_size: u64,
+        remainder: u64,
+    },
+    Any {
+        sector_size: u64,
+        conditions: Vec<PlacedCondition>,
+    },
+}
+
+impl Placement {
+    fn accepts(&self, base: u64, window: &[u8], index: usize) -> bool {
+        match self {
+            Self::All {
+                sector_size,
+                remainder,
+            } => base % sector_size == *remainder,
+            Self::Any {
+                sector_size,
+                conditions,
+            } => {
+                let remainder = base % sector_size;
+                conditions.iter().any(|condition| {
+                    if condition
+                        .base_remainder
+                        .is_some_and(|required| required != remainder)
+                    {
+                        return false;
+                    }
+                    let at = index + condition.offset;
+                    window
+                        .get(at..at + condition.atoms.len())
+                        .is_some_and(|bytes| {
+                            bytes
+                                .iter()
+                                .zip(&condition.atoms)
+                                .all(|(&byte, &(value, mask))| byte & mask == value)
+                        })
+                })
             }
-            output.push_str(&format!("[\\x00-\\xFF]{{{}}}", i - begin));
-            continue;
         }
-        if mask == 255 {
-            output.push_str(&format!("\\x{value:02X}"));
-        } else {
-            output.push('[');
-            for byte in 0..=255u8 {
-                if byte & mask == value {
-                    output.push_str(&format!("\\x{byte:02X}"));
-                }
-            }
-            output.push(']');
-        }
-        i += 1;
     }
-    output
 }
 impl Query {
     #[cfg(test)]
     pub fn compile(&self) -> Result<CompiledQuery, String> {
-        self.compile_for(Direction::Forward)
+        self.compile_for(Direction::Forward, 512)
     }
-    pub fn compile_for(&self, direction: Direction) -> Result<CompiledQuery, String> {
+    pub fn compile_for(
+        &self,
+        direction: Direction,
+        sector_size: u64,
+    ) -> Result<CompiledQuery, String> {
+        if !matches!(sector_size, 512 | 4096) {
+            return Err("容量或扇区大小无效。".into());
+        }
         if self.conditions.is_empty() || self.conditions.len() > MAX_CONDITIONS {
             return Err("搜索条件须为 1–16 项。".into());
         }
         let mut conditions = Vec::new();
         let mut span = 0;
         for condition in &self.conditions {
-            let atoms = condition.pattern.atoms(condition.ignore_ascii_case)?;
+            let atoms = condition
+                .pattern
+                .atoms(condition.ignore_ascii_case, condition.text_wildcard)?;
             let offset = condition.offset as usize;
             let end = offset
                 .checked_add(atoms.len())
                 .filter(|&end| end <= MAX_SPAN)
                 .ok_or("条件偏移与长度合计须在 64 KiB 内。")?;
             span = span.max(end);
-            conditions.push((offset, atoms));
+            let base_remainder = condition
+                .sector_byte
+                .map(u64::from)
+                .map(|byte| {
+                    if byte >= sector_size {
+                        return Err("条件的扇区内偏移超出逻辑扇区。");
+                    }
+                    Ok(
+                        (sector_size + byte - u64::from(condition.offset) % sector_size)
+                            % sector_size,
+                    )
+                })
+                .transpose()?;
+            conditions.push(PlacedCondition {
+                offset,
+                atoms,
+                base_remainder,
+            });
         }
+        let requires_alignment = conditions.iter().any(|c| c.base_remainder.is_some());
         if direction == Direction::Forward
             && self.conditions.len() == 1
             && self.conditions[0].offset == 0
+            && !requires_alignment
         {
-            let c = &self.conditions[0];
-            return Ok(CompiledQuery::Single(
-                c.pattern.compile(c.ignore_ascii_case)?,
-            ));
+            return Ok(CompiledQuery::Single(compile_atoms(&conditions[0].atoms)?));
         }
         // Offsets before the first condition carry no constraints. Search from
         // that condition and translate the result back to the requested base,
         // rather than compiling a long wildcard prefix at every byte position.
-        let origin = conditions.iter().map(|(offset, _)| *offset).min().unwrap();
+        let origin = conditions.iter().map(|c| c.offset).min().unwrap();
         let pattern = if self.mode == Mode::All {
             let mut merged = vec![(0u8, 0u8); span - origin];
-            for (offset, atoms) in &conditions {
+            for PlacedCondition { offset, atoms, .. } in &conditions {
                 for (i, &(v, m)) in atoms.iter().enumerate() {
                     let (old_v, old_m) = merged[offset - origin + i];
                     if (old_v ^ v) & old_m & m != 0 {
@@ -123,7 +177,7 @@ impl Query {
         } else {
             conditions
                 .iter()
-                .map(|(offset, atoms)| {
+                .map(|PlacedCondition { offset, atoms, .. }| {
                     let prefix = if *offset == origin {
                         String::new()
                     } else {
@@ -140,10 +194,29 @@ impl Query {
             .dfa_size_limit(2 * 1024 * 1024)
             .build()
             .map_err(|_| "组合搜索条件超出编译资源限制，请减少偏移或条件。")?;
+        let placement = match (requires_alignment, self.mode) {
+            (false, _) => None,
+            (true, Mode::Any) => Some(Placement::Any {
+                sector_size,
+                conditions,
+            }),
+            (true, Mode::All) => {
+                let mut remainders = conditions.iter().filter_map(|c| c.base_remainder);
+                let remainder = remainders.next().unwrap();
+                if remainders.any(|next| next != remainder) {
+                    return Err("全部匹配的扇区内偏移无法对齐到同一基准。".into());
+                }
+                Some(Placement::All {
+                    sector_size,
+                    remainder,
+                })
+            }
+        };
         Ok(CompiledQuery::Combined {
             regex,
             span,
             origin,
+            placement,
         })
     }
 }
@@ -173,6 +246,7 @@ fn search_backward<R: Read + Seek>(
         regex,
         span,
         origin,
+        placement,
     } = query
     else {
         return Err("反向搜索条件未正确编译。".into());
@@ -234,7 +308,13 @@ fn search_backward<R: Read + Seek>(
             if found.is_empty() {
                 return Err("组合条件意外匹配空数据，已停止。".into());
             }
-            candidates.push(position as u32);
+            let base = start + position as u64;
+            if placement
+                .as_ref()
+                .is_none_or(|rule| rule.accepts(base, window, position))
+            {
+                candidates.push(position as u32);
+            }
             from = found.start() + 1;
         }
         for &offset in candidates.iter().rev() {
@@ -283,6 +363,7 @@ pub fn search<R: Read>(
         regex,
         span,
         origin,
+        placement,
     } = query
     else {
         let CompiledQuery::Single(pattern) = query else {
@@ -335,15 +416,21 @@ pub fn search<R: Read>(
             let Some(found) = regex.find_at(window, from) else {
                 break;
             };
-            let position = base + (found.start() - origin) as u64;
+            let index = found.start() - origin;
+            let position = base + index as u64;
             if position >= ready {
                 break;
             }
             if found.is_empty() {
                 return Err("组合条件意外匹配空数据，已停止。".into());
             }
-            result.hits.push(position);
             result.checked_bytes = position + 1;
+            if placement
+                .as_ref()
+                .is_none_or(|rule| rule.accepts(position, window, index))
+            {
+                result.hits.push(position);
+            }
             if result.hits.len() == MAX_HITS {
                 result.state = "limited".into();
                 result.message = "达到 1024 个匹配上限，搜索已停止；可缩小范围后继续查找。".into();
@@ -387,6 +474,8 @@ mod tests {
             pattern: Pattern::Hex(value.into()),
             offset,
             ignore_ascii_case: false,
+            text_wildcard: None,
+            sector_byte: None,
         }
     }
     fn run(bytes: &[u8], conditions: Vec<Condition>, mode: Mode) -> SearchResult {
@@ -473,6 +562,8 @@ mod tests {
             pattern: Pattern::Utf8("a".into()),
             offset: 0,
             ignore_ascii_case: true,
+            text_wildcard: None,
+            sector_byte: None,
         };
         assert_eq!(
             run(b"Aa", vec![text, hex("41", 0)], Mode::All).hits,
@@ -482,12 +573,122 @@ mod tests {
             pattern: Pattern::Utf16Le("Ł".into()),
             offset: 0,
             ignore_ascii_case: true,
+            text_wildcard: None,
+            sector_byte: None,
         };
         assert_eq!(
             run(&[0x41, 1, 0x61, 1], vec![text, hex("?? 01", 0)], Mode::All).hits,
             vec![0]
         );
     }
+    #[test]
+    fn text_wildcards_match_one_encoded_unit_and_preserve_literals() {
+        let mut utf8 = Condition {
+            pattern: Pattern::Utf8(r"a!\!\\z".into()),
+            offset: 0,
+            ignore_ascii_case: true,
+            text_wildcard: Some('!'),
+            sector_byte: None,
+        };
+        let data = [
+            b'A', 0xff, b'!', b'\\', b'z', b'a', 0xc3, 0xa9, b'!', b'\\', b'Z',
+        ];
+        assert_eq!(run(&data, vec![utf8.clone()], Mode::All).hits, vec![0]);
+        utf8.text_wildcard = None;
+        assert_eq!(
+            run(br"A!\!\\Z", vec![utf8.clone()], Mode::All).hits,
+            vec![0]
+        );
+        let wide = Condition {
+            pattern: Pattern::Utf16Le("Ł*a".into()),
+            text_wildcard: Some('*'),
+            ..utf8.clone()
+        };
+        let data = [0x41, 1, 0xff, 0x82, b'A', 0, b'a', 1, 0xff, 0x82, b'A', 0];
+        assert_eq!(run(&data, vec![wide], Mode::Any).hits, vec![0]);
+        for marker in [' ', '\\', 'é'] {
+            let query = Query {
+                mode: Mode::All,
+                conditions: vec![Condition {
+                    text_wildcard: Some(marker),
+                    ..utf8.clone()
+                }],
+            };
+            assert!(query.compile().is_err());
+        }
+    }
+
+    #[test]
+    fn sector_placements_match_across_chunks_and_consider_every_any_branch() {
+        let mut data = vec![0; CHUNK + 4096];
+        for at in [0, 511, 600, CHUNK - 2, CHUNK + 10] {
+            data[at..at + 4].copy_from_slice(b"ABCD");
+        }
+        // Both regex branches match at 511, but only the shorter one permits
+        // that placement.
+        let long = Condition {
+            sector_byte: Some(0),
+            ..hex("41 42 43 44", 0)
+        };
+        let short = Condition {
+            sector_byte: Some(511),
+            ..hex("41 42", 0)
+        };
+        let any = Query {
+            mode: Mode::Any,
+            conditions: vec![long, short],
+        };
+        let prefix = Condition {
+            sector_byte: Some(4094),
+            ..hex("41 42", 0)
+        };
+        let suffix = Condition {
+            sector_byte: Some(0),
+            ..hex("43 44", 2)
+        };
+        let all = Query {
+            mode: Mode::All,
+            conditions: vec![prefix, suffix],
+        };
+        for direction in [Direction::Forward, Direction::Backward] {
+            for (query, mut expected) in [(&any, vec![0, 511]), (&all, vec![(CHUNK - 2) as u64])] {
+                if direction == Direction::Backward {
+                    expected.reverse();
+                }
+                let compiled = query.compile_for(direction, 4096).unwrap();
+                let result = search_direction(
+                    &mut Cursor::new(&data),
+                    data.len() as u64,
+                    &compiled,
+                    direction,
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .unwrap();
+                assert_eq!(result.hits, expected);
+                assert_eq!(result.checked_bytes, data.len() as u64);
+            }
+        }
+        for (query, size) in [
+            (all.clone(), 512),
+            (
+                Query {
+                    mode: Mode::All,
+                    conditions: vec![
+                        all.conditions[0].clone(),
+                        Condition {
+                            sector_byte: Some(1),
+                            ..all.conditions[1].clone()
+                        },
+                    ],
+                },
+                4096,
+            ),
+        ] {
+            assert!(query.compile_for(Direction::Forward, size).is_err());
+        }
+    }
+
     #[test]
     fn bounded_typed_queries_reject_invalid_or_excessive_inputs() {
         assert!(Query {

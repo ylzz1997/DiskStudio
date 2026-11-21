@@ -261,6 +261,71 @@ pub(super) fn inspect_surface_parallel() -> Result<String, String> {
     ))
 }
 
+pub(super) fn sector_edit_witness(verify: bool) -> Result<String, String> {
+    const MARKER: &[u8] = b"D\x00S\x004\x00K\x00";
+    let desktop = btrfs_checks::desktop()?;
+    let (folder, bound_a, bound_b, snapshot) = fixture()?;
+    let layout = table_restore::archive_layout(&quick_partition_checks::table(A)?)?;
+    let offset = REPAIR_START * SECTOR;
+    let end = (REPAIR_START + FAULT_COUNT) * SECTOR;
+    if REPAIR_START < layout.first
+        || REPAIR_START + FAULT_COUNT - 1 > layout.last
+        || layout
+            .entries
+            .iter()
+            .any(|part| offset < part.offset + part.size && part.offset < end)
+    {
+        return Err("Sector edit witness overlaps a partition or GPT metadata".into());
+    }
+    let name = format!("DiskStudio-sector-edit-{REPAIR_LBA}-{desktop}.json");
+    let resolved = data_windows::resolve(&bound_a, false, false)?;
+    let mut file = data_windows::device(&resolved, false)?;
+    let mut bytes = vec![0; (FAULT_COUNT * SECTOR) as usize];
+    file.seek(SeekFrom::Start(offset)).map_err(err)?;
+    file.read_exact(&mut bytes).map_err(err)?;
+    let at = ((REPAIR_LBA - REPAIR_START) * SECTOR) as usize;
+    let geometry = json!({"desktop":desktop, "layout":snapshot, "startLba":REPAIR_START, "targetLba":REPAIR_LBA, "sectorCount":FAULT_COUNT});
+    if !verify {
+        if &bytes[at..at + MARKER.len()] == MARKER {
+            return Err("Target already contains the expected edit".into());
+        }
+        let before = format!("{:x}", Sha256::digest(&bytes[at..at + SECTOR as usize]));
+        bytes[at..at + MARKER.len()].copy_from_slice(MARKER);
+        let after = format!("{:x}", Sha256::digest(&bytes[at..at + SECTOR as usize]));
+        let mut witness = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(&name))
+            .map_err(err)?;
+        data_windows::FileBinding::validate_all(&[data_windows::FileBinding::new(
+            &witness,
+            &bound_b.target,
+        )?])?;
+        serde_json::to_writer(
+            &mut witness,
+            &json!({
+                "geometry": geometry,
+                "expectedRangeSha256": format!("{:x}", Sha256::digest(bytes)),
+                "beforeSectorSha256": before,
+                "afterSectorSha256": after,
+            }),
+        )
+        .map_err(err)?;
+        witness.sync_all().map_err(err)?;
+        return Ok(format!("PASS: desktop {desktop}. A offline. Fixture LBA {REPAIR_LBA} unallocated. Open whole A; stage DS4K as UTF-16 LE at byte 0. Expected SHA-256 {after}."));
+    }
+    let witness = surface_result(&folder, &bound_b, &name)?;
+    if witness["geometry"] != geometry
+        || &bytes[at..at + MARKER.len()] != MARKER
+        || witness["expectedRangeSha256"] != format!("{:x}", Sha256::digest(&bytes))
+    {
+        return Err(
+            "Edited bytes, other bytes in the witness range, or disk layouts differ".into(),
+        );
+    }
+    Ok(format!("PASS: desktop {desktop}. A offline. LBA {REPAIR_LBA} contains the exact UTF-16 LE edit. Seven neighboring sectors, other bytes, both GPTs and guest OS layout match. Edited sector SHA-256 {}.", witness["afterSectorSha256"]))
+}
+
 pub(super) fn surface_repair_witness(verify: bool) -> Result<String, String> {
     let desktop = btrfs_checks::desktop()?;
     let (folder, bound_a, bound_b, snapshot) = fixture()?;

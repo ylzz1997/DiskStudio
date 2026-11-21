@@ -21,15 +21,25 @@ pub enum Pattern {
     Utf16Le(String),
 }
 impl Pattern {
-    pub(crate) fn atoms(&self, fold: bool) -> Result<Vec<(u8, u8)>, String> {
-        if let Self::Hex(s) = self {
+    pub(crate) fn atoms(
+        &self,
+        fold: bool,
+        wildcard: Option<char>,
+    ) -> Result<Vec<(u8, u8)>, String> {
+        let input = match self {
+            Self::Hex(text) | Self::Utf8(text) | Self::Utf16Le(text) => text,
+        };
+        if input.len() > MAX_PATTERN * 3 {
+            return Err("搜索条件过长。".into());
+        }
+        if matches!(self, Self::Hex(_)) {
             if fold {
                 return Err("十六进制搜索不使用文本大小写选项。".into());
             }
-            if s.len() > MAX_PATTERN * 3 {
-                return Err("搜索条件过长。".into());
+            if wildcard.is_some() {
+                return Err("十六进制条件使用 ? 表示一个十六进制位。".into());
             }
-            let compact: Vec<_> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+            let compact: Vec<_> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
             if compact.is_empty()
                 || compact.len() % 2 != 0
                 || compact.len() / 2 > MAX_PATTERN
@@ -49,133 +59,121 @@ impl Pattern {
                 })
                 .collect());
         }
-        let bytes = self.bytes()?;
-        Ok(bytes
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| {
-                let is_ascii_unit = !matches!(self, Self::Utf16Le(_))
-                    || (i % 2 == 0 && bytes.get(i + 1) == Some(&0));
-                if fold && is_ascii_unit && b.is_ascii_alphabetic() {
-                    (b.to_ascii_uppercase(), 0xdf)
-                } else {
-                    (b, 0xff)
-                }
-            })
-            .collect())
-    }
-    pub fn compile(&self, ignore_ascii_case: bool) -> Result<CompiledPattern, String> {
-        let masked_hex = matches!(self, Self::Hex(s) if s.contains('?'));
-        if !masked_hex && !ignore_ascii_case {
-            return Ok(CompiledPattern::Exact(self.bytes()?));
+
+        if wildcard.is_some_and(|symbol| !symbol.is_ascii_graphic() || symbol == '\\') {
+            return Err("文本通配符须为一个可见 ASCII 字符，反斜杠除外。".into());
         }
-        let mut expression = String::new();
-        let len;
-        match self {
-            Self::Hex(s) => {
-                if ignore_ascii_case {
-                    return Err("十六进制搜索不使用文本大小写选项。".into());
+        let wide = matches!(self, Self::Utf16Le(_));
+        let mut atoms = Vec::new();
+        let mut chars = input.chars().peekable();
+        while let Some(mut ch) = chars.next() {
+            if wildcard == Some(ch) {
+                atoms.push((0, 0));
+                if wide {
+                    atoms.push((0, 0));
                 }
-                if s.len() > MAX_PATTERN * 3 {
-                    return Err("搜索条件过长。".into());
-                }
-                let compact: Vec<_> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-                if compact.is_empty()
-                    || compact.len() % 2 != 0
-                    || compact.len() / 2 > MAX_PATTERN
-                    || !compact.iter().all(|b| b.is_ascii_hexdigit() || *b == b'?')
-                {
-                    return Err(
-                        "请输入完整的 Hex 字节；? 表示一个十六进制位，例如 46 4? ?? 33 32。".into(),
-                    );
-                }
-                len = compact.len() / 2;
-                for pair in compact.chunks_exact(2) {
-                    let nibble = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
-                    let mask = (if pair[0] == b'?' { 0 } else { 0xf0 })
-                        | (if pair[1] == b'?' { 0 } else { 0x0f });
-                    let value = nibble(pair[0]) * 16 + nibble(pair[1]);
-                    if mask == 0 {
-                        expression.push_str("[\\x00-\\xFF]");
-                    } else if mask == 0xf0 {
-                        expression.push_str(&format!("[\\x{value:02X}-\\x{:02X}]", value + 15));
-                    } else if mask == 255 {
-                        expression.push_str(&format!("\\x{value:02X}"));
-                    } else {
-                        expression.push('[');
-                        for byte in 0..=255u8 {
-                            if byte & mask == value {
-                                expression.push_str(&format!("\\x{byte:02X}"));
-                            }
-                        }
-                        expression.push(']');
-                    }
-                }
+                continue;
             }
-            Self::Utf8(_) => {
-                let bytes = self.bytes()?;
-                len = bytes.len();
-                for byte in bytes {
-                    ascii_atom(&mut expression, byte, ignore_ascii_case);
-                }
+            if ch == '\\'
+                && wildcard.is_some()
+                && chars
+                    .peek()
+                    .is_some_and(|&next| next == '\\' || wildcard == Some(next))
+            {
+                ch = chars.next().unwrap();
             }
-            Self::Utf16Le(_) => {
-                let bytes = self.bytes()?;
-                len = bytes.len();
-                for unit in bytes.chunks_exact(2) {
-                    // Fold only ASCII code points, never a coincidental ASCII-valued byte
-                    // within a different UTF-16 code unit (e.g. U+0141).
-                    ascii_atom(&mut expression, unit[0], ignore_ascii_case && unit[1] == 0);
-                    ascii_atom(&mut expression, unit[1], false);
+            let folded = fold && ch.is_ascii_alphabetic();
+            let ch = if folded { ch.to_ascii_uppercase() } else { ch };
+            let mut utf8 = [0; 4];
+            let mut utf16 = [0; 2];
+            let mut wide_bytes = [0; 4];
+            let bytes: &[u8] = if wide {
+                let units = ch.encode_utf16(&mut utf16);
+                for (i, unit) in units.iter().enumerate() {
+                    wide_bytes[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
                 }
-            }
+                &wide_bytes[..units.len() * 2]
+            } else {
+                ch.encode_utf8(&mut utf8).as_bytes()
+            };
+            atoms.extend(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &byte)| (byte, if folded && i == 0 { 0xdf } else { 0xff })),
+            );
         }
-        let regex = regex::bytes::RegexBuilder::new(&expression)
-            .unicode(false)
-            .size_limit(8 * 1024 * 1024)
-            .dfa_size_limit(2 * 1024 * 1024)
-            .build()
-            .map_err(|_| "搜索条件超出编译资源限制，请缩短条件。")?;
-        Ok(CompiledPattern::Masked { regex, len })
-    }
-    pub fn bytes(&self) -> Result<Vec<u8>, String> {
-        let value = match self {
-            Self::Hex(s) | Self::Utf8(s) | Self::Utf16Le(s) => s,
-        };
-        if value.len() > MAX_PATTERN * 3 {
-            return Err("搜索条件过长。".into());
-        }
-        let bytes = match self {
-            Self::Hex(s) => {
-                let compact: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-                if compact.len() % 2 != 0 || !compact.iter().all(u8::is_ascii_hexdigit) {
-                    return Err("请输入完整的十六进制字节，例如 46 41 54 33 32。".into());
-                }
-                compact
-                    .chunks_exact(2)
-                    .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-                    .collect()
-            }
-            Self::Utf8(s) => s.as_bytes().to_vec(),
-            Self::Utf16Le(s) => s.encode_utf16().flat_map(u16::to_le_bytes).collect(),
-        };
-        if bytes.is_empty() || bytes.len() > MAX_PATTERN {
+        if atoms.is_empty() || atoms.len() > MAX_PATTERN {
             return Err("搜索条件须为 1–4096 字节。".into());
         }
-        Ok(bytes)
+        Ok(atoms)
+    }
+
+    #[cfg(test)]
+    pub fn compile(&self, fold: bool) -> Result<CompiledPattern, String> {
+        compile_atoms(&self.atoms(fold, None)?)
+    }
+
+    #[cfg(test)]
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        self.atoms(false, None)?
+            .into_iter()
+            .map(|(byte, mask)| {
+                (mask == 0xff)
+                    .then_some(byte)
+                    .ok_or_else(|| "请输入完整的十六进制字节，例如 46 41 54 33 32。".into())
+            })
+            .collect()
     }
 }
-fn ascii_atom(expression: &mut String, byte: u8, fold: bool) {
-    if fold && byte.is_ascii_alphabetic() {
-        expression.push_str(&format!(
-            "[\\x{:02X}\\x{:02X}]",
-            byte.to_ascii_lowercase(),
-            byte.to_ascii_uppercase()
+
+pub(crate) fn expression(atoms: &[(u8, u8)]) -> String {
+    let mut output = String::new();
+    let mut i = 0;
+    while i < atoms.len() {
+        let (value, mask) = atoms[i];
+        if mask == 0 {
+            let begin = i;
+            while i < atoms.len() && atoms[i].1 == 0 {
+                i += 1;
+            }
+            output.push_str(&format!("[\\x00-\\xFF]{{{}}}", i - begin));
+            continue;
+        }
+        if mask == 255 {
+            output.push_str(&format!("\\x{value:02X}"));
+        } else {
+            output.push('[');
+            for byte in 0..=255u8 {
+                if byte & mask == value {
+                    output.push_str(&format!("\\x{byte:02X}"));
+                }
+            }
+            output.push(']');
+        }
+        i += 1;
+    }
+    output
+}
+
+pub(crate) fn compile_atoms(atoms: &[(u8, u8)]) -> Result<CompiledPattern, String> {
+    if atoms.iter().all(|&(_, mask)| mask == 0xff) {
+        return Ok(CompiledPattern::Exact(
+            atoms.iter().map(|&(byte, _)| byte).collect(),
         ));
-    } else {
-        expression.push_str(&format!("\\x{byte:02X}"));
     }
+    let regex = regex::bytes::RegexBuilder::new(&expression(atoms))
+        .unicode(false)
+        .size_limit(8 * 1024 * 1024)
+        .dfa_size_limit(2 * 1024 * 1024)
+        .build()
+        .map_err(|_| "搜索条件超出编译资源限制，请缩短条件。")?;
+    Ok(CompiledPattern::Masked {
+        regex,
+        len: atoms.len(),
+    })
 }
+
 pub enum CompiledPattern {
     Exact(Vec<u8>),
     Masked {

@@ -3832,6 +3832,12 @@ i {
   flex: 1;
   min-width: 0;
 }
+.sector-location {
+  flex-wrap: wrap;
+}
+.sector-location > label:first-child {
+  min-width: 100px;
+}
 .sector-copy-failures {
   margin-bottom: 12px;
   color: var(--muted);
@@ -3842,16 +3848,32 @@ i {
   overflow: auto;
   padding-inline-start: 20px;
 }
-.sector-case-option {
+.sector-text-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 14px;
+}
+.sector-case-option,
+.sector-text-wildcard {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 14px;
   color: var(--muted);
   font-size: 12px;
 }
 .sector-case-option input {
   accent-color: var(--accent);
+}
+.sector-text-wildcard input {
+  width: 36px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
 }
 .sector-conditions {
   margin-bottom: 16px;
@@ -3901,11 +3923,19 @@ i {
 .sector-condition-fields > label:nth-child(3) {
   width: 110px;
 }
+.sector-condition-fields > label:nth-child(4) {
+  width: 136px;
+}
 .sector-condition {
   border-top: 1px solid var(--border);
 }
-.sector-conditions .sector-case-option {
+.sector-conditions .sector-case-option,
+.sector-conditions .sector-text-wildcard {
   display: flex;
+}
+.sector-conditions .sector-text-wildcard input {
+  width: 36px;
+  height: 30px;
 }
 .sector-conditions .surface-note {
   margin-bottom: 0;
@@ -4344,7 +4374,8 @@ i {
   font-size: 12px;
   color: var(--muted);
 }
-.sector-edit-bar input {
+.sector-edit-bar select,
+.sector-edit-bar textarea {
   width: 100%;
   height: 36px;
   padding: 6px 10px;
@@ -4353,6 +4384,13 @@ i {
   background: var(--surface);
   color: var(--text);
   font-family: Consolas, monospace;
+}
+.sector-edit-bar label:first-child {
+  flex: 0 1 auto;
+  min-width: 115px;
+}
+.sector-edit-bar textarea {
+  resize: vertical;
 }
 .sector-bytes .edited {
   background: var(--accent);

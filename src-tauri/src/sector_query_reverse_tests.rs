@@ -11,11 +11,13 @@ fn hex(value: &str, offset: u32) -> Condition {
         pattern: Pattern::Hex(value.into()),
         offset,
         ignore_ascii_case: false,
+        text_wildcard: None,
+        sector_byte: None,
     }
 }
 fn query(conditions: Vec<Condition>, mode: Mode) -> CompiledQuery {
     Query { conditions, mode }
-        .compile_for(Direction::Backward)
+        .compile_for(Direction::Backward, 512)
         .unwrap()
 }
 fn run(bytes: &[u8], q: &CompiledQuery) -> SearchResult {
@@ -96,6 +98,8 @@ fn reverse_text_folding_preserves_utf16_code_units_and_binary_literals() {
         pattern: Pattern::Utf16Le("Ła".into()),
         offset: 0,
         ignore_ascii_case: true,
+        text_wildcard: None,
+        sector_byte: None,
     };
     let data = [0x41, 1, 0x61, 0, 0x61, 1, 0x61, 0, 0x41, 1, 0x41, 0];
     assert_eq!(run(&data, &query(vec![text], Mode::Any)).hits, vec![8, 0]);
@@ -279,13 +283,13 @@ fn typed_direction_and_query_validation_reject_unknown_values_before_io() {
         conditions: vec![hex("AA", 0), hex("BB", 0)],
         mode: Mode::All
     }
-    .compile_for(Direction::Backward)
+    .compile_for(Direction::Backward, 512)
     .is_err());
     assert!(Query {
         conditions: vec![hex("AA BB", 65535)],
         mode: Mode::Any
     }
-    .compile_for(Direction::Backward)
+    .compile_for(Direction::Backward, 512)
     .is_err());
     let r = run(&[0], &query(vec![hex("AA BB", 0)], Mode::Any));
     assert_eq!(r.state, "completed");

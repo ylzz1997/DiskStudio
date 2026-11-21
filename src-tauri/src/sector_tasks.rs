@@ -208,7 +208,6 @@ pub fn start(request: SearchRequest) -> Result<String, String> {
     #[cfg(windows)]
     {
         use crate::{data_io::Region, data_windows as platform};
-        let pattern = request.query.compile_for(request.direction)?;
         let guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "另一项磁盘操作正在运行。")?;
@@ -217,6 +216,7 @@ pub fn start(request: SearchRequest) -> Result<String, String> {
         let range = request
             .options
             .range(resolved.offset, resolved.size, sector_size)?;
+        let pattern = request.query.compile_for(request.direction, sector_size)?;
         let (id, cancel) = data_tasks::start("扇区搜索")?;
         *search_state() = Some(SearchSnapshot {
             id: id.clone(),

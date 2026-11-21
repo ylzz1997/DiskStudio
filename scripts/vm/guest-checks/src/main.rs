@@ -733,6 +733,8 @@ fn main() {
                 | "Virtual-Raid-Md-Zones-Inspect"
                 | "Virtual-Raid-Md-Zones-Continue"
                 | "Sector-Copy-4Kn-Baseline"
+                | "Sector-Edit-4Kn-Baseline"
+                | "Sector-Edit-4Kn-Verify"
                 | "Sector-Copy-4Kn-Verify"
                 | "Sector-Copy-4Kn-Verify-Report"
                 | "Sector-Copy-Fault-4Kn-Prepare"
@@ -833,6 +835,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Surface-Refinement-4Kn-Inspect") => sector_copy_checks::inspect_surface_refinement(),
         Some("Surface-Refinement-4Kn-Prepare") => sector_copy_checks::prepare_surface_refinement(),
         Some("Surface-Timeout-4Kn-Verify") => sector_copy_checks::verify_surface_timeout(),
+        Some("Sector-Edit-4Kn-Baseline") => sector_copy_checks::sector_edit_witness(false),
+        Some("Sector-Edit-4Kn-Verify") => sector_copy_checks::sector_edit_witness(true),
         Some("Surface-Repair-4Kn-Baseline") => sector_copy_checks::surface_repair_witness(false),
         Some("Surface-Repair-4Kn-Verify") => sector_copy_checks::surface_repair_witness(true),
         Some("Surface-Repair-4Kn-Reports") => sector_copy_checks::verify_surface_reports(),

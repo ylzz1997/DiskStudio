@@ -1,8 +1,21 @@
+#[cfg(windows)]
+use crate::{
+    data_tasks::Selection,
+    data_windows as device, extfs,
+    partitions::platform::{self, maintenance, SectorContext, TableReadContext},
+    surface_scan::{Options, Range},
+};
 use crate::{
     sector_edit::{self, Edit},
     sector_tasks::{self, Page},
+    table_archive::Archive,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -29,6 +42,8 @@ pub struct Plan {
     pub relative_sector: u64,
     pub absolute_sector: u64,
     pub sector_size: u64,
+    pub write_size: u64,
+    pub write_start_lba: u64,
     pub before_sha256: String,
     pub after_sha256: String,
     pub changes: Vec<Change>,
@@ -43,10 +58,21 @@ pub struct Outcome {
 struct Pending {
     plan: Plan,
     page: Page,
+    before: Vec<u8>,
     after: Vec<u8>,
     fingerprint: String,
-    native: Vec<String>,
+    proof: Proof,
     expires: Instant,
+}
+#[derive(PartialEq)]
+enum Native {
+    Partition(Vec<String>),
+    Unallocated(Archive),
+}
+#[derive(PartialEq)]
+struct Proof {
+    block: crate::surface_scan::Range,
+    native: Native,
 }
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 fn pending() -> std::sync::MutexGuard<'static, Option<Pending>> {
@@ -82,21 +108,98 @@ fn job<T>(title: &str, work: impl FnOnce() -> Result<T, String>) -> Result<T, St
     result
 }
 #[cfg(windows)]
-fn current(file: &std::fs::File, page: &Page) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let offset = page
-        .sector
-        .checked_mul(page.sector_size)
-        .and_then(|n| page.source_offset.checked_add(n))
-        .ok_or("扇区位置溢出")?;
-    let mut region = crate::data_io::Region::new(
-        file.try_clone().map_err(|e| e.to_string())?,
-        offset,
-        page.sector_size,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut bytes = vec![0; page.sector_size as usize];
-    region.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+enum Context {
+    Partition(SectorContext),
+    Unallocated(TableReadContext),
+}
+
+#[cfg(windows)]
+impl Context {
+    fn open(source: &Selection, old: Option<(&Self, &device::Locks)>) -> Result<Self, String> {
+        match (source.partition, old) {
+            (Some(_), None) => Ok(Self::Partition(platform::sector_context(source, None)?)),
+            (Some(_), Some((Self::Partition(ctx), locks))) => Ok(Self::Partition(
+                platform::sector_context(source, Some((ctx, locks)))?,
+            )),
+            (None, None) => Ok(Self::Unallocated(maintenance::write_context(source, None)?)),
+            (None, Some((Self::Unallocated(ctx), locks))) => Ok(Self::Unallocated(
+                maintenance::write_context(source, Some((ctx, locks)))?,
+            )),
+            _ => Err("扇区范围已变化。".into()),
+        }
+    }
+
+    fn binding(
+        &self,
+    ) -> (
+        &device::Resolved,
+        &[crate::partitions::policy::Partition],
+        &str,
+    ) {
+        match self {
+            Self::Partition(ctx) => (&ctx.resolved, &ctx.parts, &ctx.fingerprint),
+            Self::Unallocated(ctx) => (&ctx.resolved, &ctx.parts, &ctx.fingerprint),
+        }
+    }
+
+    fn page_range(&self, page: &Page) -> Result<Range, String> {
+        let (resolved, _, _) = self.binding();
+        if resolved.offset != page.source_offset
+            || resolved.size != page.source_size
+            || resolved.disk.logical_sector_size != Some(page.sector_size)
+        {
+            return Err("扇区范围已变化。".into());
+        }
+        Options {
+            start_sector: page.sector,
+            sector_count: 1,
+        }
+        .range(page.source_offset, page.source_size, page.sector_size)
+    }
+
+    fn proof(&self, file: &mut File, page: &Page, range: Range) -> Result<Proof, String> {
+        let (resolved, parts, _) = self.binding();
+        let (physical, alignment_offset) = device::physical_alignment(resolved, file)?;
+        let block = sector_edit::physical_block(
+            range,
+            Range {
+                offset: resolved.offset,
+                size: resolved.size,
+                sector: page.sector_size,
+            },
+            physical,
+            alignment_offset,
+        )?;
+        let native = match self {
+            Self::Partition(ctx) => {
+                let layout = extfs::native_layout(file, &parts.iter().collect::<Vec<_>>())?;
+                extfs::check_native_data_target(&layout, &ctx.selected)?;
+                Native::Partition(extfs::layout_fingerprint(&layout, None))
+            }
+            Self::Unallocated(ctx) => {
+                let (archive, layout) =
+                    maintenance::write_table(ctx, file, &page.source.target)?
+                        .ok_or("整盘视图只能写回 GPT 可用范围内的未分配物理扇区。")?;
+                sector_edit::check_unallocated(
+                    block,
+                    layout.first,
+                    layout.last,
+                    layout.entries.iter().map(|part| (part.offset, part.size)),
+                )?;
+                maintenance::protect_write_range(&archive, &layout, block, true)?;
+                Native::Unallocated(archive)
+            }
+        };
+        Ok(Proof { block, native })
+    }
+}
+
+#[cfg(windows)]
+fn read_block(file: &mut File, block: Range) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0; block.size as usize];
+    file.seek(SeekFrom::Start(block.offset))
+        .map_err(|e| e.to_string())?;
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     Ok(bytes)
 }
 pub fn prepare(request: Request) -> Result<Plan, String> {
@@ -114,34 +217,26 @@ pub fn prepare(request: Request) -> Result<Plan, String> {
                 .filter(|p| p.id == request.page_id)
                 .cloned()
                 .ok_or("扇区页面已失效，请重新读取。")?;
-            let after = sector_edit::apply(&page.bytes, &request.edits)?;
-            let ctx = crate::partitions::platform::sector_context(&page.source, None)?;
-            if ctx.resolved.offset != page.source_offset
-                || ctx.resolved.size != page.source_size
-                || ctx.resolved.disk.logical_sector_size != Some(page.sector_size)
-            {
-                return Err("扇区范围已变化。".into());
-            }
-            crate::surface_scan::Options {
-                start_sector: page.sector,
-                sector_count: 1,
-            }
-            .range(page.source_offset, page.source_size, page.sector_size)?;
-            let file = crate::data_windows::device(&ctx.resolved, false)?;
-            let layout = crate::extfs::native_layout(&file, &ctx.parts.iter().collect::<Vec<_>>())?;
-            crate::extfs::check_native_data_target(&layout, &ctx.selected)?;
-            if current(&file, &page)? != page.bytes {
+            let edited = sector_edit::apply(&page.bytes, &request.edits)?;
+            let ctx = Context::open(&page.source, None)?;
+            let range = ctx.page_range(&page)?;
+            let (resolved, _, fingerprint) = ctx.binding();
+            let mut file = device::device(resolved, false)?;
+            let proof = ctx.proof(&mut file, &page, range)?;
+            let before = read_block(&mut file, proof.block)?;
+            let at = (range.offset - proof.block.offset) as usize;
+            if before[at..at + edited.len()] != page.bytes {
                 return Err("扇区内容已变化，请重新读取后编辑。".into());
             }
-            if crate::partitions::platform::sector_context(&page.source, None)?.fingerprint
-                != ctx.fingerprint
-            {
+            let mut after = before.clone();
+            after[at..at + edited.len()].copy_from_slice(&edited);
+            if Context::open(&page.source, None)?.binding().2 != fingerprint {
                 return Err("预览期间磁盘或卷信息已变化。".into());
             }
             let changes = page
                 .bytes
                 .iter()
-                .zip(&after)
+                .zip(&edited)
                 .enumerate()
                 .filter_map(|(i, (&before, &after))| {
                     (before != after).then_some(Change {
@@ -151,13 +246,26 @@ pub fn prepare(request: Request) -> Result<Plan, String> {
                     })
                 })
                 .collect();
-            let plan=Plan{token:uuid::Uuid::new_v4().to_string(),target:ctx.resolved.label,relative_sector:page.sector,absolute_sector:page.source_offset/page.sector_size+page.sector,sector_size:page.sector_size,before_sha256:sector_edit::hash(&page.bytes),after_sha256:sector_edit::hash(&after),changes,warning:"直接修改扇区可能破坏文件或文件系统。确认后将锁定同盘所有卷并让整块磁盘脱机，执行一次写入并回读 SHA-256；成功或失败都保持脱机，不自动恢复原内容。".into()};
+            let plan = Plan {
+                token: uuid::Uuid::new_v4().to_string(),
+                target: resolved.label.clone(),
+                relative_sector: page.sector,
+                absolute_sector: range.offset / page.sector_size,
+                sector_size: page.sector_size,
+                write_size: proof.block.size,
+                write_start_lba: proof.block.offset / page.sector_size,
+                before_sha256: sector_edit::hash(&page.bytes),
+                after_sha256: sector_edit::hash(&edited),
+                changes,
+                warning: "直接修改扇区可能破坏文件或文件系统。确认后将锁定同盘所有卷并让整块磁盘脱机，执行一次写入并回读 SHA-256；成功或失败都保持脱机，不自动恢复原内容。".into(),
+            };
             *pending() = Some(Pending {
                 plan: plan.clone(),
                 page,
+                before,
                 after,
-                fingerprint: ctx.fingerprint,
-                native: crate::extfs::layout_fingerprint(&layout, None),
+                fingerprint: fingerprint.to_owned(),
+                proof,
                 expires: Instant::now() + Duration::from_secs(300),
             });
             Ok(plan)
@@ -173,7 +281,6 @@ pub fn execute(token: String) -> Result<Outcome, String> {
     #[cfg(windows)]
     {
         job("保存扇区修改", || {
-            use crate::{data_windows as device, extfs, partitions::platform};
             let item = take(&mut pending(), &token, Instant::now())?;
             if sector_tasks::page_state()
                 .as_ref()
@@ -181,19 +288,18 @@ pub fn execute(token: String) -> Result<Outcome, String> {
             {
                 return Err("原扇区页面已被替换，请重新预览。".into());
             }
-            let ctx = platform::sector_context(&item.page.source, None)?;
-            if ctx.fingerprint != item.fingerprint {
+            let ctx = Context::open(&item.page.source, None)?;
+            let (resolved, parts, fingerprint) = ctx.binding();
+            if fingerprint != item.fingerprint {
                 return Err("磁盘或卷状态与预览不一致。".into());
             }
-            let locks = device::lock(&ctx.resolved)?;
-            let fresh = platform::sector_context(&item.page.source, Some((&ctx, &locks)))?;
-            device::verify_locks(&locks, &ctx.resolved, &ctx.parts.iter().collect::<Vec<_>>())?;
-            let mut file = device::exclusive_device(&fresh.resolved)?;
-            let parts = fresh.parts.iter().collect::<Vec<_>>();
-            let layout = extfs::native_layout(&file, &parts)?;
-            extfs::check_native_data_target(&layout, &fresh.selected)?;
-            if extfs::layout_fingerprint(&layout, None) != item.native
-                || current(&file, &item.page)? != item.page.bytes
+            let locks = device::lock(resolved)?;
+            let fresh = Context::open(&item.page.source, Some((&ctx, &locks)))?;
+            device::verify_locks(&locks, resolved, &parts.iter().collect::<Vec<_>>())?;
+            let range = fresh.page_range(&item.page)?;
+            let mut file = device::exclusive_device(fresh.binding().0)?;
+            if fresh.proof(&mut file, &item.page, range)? != item.proof
+                || read_block(&mut file, item.proof.block)? != item.before
             {
                 return Err("原生布局或源扇区与预览不同，未写入。".into());
             }
@@ -202,24 +308,22 @@ pub fn execute(token: String) -> Result<Outcome, String> {
                 crate::native_locale::diagnostic("磁盘可能已脱机，尚未发出扇区写入。{error}", &e)
             })?;
             let result = (|| -> Result<String, String> {
-                if extfs::layout_fingerprint(&extfs::native_layout(&file, &parts)?, None)
-                    != item.native
-                {
+                device::confirm_writable_offline(&file)?;
+                if fresh.proof(&mut file, &item.page, range)? != item.proof {
                     return Err("脱机后分区布局变化，未写入。".into());
                 }
-                let hash = sector_edit::write_once(
+                sector_edit::write_once(
                     &mut file,
-                    item.plan.absolute_sector * item.page.sector_size,
-                    &item.page.bytes,
+                    item.proof.block,
+                    &item.before,
                     &item.after,
                     |f| f.sync_all(),
                 )?;
-                if extfs::layout_fingerprint(&extfs::native_layout(&file, &parts)?, None)
-                    != item.native
-                {
+                if fresh.proof(&mut file, &item.page, range)? != item.proof {
                     return Err("写入后分区布局校验不一致。".into());
                 }
-                Ok(hash)
+                device::confirm_writable_offline(&file)?;
+                Ok(item.plan.after_sha256.clone())
             })();
             let sha256 = result.map_err(|e| {
                 crate::native_locale::diagnostic(
@@ -242,6 +346,8 @@ mod tests {
                 relative_sector: 0,
                 absolute_sector: 2048,
                 sector_size: 512,
+                write_size: 512,
+                write_start_lba: 2048,
                 before_sha256: String::new(),
                 after_sha256: String::new(),
                 changes: vec![],
@@ -262,9 +368,17 @@ mod tests {
                 bytes: vec![0; 512],
                 sha256: String::new(),
             },
+            before: vec![0; 512],
             after: vec![1; 512],
             fingerprint: "proof".into(),
-            native: vec![],
+            proof: Proof {
+                block: crate::surface_scan::Range {
+                    offset: 1048576,
+                    size: 512,
+                    sector: 512,
+                },
+                native: Native::Partition(vec![]),
+            },
             expires: Instant::now() + Duration::from_secs(300),
         }
     }

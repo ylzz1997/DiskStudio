@@ -1,4 +1,5 @@
 //! Staged byte edits and single-attempt sector writes. All tests are synthetic.
+use crate::surface_scan::Range;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -30,16 +31,84 @@ pub fn apply(before: &[u8], edits: &[Edit]) -> Result<Vec<u8>, String> {
 pub fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+pub fn physical_block(
+    page: Range,
+    scope: Range,
+    physical: u64,
+    alignment_offset: u64,
+) -> Result<Range, String> {
+    let logical = page.sector;
+    if !matches!(logical, 512 | 4096)
+        || scope.sector != logical
+        || page.size != logical
+        || !matches!(physical, 512 | 4096)
+        || physical < logical
+        || alignment_offset >= physical
+        || alignment_offset % logical != 0
+        || page.offset % logical != 0
+    {
+        return Err("无法确认编辑所需的物理扇区边界。".into());
+    }
+    let padding = (page.offset % physical + alignment_offset) % physical;
+    let offset = page
+        .offset
+        .checked_sub(padding)
+        .ok_or("物理扇区跨出所选范围。")?;
+    let scope_end = scope
+        .offset
+        .checked_add(scope.size)
+        .ok_or("物理扇区跨出所选范围。")?;
+    if offset < scope.offset
+        || offset
+            .checked_add(physical)
+            .is_none_or(|end| end > scope_end)
+    {
+        return Err("物理扇区跨出所选范围。".into());
+    }
+    Ok(Range {
+        offset,
+        size: physical,
+        sector: logical,
+    })
+}
+
+pub fn check_unallocated(
+    block: Range,
+    first_usable: u64,
+    last_usable: u64,
+    entries: impl IntoIterator<Item = (u64, u64)>,
+) -> Result<(), String> {
+    let end = block.offset.checked_add(block.size).ok_or("扇区位置溢出")?;
+    if !matches!(block.sector, 512 | 4096)
+        || block.size < block.sector
+        || block.offset / block.sector < first_usable
+        || (end - 1) / block.sector > last_usable
+        || entries.into_iter().any(|(offset, size)| {
+            offset < end
+                && offset
+                    .checked_add(size)
+                    .is_none_or(|next| block.offset < next)
+        })
+    {
+        return Err("整盘视图只能写回 GPT 可用范围内的未分配物理扇区。".into());
+    }
+    Ok(())
+}
+
 pub fn write_once<R: Read + Write + Seek>(
     file: &mut R,
-    offset: u64,
+    range: Range,
     before: &[u8],
     after: &[u8],
     sync: impl FnOnce(&mut R) -> std::io::Result<()>,
 ) -> Result<String, String> {
+    let offset = range.offset;
     if !matches!(before.len(), 512 | 4096)
         || after.len() != before.len()
-        || offset % before.len() as u64 != 0
+        || range.size != before.len() as u64
+        || !matches!(range.sector, 512 | 4096)
+        || range.sector > range.size
+        || offset % range.sector != 0
         || offset
             .checked_add(before.len() as u64)
             .is_none_or(|end| end > i64::MAX as u64)
@@ -78,6 +147,13 @@ pub fn write_once<R: Read + Write + Seek>(
 mod tests {
     use super::*;
     use std::io::{self, Cursor};
+    fn range(offset: u64, size: u64, sector: u64) -> Range {
+        Range {
+            offset,
+            size,
+            sector,
+        }
+    }
     #[test]
     fn staged_edits_are_bounded_unique_and_do_not_modify_original() {
         let original = vec![0; 512];
@@ -162,13 +238,60 @@ mod tests {
         }
     }
     #[test]
+    fn physical_block_respects_alignment_scope_and_gpt_gaps() {
+        let disk = range(0, 16384, 512);
+        let block = physical_block(range(4608, 512, 512), disk, 4096, 0).unwrap();
+        assert_eq!(block, range(4096, 4096, 512));
+        assert!(check_unallocated(block, 8, 15, [(0, 4096), (8192, 512)]).is_ok());
+        for (first, last, parts) in [(9, 15, vec![]), (8, 14, vec![]), (8, 15, vec![(7680, 512)])] {
+            assert!(check_unallocated(block, first, last, parts).is_err());
+        }
+        assert_eq!(
+            physical_block(range(4096, 512, 512), disk, 4096, 512).unwrap(),
+            range(3584, 4096, 512)
+        );
+        assert!(physical_block(range(0, 512, 512), disk, 4096, 512).is_err());
+        assert!(physical_block(range(4608, 512, 512), range(4608, 8192, 512), 4096, 0).is_err());
+        assert_eq!(
+            physical_block(range(8192, 4096, 4096), range(0, 16384, 4096), 4096, 0).unwrap(),
+            range(8192, 4096, 4096)
+        );
+    }
+    #[test]
+    fn edits_in_512e_require_unchanged_neighbors_and_write_one_physical_block() {
+        let mut d = device();
+        d.bytes = Cursor::new(vec![7; 12288]);
+        let block = range(4096, 4096, 512);
+        let before = vec![7; 4096];
+        let mut after = before.clone();
+        after[512] = 42;
+        d.bytes.get_mut()[4096 + 511] = 9;
+        assert!(write_once(&mut d, block, &before, &after, |_| Ok(())).is_err());
+        assert_eq!(d.writes, 0);
+        d.bytes.get_mut()[4096 + 511] = 7;
+        assert_eq!(
+            write_once(&mut d, block, &before, &after, |_| Ok(())).unwrap(),
+            hash(&after)
+        );
+        assert_eq!(d.writes, 1);
+        assert_eq!(
+            d.bytes
+                .get_ref()
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value != 7)
+                .collect::<Vec<_>>(),
+            vec![(4608, &42)]
+        );
+    }
+    #[test]
     fn one_sector_write_preserves_neighbors_and_verifies_hash() {
         let mut d = device();
         let before = vec![7; 512];
         let mut after = before.clone();
         after[123] = 42;
         assert_eq!(
-            write_once(&mut d, 512, &before, &after, |_| Ok(())).unwrap(),
+            write_once(&mut d, range(512, 512, 512), &before, &after, |_| Ok(())).unwrap(),
             hash(&after)
         );
         assert_eq!(d.writes, 1);
@@ -181,11 +304,20 @@ mod tests {
         let mut d = device();
         let before = vec![0; 512];
         let after = vec![1; 512];
-        assert!(write_once(&mut d, 512, &before, &after, |_| Ok(()))
-            .unwrap_err()
-            .contains("未写入"));
-        assert!(write_once(&mut d, 1, &before, &after, |_| Ok(())).is_err());
-        assert!(write_once(&mut d, u64::MAX - 511, &before, &after, |_| Ok(())).is_err());
+        assert!(
+            write_once(&mut d, range(512, 512, 512), &before, &after, |_| Ok(()))
+                .unwrap_err()
+                .contains("未写入")
+        );
+        assert!(write_once(&mut d, range(1, 512, 512), &before, &after, |_| Ok(())).is_err());
+        assert!(write_once(
+            &mut d,
+            range(u64::MAX - 511, 512, 512),
+            &before,
+            &after,
+            |_| Ok(())
+        )
+        .is_err());
         assert_eq!(d.writes, 0);
     }
     #[test]
@@ -198,13 +330,19 @@ mod tests {
             let mut d = device();
             d.short = short;
             d.corrupt = corrupt;
-            assert!(write_once(&mut d, 512, &vec![7; 512], &vec![8; 512], |_| {
-                if sync_error {
-                    Err(io::Error::other("flush"))
-                } else {
-                    Ok(())
+            assert!(write_once(
+                &mut d,
+                range(512, 512, 512),
+                &vec![7; 512],
+                &vec![8; 512],
+                |_| {
+                    if sync_error {
+                        Err(io::Error::other("flush"))
+                    } else {
+                        Ok(())
+                    }
                 }
-            })
+            )
             .is_err());
             assert_eq!(d.writes, 1);
             assert_eq!(d.bytes.get_ref()[512], 8);
