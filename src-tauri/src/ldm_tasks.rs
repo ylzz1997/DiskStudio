@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(windows)]
+#[path = "ldm_conversion_windows.rs"]
+mod conversion;
+#[cfg(windows)]
 #[path = "ldm_devices_windows.rs"]
 mod devices;
 
@@ -36,6 +39,7 @@ pub struct BrowseRequest {
 #[serde(rename_all = "camelCase")]
 pub struct View {
     session_id: String,
+    can_preview_basic_conversion: bool,
     #[serde(flatten)]
     inventory: Inventory,
 }
@@ -48,6 +52,60 @@ pub struct DeviceCandidate {
     size: u64,
     model: String,
     known_offline: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversionPreview {
+    token: String,
+    disk: u32,
+    model: String,
+    volumes: Vec<ConversionVolume>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversionVolume {
+    name: String,
+    offset: u64,
+    size: u64,
+    filesystem: String,
+    #[serde(skip)]
+    boot_digest: [u8; 32],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversionOutcome {
+    verified_bytes: u64,
+    partitions: usize,
+}
+
+pub fn prepare_basic_conversion(session_id: String) -> Result<ConversionPreview, String> {
+    #[cfg(windows)]
+    return conversion::prepare(&session_id);
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+        Err("动态盘转换当前仅支持 Windows。".into())
+    }
+}
+
+pub fn execute_basic_conversion(token: String) -> Result<ConversionOutcome, String> {
+    #[cfg(windows)]
+    return conversion::execute(&token);
+    #[cfg(not(windows))]
+    {
+        let _ = token;
+        Err("动态盘转换当前仅支持 Windows。".into())
+    }
+}
+
+pub fn discard_basic_conversion(token: String) {
+    #[cfg(windows)]
+    conversion::discard(&token);
+    #[cfg(not(windows))]
+    let _ = token;
 }
 
 pub fn device_candidates() -> Result<Vec<DeviceCandidate>, String> {
@@ -161,7 +219,7 @@ mod platform {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    fn state() -> std::sync::MutexGuard<'static, Option<Arc<Saved>>> {
+    pub(super) fn state() -> std::sync::MutexGuard<'static, Option<Arc<Saved>>> {
         static SAVED: OnceLock<Mutex<Option<Arc<Saved>>>> = OnceLock::new();
         SAVED
             .get_or_init(|| Mutex::new(None))
@@ -170,7 +228,7 @@ mod platform {
     }
 
     impl Members {
-        fn validate(&self) -> Result<(), String> {
+        pub(super) fn validate(&self) -> Result<(), String> {
             match self {
                 Self::Images { files, .. } => files.validate(),
                 Self::Disks(members) => {
@@ -254,6 +312,8 @@ mod platform {
             }
         };
         let group = members.open(|| Ok(()))?;
+        let can_preview_basic_conversion = matches!(&members, Members::Disks(disks) if disks.len() == 1)
+            && group.standalone_simple_extents().is_ok();
         let inventory = group.inventory().clone();
         let session_id = uuid::Uuid::new_v4().to_string();
         *state() = Some(Arc::new(Saved {
@@ -264,16 +324,13 @@ mod platform {
         }));
         Ok(Some(View {
             session_id,
+            can_preview_basic_conversion,
             inventory,
         }))
     }
 
     pub(crate) fn selected(request: BrowseRequest) -> Result<Source, String> {
-        let saved = state()
-            .as_ref()
-            .filter(|saved| saved.session_id == request.session_id)
-            .cloned()
-            .ok_or("动态磁盘检查已失效，请重新读取。")?;
+        let saved = inspected(&request.session_id)?;
         let volume = saved
             .inventory
             .volumes
@@ -293,6 +350,14 @@ mod platform {
             degraded,
             saved,
         })
+    }
+
+    pub(super) fn inspected(session_id: &str) -> Result<Arc<Saved>, String> {
+        state()
+            .as_ref()
+            .filter(|saved| saved.session_id == session_id)
+            .cloned()
+            .ok_or_else(|| "动态磁盘检查已失效，请重新读取。".into())
     }
 
     impl Source {

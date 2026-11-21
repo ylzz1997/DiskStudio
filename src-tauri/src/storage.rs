@@ -257,7 +257,7 @@ fn normalize(
     normalize_associated(disks, partitions, volumes, warnings, None, &[])
 }
 
-fn same_reference(a: &str, b: &str) -> bool {
+pub(crate) fn same_reference(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }

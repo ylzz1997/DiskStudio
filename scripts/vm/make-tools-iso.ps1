@@ -13,6 +13,7 @@ param(
     [switch]$BtrfsLostMembersFixture,
     [switch]$LvmFixture,
     [switch]$LdmFixture,
+    [switch]$StorageSpacesFixture,
     [switch]$DesktopOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -28,10 +29,11 @@ if (!$Live -and (Test-Path -LiteralPath (Join-Path $diskStudioVmRoot 'run.json')
     $diskStudioRun = Get-Content -LiteralPath (Join-Path $diskStudioVmRoot 'run.json') -Raw | ConvertFrom-Json
     if (Get-Process -Id $diskStudioRun.pid -ErrorAction SilentlyContinue) { throw 'Shut down the VM before replacing its optical media' }
 }
-if (($GuestTools -or $DesktopOnly -or $LdmFixture) -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
+if (($GuestTools -or $DesktopOnly -or $LdmFixture -or $StorageSpacesFixture) -and !$Live) { throw 'A selected tool set requires an immutable -Live ISO' }
 $diskStudioFixtures = @($BtrfsMoveFixture.IsPresent, $BtrfsCloneFixture.IsPresent, $BtrfsSnapshotFixture.IsPresent, $BtrfsRetainedFixture.IsPresent, $BtrfsSha256Fixture.IsPresent, $BtrfsMembersFixture.IsPresent, $BtrfsParityFixture.IsPresent, $BtrfsAllocationFixture.IsPresent, $BtrfsLostFixture.IsPresent, $BtrfsLostMembersFixture.IsPresent) | Where-Object { $_ }
-if ($DesktopOnly -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture -or $LdmFixture)) { throw 'A desktop-only ISO cannot include guest tools or fixtures' }
+if ($DesktopOnly -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture -or $LdmFixture -or $StorageSpacesFixture)) { throw 'A desktop-only ISO cannot include guest tools or fixtures' }
 if ($LdmFixture -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture)) { throw 'The LDM fixture requires its own immutable optical media' }
+if ($StorageSpacesFixture -and ($GuestTools -or $diskStudioFixtures -or $LvmFixture -or $LdmFixture)) { throw 'The Storage Spaces fixture requires its own immutable optical media' }
 if (@($diskStudioFixtures).Count -gt 1) { throw 'Choose one Btrfs fixture for this ISO' }
 $diskStudioLvmMedia = @{
     'Lvm-Lab-4Kn-Prepare.exe' = @{ MemberFiles = $true }
@@ -86,7 +88,7 @@ foreach ($diskStudioDirectory in @($diskStudioVmRoot, $diskStudioPayload, (Join-
     } else { New-Item -ItemType Directory -Path $diskStudioDirectory | Out-Null }
 }
 if (Test-Path -LiteralPath $diskStudioIso) { throw 'Tools ISO already exists; preserve it or remove that single file after shutting down the VM' }
-if ($GuestTools -or $DesktopOnly -or $LdmFixture) {
+if ($GuestTools -or $DesktopOnly -or $LdmFixture -or $StorageSpacesFixture) {
     # Use a fresh staging directory. Older payloads and ISO files may still be
     # needed for failure diagnosis and must not be changed.
     $diskStudioSelected = @{}
@@ -217,6 +219,13 @@ if ($GuestTools -or $DesktopOnly -or $LdmFixture) {
             }
             $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
         }
+    }
+    if ($StorageSpacesFixture) {
+        $diskStudioHelper = Get-Item -LiteralPath (Join-Path $PSScriptRoot 'storage-spaces-fixture.ps1')
+        if ($diskStudioHelper.PSIsContainer -or ($diskStudioHelper.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Invalid Storage Spaces fixture setup script'
+        }
+        $diskStudioSelected.Add($diskStudioHelper.Name, $diskStudioHelper.FullName)
     }
     if ($LdmFixture) {
         $diskStudioHelper = Get-Item -LiteralPath (Join-Path $PSScriptRoot 'ldm-fixture.ps1')

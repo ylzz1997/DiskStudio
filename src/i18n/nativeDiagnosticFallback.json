@@ -359,5 +359,18 @@
   "读取队列只能执行只读负载。": "Read queues require a read-only workload.",
   "文件测速完成端口未返回请求。": "The file benchmark completion port returned no request.",
   "文件测速完成端口返回了未知的请求。": "The file benchmark completion port returned an unknown request.",
-  "文件测速收到重复完成通知。": "The file benchmark received a duplicate completion."
+  "文件测速收到重复完成通知。": "The file benchmark received a duplicate completion.",
+  "转换要求完整的单盘动态磁盘组，且每个卷都是连续、干净的简单卷。": "Conversion requires a complete single-disk dynamic group with only clean, contiguous simple volumes.",
+  "转换要求同时存在 LDM 数据和元数据的 GPT。": "Conversion requires GPT with LDM data and metadata partitions.",
+  "磁盘包含受保护或不支持的 GPT 条目，或简单卷数量超出范围。": "The disk contains a protected or unsupported GPT entry, or there are too many simple volumes.",
+  "无法排除启动、群集或联机卷关联，已拒绝转换。": "Conversion requires a disk with no boot, cluster, or online volume association.",
+  "磁盘包含启动分区，或 Win32 分区范围与原始 GPT 不一致。": "The disk contains a boot partition, or the Win32 partition ranges disagree with the on-disk GPT.",
+  "原生 GPT 记录与动态盘布局不一致，或包含受保护的服务分区。": "The native GPT layout disagrees with the dynamic disk layout or includes a protected service partition.",
+  "文件系统扇区大小与动态卷不一致。": "The file system sector size disagrees with the dynamic volume.",
+  "磁盘布局或文件系统与预览不一致，请重新预览。": "The disk layout or file system changed. Preview the conversion again.",
+  "转换确认已过期或不匹配，请重新预览。": "The confirmation expired or does not match. Preview the conversion again.",
+  "已取消转换，未写入分区表。": "Conversion was canceled before the partition table write.",
+  "此磁盘是存储池成员，不能作为独立磁盘操作。": "This disk belongs to a storage pool and cannot be operated on as a standalone disk.",
+  "存储空间不能作为独立物理盘操作。": "This storage space is not available for standalone physical disk operations.",
+  "Windows 返回的存储池对象或关联过多。": "Windows returned too many storage pool objects or associations."
 }

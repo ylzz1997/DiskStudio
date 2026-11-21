@@ -278,6 +278,7 @@ fn context(
     let state = model::eligible(&ctx.resolved.disk, &ctx.parts, request.action)?;
     let session = Session::open()?;
     let disk = policy::target_disk(&session.disks, &request.source.target)?;
+    session.check_pool(disk)?;
     if digest(disk)? != digest(&ctx.resolved.disk)?
         || digest(&policy::layout(disk, &session.partitions)?)? != digest(&ctx.parts)?
     {
@@ -474,6 +475,7 @@ fn execute_checked(
     let s = Session::open()?;
     let disk = policy::target_disk(&s.disks, &request.source.target)?;
     policy::corroborate(disk, &s.legacy)?;
+    s.check_pool(disk)?;
     let (id, _) = identities(&s, disk, request.action)?;
     if digest(disk)? != digest(&fresh.ctx.resolved.disk)?
         || digest(&id)? != expected.identity

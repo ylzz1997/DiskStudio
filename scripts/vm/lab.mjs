@@ -18,7 +18,7 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'ldm'];
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'ldm', 'storage-spaces'];
 function profileDisks(fourKn, fixture) {
   const base = fourKn ? fourKnDisks : disks;
   return fixture ? base.map(disk => disk.bus === 'nvme' ? {
@@ -638,6 +638,7 @@ async function main() {
     console.log('start --4kn --fat-restore: use the dedicated FAT variant restore fixtures');
     console.log('start --ext-copy: use the dedicated 512-byte Ext copy and restore fixtures');
     console.log('start --ldm [--4kn]: use the dedicated Windows dynamic disk fixtures');
+    console.log('start --4kn --storage-spaces: use the dedicated Windows Storage Spaces fixtures');
     console.log('start --4kn --signature-scope: use the dedicated 4Kn signature scan fixtures');
     console.log('start --4kn --signature-formats: use the dedicated 4Kn signature format fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');

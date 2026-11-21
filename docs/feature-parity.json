@@ -10,7 +10,8 @@
     "https://www.diskgenius.com/manual/clone-disk.php",
     "https://www.diskgenius.com/manual/verify-or-repair-bad-sectors.php",
     "https://www.diskgenius.com/manual/copy-sectors.php",
-    "https://www.diskgenius.com/manual/construct-virtual-raid.php"
+    "https://www.diskgenius.com/manual/construct-virtual-raid.php",
+    "https://www.diskgenius.com/manual/operate-mss.php"
   ],
   "rules": [
     "一份正式程序；宿主仅查看 UI 和固定 WMI SELECT 元数据。",
@@ -573,13 +574,14 @@
     {
       "id": "dynamic-disks",
       "status": "in-progress",
-      "detail": "文件恢复页支持 Windows LDM 动态卷的只读检查、扫描、预览和跨盘导出。可显式选择同组 RAW/IMG 整盘镜像或脱机设备。校验 MBR 或主备 GPT、PRIVHEAD 和 TOCBLOCK 副本、VMDB 提交版本及 VBLK 分片与引用。支持简单、跨区、带区、镜像及 RAID-5 卷。缺盘镜像和缺一盘的 RAID-5 需要显式允许降级读取。扫描、预览和导出前复核源身份、布局及数据库。19 份 Windows Server 2003 R2/2008 R2 参考镜像覆盖 MBR/GPT 成员组合，11 个卷读出的 NTFS 文件与夹具预期一致，10 个降级组合的完整逻辑卷 SHA-256 与齐全成员一致，另拒绝 6 个成员不足的组合及重复成员、混组。e1c40c44 正式构建在 4Kn 来宾读取两份 512 B 镜像和仅 GPT 成员的降级组合，预览预期的 15 字节文件，拒绝同盘导出。后验确认两份源镜像摘要一致。ecc768e6 正式构建在隔离 Windows 来宾读取 A 盘经 DiskPart 创建的 4Kn GPT 简单卷，预览并向 B 盘导出 196,625 字节文件，保留子目录。来宾独立复核完整 SHA-256，A 盘在验收期间无新增写入。动态盘转回基本磁盘仍待实现。",
-      "evidence": ".vm/ldm-native-status.json"
+      "detail": "文件恢复页支持 Windows LDM 动态卷的只读检查、扫描、预览和跨盘导出。可显式选择同组 RAW/IMG 整盘镜像或脱机设备。校验 MBR 或主备 GPT、PRIVHEAD 和 TOCBLOCK 副本、VMDB 提交版本及 VBLK 分片与引用。支持简单、跨区、带区、镜像及 RAID-5 卷。缺盘镜像和缺一盘的 RAID-5 需要显式允许降级读取。扫描、预览和导出前复核源身份、布局及数据库。19 份 Windows Server 2003 R2/2008 R2 参考镜像覆盖 MBR/GPT 成员组合，11 个卷读出的 NTFS 文件与夹具预期一致，10 个降级组合的完整逻辑卷 SHA-256 与齐全成员一致，另拒绝 6 个成员不足的组合及重复成员、混组。e1c40c44 正式构建在 4Kn 来宾读取两份 512 B 镜像和仅 GPT 成员的降级组合，预览预期的 15 字节文件，拒绝同盘导出。后验确认两份源镜像摘要一致。ecc768e6 正式构建在隔离 Windows 来宾读取 A 盘经 DiskPart 创建的 4Kn GPT 简单卷，预览并向 B 盘导出 196,625 字节文件，保留子目录。来宾独立复核完整 SHA-256，A 盘在验收期间无新增写入。单盘 GPT 动态盘的连续简单卷已支持原位转换。f7121112 正式构建在隔离 Windows 来宾转换了一个 4Kn、256 MiB 的 NTFS 简单卷。独立验收确认磁盘仍脱机，Windows 已识别基本数据分区，偏移、大小和完整 SHA-256 与转换前一致，Microsoft 保留条目和保护性 MBR 逐字节相同。9b4a46f4 正式构建随后在 512e 来宾一次转换同盘 FAT32、exFAT 和 NTFS 三个简单卷，合计 768 MiB。Windows 独立复核每个卷的原始偏移、大小和完整 SHA-256、磁盘脱机状态、磁盘 GUID、保留条目及保护性 MBR。确认前 A/B 无新增写入，转换后 A 增加 4 次写入共 33 KiB，B 无新增写入。另有合成用例覆盖同盘相邻区段按逻辑顺序合并，以及拒绝间隙或逆序。",
+      "evidence": ".vm/ldm-mixed-status.json"
     },
     {
       "id": "storage-spaces",
-      "status": "planned",
-      "detail": "Windows 存储池/存储空间的独立能力与保护"
+      "status": "in-progress",
+      "detail": "磁盘菜单可只读检查 Windows 报告的存储池、成员盘、虚拟盘配置、数据所在成员和已确认关联的磁盘。要求独立物理盘的操作会拒绝池成员及逻辑空间。21cdab6a 正式构建在隔离 4Kn Windows 来宾验证了空状态、双成员存储池、已挂接的固定双副本镜像及未挂接的精简双列空间。可定位镜像关联的磁盘，未挂接空间不提供跳转。面板读取、刷新和跳转期间 A/B 无新增读写。脱机成员的独立重组、逻辑空间恢复、备份与管理仍待实现。",
+      "evidence": ".vm/storage-spaces-status.json"
     },
     {
       "id": "network-disk",

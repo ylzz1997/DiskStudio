@@ -197,6 +197,7 @@ struct Bounds {
 
 struct Session {
     con: WMIConnection,
+    pool_protection: Result<crate::storage_spaces::PoolProtection, String>,
     disks: Vec<Disk>,
     partitions: Vec<Partition>,
     pagefiles: Vec<PageFile>,
@@ -649,8 +650,10 @@ impl Session {
         if partitions.len() > 32768 {
             return Err("分区数量异常，已拒绝操作。".into());
         }
+        let pool_protection = crate::storage_spaces::PoolProtection::read(&con);
         Ok(Self {
             con,
+            pool_protection,
             disks,
             partitions,
             pagefiles,
@@ -660,8 +663,12 @@ impl Session {
     fn disk(&self, t: &Target) -> Result<&Disk, String> {
         let d = policy::target_disk(&self.disks, t)?;
         policy::corroborate(d, &self.legacy)?;
+        self.check_pool(d)?;
         policy::manageable(d)?;
         Ok(d)
+    }
+    fn check_pool(&self, disk: &Disk) -> Result<(), String> {
+        self.pool_protection.as_ref().map_err(Clone::clone)?.check_disk(disk)
     }
     fn revision(&self, t: &Target) -> Result<String, String> {
         let d = self.disk(t)?;

@@ -727,3 +727,21 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 记录 QMP 读写基线。用光盘上的正式程序打开「文件恢复 → 浏览动态卷 → 脱机磁盘」，选已核对的 A 盘，浏览简单卷并预览 `nested\ldm-witness.bin`。通过应用的确认对话框把文件导出至 B 盘的 `R:\out`，再运行 `ldm-fixture.ps1 -Verify` 核对长度和 SHA-256。记录 A/B 的 QMP 计数差值及来宾磁盘元数据。
 
 正式构建 `ecc768e6…` 成功读取脱机 A 上由 Windows 创建的 256 MiB 4Kn GPT 简单卷，预览并导出一个 196,625 字节的文件至 B 上的原始子目录。独立校验与准备阶段的文件 SHA-256 一致。自打开应用到完成验收，A 无新增写入。完整证据见 `.vm/ldm-native-status.json`。
+
+### 动态盘转基本盘验收
+
+在保留上述 4Kn 夹具的情况下，按原流程核对 QMP 与来宾磁盘身份，并挂载与本次构建匹配的工具光盘。来宾执行 `ldm-fixture.ps1 -RecordBasicBaseline`，在 B 上记录 A 的 256 MiB NTFS 简单卷的原始偏移和完整 SHA-256。随后在动态卷界面选择脱机 A，预览「转换为基本磁盘」，核对预览中的起点和大小后确认一次。完成后，`ldm-fixture.ps1 -VerifyBasic` 独立核对 A 仍脱机、Windows 已识别 GPT 基本数据分区，且整个卷的 SHA-256 与原来一致。比较 QMP 计数，区分预览、写入和独立验证。
+
+正式构建 `f7121112…` 在偏移 16 MiB 处保留了原 256 MiB NTFS 卷。应用返回成功后，来宾独立验证了基本数据分区、脱机状态和整个卷的 SHA-256。对比转换前后原始扇区，Microsoft 保留分区条目与保护性 MBR 逐字节一致。QMP 在转换确认前记录 A/B 零新增写入，应用完成后 A 增加 4 次写入共 40 KiB，B 无新增写入。完整证据见 `.vm/ldm-convert-status.json`。
+
+混合文件系统验收使用独立的 512 字节扇区 A/B 夹具。用 `node scripts/vm/lab.mjs start --ldm` 启动，先核对 QMP、来宾完整序列号、容量、扇区规格和光盘载荷摘要。来宾执行一次 `ldm-fixture.ps1 -Mixed`，在空白 A 上建立 FAT32、exFAT 和 NTFS 三个带测试文件的简单卷，使用 Windows DiskPart 转为动态盘并脱机。在应用预览前运行 `ldm-fixture.ps1 -Mixed -RecordBasicBaseline`，把三个卷的完整摘要和 GPT 保留字段记录到 B。转换完成后运行 `ldm-fixture.ps1 -Mixed -VerifyBasic`，核对三个基本数据分区的原始偏移、大小、完整 SHA-256、脱机状态、磁盘 GUID、保留分区条目和保护性 MBR。
+
+正式构建 `9b4a46f4…` 识别并一次转换偏移分别为 16、336 和 528 MiB 的三个简单卷，容量分别为 320、192 和 256 MiB。来宾独立核对三个卷的完整 SHA-256 和 GPT 保留字段，结果与基线一致。应用预览期间 A/B 无新增写入，确认后 A 共写入 33 KiB，B 无新增写入。完整证据见 `.vm/ldm-mixed-status.json`。单个卷含多个相邻 LDM 区段的转换另有合成测试。
+
+### Windows 存储池与存储空间验收
+
+用 `node scripts/vm/lab.mjs start --4kn --storage-spaces` 启动独立的空白 A/B 夹具。先通过 QMP 预检，再在来宾核对完整序列号、容量和扇区规格。挂载 `make-tools-iso.ps1 -Live -StorageSpacesFixture` 生成的只读光盘，核对应用载荷的 SHA-256。在来宾中执行一次 `storage-spaces-fixture.ps1`，用指定的两个成员创建存储池、双副本固定镜像和双列精简空间，两个虚拟盘都保留未初始化状态。
+
+运行同一光盘中的 DiskStudio，从「磁盘 → 存储池与存储空间」检查池成员、容量、配置、数据所在成员及 Windows 关联的磁盘。在来宾中用 `storage-spaces-fixture.ps1 -Verify` 独立核对。记录打开面板前后 A/B 读写计数。Windows 空间和池成员继续受独立物理盘操作的保护。
+
+正式构建 `21cdab6a…` 在隔离 4Kn Windows 来宾显示了无池时的空状态。建池后，应用显示两个 16 GiB 成员、已挂接的 1 GiB 固定双副本镜像和未挂接的 1 GiB 精简双列空间。来宾独立核对成员关系、布局和挂接状态。刷新后保留所选空间。镜像可定位到磁盘 3，初始化按钮不可用。未挂接空间没有磁盘跳转。打开已建池面板、切换、刷新及跳转期间，A/B 的 QMP 读写计数均无变化。成员身份冲突和缺失的拒绝行为另由合成测试覆盖。完整证据见 `.vm/storage-spaces-status.json`。

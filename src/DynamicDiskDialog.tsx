@@ -22,6 +22,7 @@ export type DynamicDiskView = {
   id: string;
   name: string;
   sectorSize: number;
+  canPreviewBasicConversion: boolean;
   volumes: {
     id: string;
     name: string;
@@ -33,14 +34,32 @@ export type DynamicDiskView = {
   }[];
 };
 
+export type DynamicConversion = {
+  token: string;
+  disk: number;
+  model: string;
+  volumes: { name: string; offset: number; size: number; filesystem: string }[];
+};
+
+export type DynamicConversionOutcome = {
+  verifiedBytes: number;
+  partitions: number;
+};
+
 type Props = {
   candidates: DynamicDiskCandidate[] | null;
   busy: boolean;
   error: string;
   view: DynamicDiskView | null;
+  conversion: DynamicConversion | null;
+  converted: DynamicConversionOutcome | null;
+  conversionProgress: { done: number; total: number } | null;
   onClose: () => void;
   onReselect: () => void;
   onLoadCandidates: () => void;
+  onPreviewConversion: (sessionId: string) => void;
+  onExecuteConversion: (token: string) => void;
+  onCancelConversion: () => void;
   onInspect: (source: DynamicDiskInput) => void;
   onBrowse: (
     sessionId: string,
@@ -55,9 +74,15 @@ export function DynamicDiskDialog({
   busy,
   error,
   view,
+  conversion,
+  converted,
+  conversionProgress,
   onClose,
   onReselect,
   onLoadCandidates,
+  onPreviewConversion,
+  onExecuteConversion,
+  onCancelConversion,
   onInspect,
   onBrowse,
 }: Props) {
@@ -67,6 +92,7 @@ export function DynamicDiskDialog({
   const [selected, setSelected] = useState<string[]>([]);
   const [deleted, setDeleted] = useState(false);
   const [allowDegraded, setAllowDegraded] = useState(false);
+  const [conversionConfirmed, setConversionConfirmed] = useState(false);
   const offered = candidates ?? [];
   const members = offered
     .map(({ target }) => target)
@@ -86,14 +112,37 @@ export function DynamicDiskDialog({
   };
   return (
     <Dialog
-      title={t("浏览动态卷")}
-      subtitle={t("选择同一 Windows 动态磁盘组的成员。")}
+      title={t(conversion || converted ? "转换为基本磁盘" : "浏览动态卷")}
+      subtitle={conversion || converted ? undefined : t("选择同一 Windows 动态磁盘组的成员。")}
       wide
       onClose={() => {
         if (!busy) onClose();
       }}
     >
-      {view ? (
+      {converted ? (
+        <section className="lost-results">
+          <h3>{t("动态盘已转为 GPT 基本磁盘，卷内容 SHA-256 校验一致。磁盘保持脱机。")}</h3>
+          <p>
+            {t("数据分区")} {converted.partitions} · {formatSize(converted.verifiedBytes)}
+          </p>
+        </section>
+      ) : conversion ? (
+        <section className="lost-results">
+          <h3>{t("磁盘")} {conversion.disk} · {conversion.model}</h3>
+          <p>{t("每个简单卷会成为同一位置和大小的 GPT 数据分区。应用会完整校验转换前后的卷内容，磁盘保持脱机。")}</p>
+          {conversion.volumes.map((volume) => (
+            <div className="data-action-row" key={volume.offset}>
+              <span><strong>{volume.name}</strong> · {volume.filesystem}</span>
+              <span>{t("起始偏移")} {formatSize(volume.offset)} · {formatSize(volume.size)}</span>
+            </div>
+          ))}
+          <label className="table-backup-option">
+            <input type="checkbox" checked={conversionConfirmed} disabled={busy}
+              onChange={(event) => setConversionConfirmed(event.currentTarget.checked)} />
+            <span>{t("我已核对目标和范围，并了解数据影响")}</span>
+          </label>
+        </section>
+      ) : view ? (
         <section className="lost-results">
           <h3>{view.name || view.id}</h3>
           <p className="lost-note">
@@ -219,12 +268,29 @@ export function DynamicDiskDialog({
           )}
         </>
       )}
+      {conversionProgress && conversionProgress.total > 0 ? (
+        <div className="data-progress-meta" role="status">
+          <progress value={conversionProgress.done} max={conversionProgress.total} />
+          <span>{formatSize(conversionProgress.done)} / {formatSize(conversionProgress.total)}</span>
+        </div>
+      ) : busy && <p role="status">{t("正在准备")}</p>}
       <FormError message={catalogText(error)} />
       <div className="dialog-actions">
         <button className="button" disabled={busy} onClick={onClose}>
-          {t("取消")}
+          {t(converted ? "关闭对话框" : "取消")}
         </button>
-        {view ? (
+        {converted ? null : conversion ? (
+          <>
+            <button className="button" disabled={busy} onClick={onCancelConversion}>
+              {t("返回")}
+            </button>
+            <button className="button primary" disabled={busy || !conversionConfirmed}
+              onClick={() => onExecuteConversion(conversion.token)}>
+              {t("确认并开始")}
+            </button>
+          </>
+        ) : view ? (
+          <>
           <button
             className="button"
             disabled={busy}
@@ -235,6 +301,15 @@ export function DynamicDiskDialog({
           >
             {t("重新选择来源")}
           </button>
+          {view.canPreviewBasicConversion && (
+            <button className="button" disabled={busy} onClick={() => {
+              setConversionConfirmed(false);
+              onPreviewConversion(view.sessionId);
+            }}>
+              {t("预览转换为基本磁盘")}
+            </button>
+          )}
+          </>
         ) : (
           <button
             className="button primary"

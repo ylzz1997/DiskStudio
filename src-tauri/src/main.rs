@@ -41,6 +41,7 @@ mod image_files;
 mod lost_partition_restore;
 mod lost_partition_tasks;
 mod lost_partitions;
+mod ldm_basic;
 mod ldm_tasks;
 mod lvm_tasks;
 mod maintenance_io;
@@ -82,6 +83,7 @@ mod signature_zip;
 #[cfg(windows)]
 mod snapshot;
 mod storage;
+mod storage_spaces;
 mod surface_checkpoint;
 mod surface_repair;
 mod surface_report;
@@ -95,6 +97,13 @@ mod table_restore_task;
 mod table_tasks;
 mod used_space;
 pub(crate) static OPERATION: operation_gate::OperationGate = operation_gate::OperationGate::new();
+
+#[tauri::command]
+async fn read_storage_spaces() -> Result<Vec<storage_spaces::Pool>, String> {
+    tauri::async_runtime::spawn_blocking(storage_spaces::read)
+        .await
+        .map_err(|error| error.to_string())?
+}
 
 #[tauri::command]
 fn backup_password_status() -> Option<backup_secrets::Prompt> {
@@ -345,6 +354,25 @@ async fn data_dynamic_disk_browse(request: ldm_tasks::BrowseRequest) -> Result<S
     tauri::async_runtime::spawn_blocking(move || data_tasks::scan_dynamic_disk(request))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn data_dynamic_disk_prepare_basic(session_id: String) -> Result<ldm_tasks::ConversionPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || ldm_tasks::prepare_basic_conversion(session_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn data_dynamic_disk_execute_basic(token: String) -> Result<ldm_tasks::ConversionOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || ldm_tasks::execute_basic_conversion(token))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn data_dynamic_disk_discard_basic(token: String) {
+    ldm_tasks::discard_basic_conversion(token);
 }
 #[tauri::command]
 fn data_backup_status() -> Option<data_tasks::BackupStatus> {
@@ -967,6 +995,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            read_storage_spaces,
             set_display_language,
             backup_password_status,
             backup_password_submit,
@@ -1095,6 +1124,9 @@ fn main() {
             data_dynamic_disk_candidates,
             data_dynamic_disk_inspect,
             data_dynamic_disk_browse,
+            data_dynamic_disk_prepare_basic,
+            data_dynamic_disk_execute_basic,
+            data_dynamic_disk_discard_basic,
             data_results,
             data_folders,
             data_select_results,

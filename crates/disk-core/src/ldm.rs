@@ -79,7 +79,16 @@ pub struct Group<R> {
     readers: Vec<R>,
     inventory: Inventory,
     plans: Vec<Plan>,
+    disk_count: usize,
     fingerprint: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimpleExtent {
+    pub volume: String,
+    pub name: String,
+    pub offset: u64,
+    pub size: u64,
 }
 
 struct Present {
@@ -262,7 +271,7 @@ fn volume_plan(
         }
         let kind = if components.len() > 1 {
             VolumeKind::Mirrored
-        } else if extents.len() > 1 {
+        } else if members.len() > 1 {
             VolumeKind::Spanned
         } else {
             VolumeKind::Simple
@@ -425,6 +434,7 @@ pub fn open<R: Read + Seek>(
             volumes,
         },
         plans,
+        disk_count: disk_objects.len(),
         fingerprint: fingerprint.finalize().into(),
     })
 }
@@ -436,6 +446,46 @@ impl<R: Read + Seek> Group<R> {
 
     pub fn fingerprint(&self) -> [u8; 32] {
         self.fingerprint
+    }
+
+    /// In-place conversion must cover the entire one-disk group. A readable
+    /// degraded view is insufficient evidence for a persistent layout change.
+    pub fn standalone_simple_extents(&self) -> Result<Vec<SimpleExtent>, String> {
+        let invalid = "转换要求完整的单盘动态磁盘组，且每个卷都是连续、干净的简单卷。";
+        if self.disk_count != 1 || self.readers.len() != 1 || self.plans.is_empty() {
+            return Err(invalid.into());
+        }
+        let mut extents = Vec::with_capacity(self.plans.len());
+        for (info, plan) in self.inventory.volumes.iter().zip(&self.plans) {
+            let Plan::Linear(copies) = plan else {
+                return Err(invalid.into());
+            };
+            let [copy] = copies.as_slice() else {
+                return Err(invalid.into());
+            };
+            if info.kind != VolumeKind::Simple || info.availability != Availability::Complete {
+                return Err(invalid.into());
+            }
+            let start = copy.first().ok_or(invalid)?.start;
+            let mut end = start;
+            for extent in copy {
+                if extent.slot != Some(0) || extent.start != end || extent.position != end - start {
+                    return Err(invalid.into());
+                }
+                end = end.checked_add(extent.length).ok_or(invalid)?;
+            }
+            if end - start != info.size {
+                return Err(invalid.into());
+            }
+            extents.push(SimpleExtent {
+                volume: info.id.clone(),
+                name: info.name.clone(),
+                offset: start,
+                size: info.size,
+            });
+        }
+        extents.sort_unstable_by_key(|extent| extent.offset);
+        Ok(extents)
     }
 
     pub fn into_volume(self, volume: &str) -> Result<VolumeReader<R>, String> {
@@ -568,6 +618,78 @@ impl<R> Seek for VolumeReader<R> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn simple_volume_conversion_accepts_physically_adjacent_extents_in_logical_order() {
+        let volume = metadata::Volume {
+            name: "Extended on one disk".into(),
+            id: [1; 16],
+            components: 1,
+            blocks: 6,
+            parity: false,
+            clean: true,
+        };
+        let component = Component {
+            volume: 1,
+            kind: Layout::Linear,
+            extents: 2,
+            chunk: 0,
+            columns: 0,
+            clean: true,
+        };
+        let first = Extent {
+            component: 2,
+            disk: 3,
+            start: 2,
+            position: 0,
+            blocks: 4,
+            column: 0,
+            clean: true,
+        };
+        let present = BTreeMap::from([(
+            3,
+            Present {
+                slot: 0,
+                public: 16384..131072,
+            },
+        )]);
+        for (second_start, convertible) in [(6, true), (7, false), (0, false)] {
+            let second = Extent {
+                start: second_start,
+                position: 4,
+                blocks: 2,
+                ..first.clone()
+            };
+            let (info, plan) = volume_plan(
+                &volume,
+                &[(&component, vec![&first, &second])],
+                &present,
+                512,
+            )
+            .unwrap();
+            assert_eq!(info.kind, VolumeKind::Simple);
+            let group = Group {
+                readers: vec![Cursor::new(vec![0; 131072])],
+                inventory: Inventory {
+                    id: String::new(),
+                    name: String::new(),
+                    sequence: "1".into(),
+                    sector_size: 512,
+                    volumes: vec![info],
+                },
+                plans: vec![plan],
+                disk_count: 1,
+                fingerprint: [0; 32],
+            };
+            let extents = group.standalone_simple_extents();
+            if convertible {
+                let extents = extents.unwrap();
+                assert_eq!((extents[0].offset, extents[0].size), (17408, 3072));
+            } else {
+                assert!(extents.is_err());
+            }
+        }
+    }
 
     #[test]
     fn linear_reader_stops_at_extent_and_volume_boundaries() {

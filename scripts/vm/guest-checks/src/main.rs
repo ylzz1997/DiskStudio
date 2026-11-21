@@ -83,6 +83,8 @@ mod lost_partition_tasks;
 mod lost_partitions;
 #[path = "../../../../src-tauri/src/ldm_tasks.rs"]
 mod ldm_tasks;
+#[path = "../../../../src-tauri/src/ldm_basic.rs"]
+mod ldm_basic;
 #[path = "../../../../src-tauri/src/lvm_tasks.rs"]
 mod lvm_tasks;
 #[path = "../../../../src-tauri/src/maintenance_io.rs"]
@@ -153,6 +155,8 @@ mod snapshot;
 mod state_checks;
 #[path = "../../../../src-tauri/src/storage.rs"]
 mod storage;
+#[path = "../../../../src-tauri/src/storage_spaces.rs"]
+mod storage_spaces;
 #[path = "../../../../src-tauri/src/surface_scan.rs"]
 mod surface_scan;
 #[path = "../../../../src-tauri/src/table_archive.rs"]

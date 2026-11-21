@@ -58,6 +58,7 @@ import { PartitionMoveDialog } from "./PartitionMoveDialog";
 import { MaintenanceDialog } from "./MaintenanceDialog";
 import { ImageConversionDialog } from "./ImageConversionDialog";
 import { ImageCreationDialog } from "./ImageCreationDialog";
+import { StorageSpacesDialog } from "./StorageSpacesDialog";
 import { imageFiles, releaseImageFiles } from "./imageReader";
 import { LanguageProvider, useLanguageSettings } from "./i18n/LanguageProvider";
 import { languagePreference, languages } from "./i18n/languages";
@@ -76,6 +77,7 @@ type Modal =
   | "maintenance"
   | "imageConversion"
   | "imageCreation"
+  | "storageSpaces"
   | null;
 function preference(key: string, fallback: string) {
   try {
@@ -485,6 +487,13 @@ function Workspace() {
                   <Settings2 size={16} />
                   {t("测速与磁盘维护…")}
                 </button>
+                <button disabled={!native} onClick={() => {
+                  setMenu(false);
+                  setModal("storageSpaces");
+                }}>
+                  <Database size={16} />
+                  {t("存储池与存储空间")}
+                </button>
                 <div className="menu-divider" />
                 <button onClick={() => input.current?.click()}>
                   <FolderOpen size={16} />
@@ -575,6 +584,19 @@ function Workspace() {
         <ImageCreationDialog
           onClose={() => setModal(null)}
           onBusy={operationBusy}
+        />
+      )}
+      {modal === "storageSpaces" && (
+        <StorageSpacesDialog
+          disks={disks}
+          onClose={() => setModal(null)}
+          onOpenDisk={(selected) => {
+            setModal(null);
+            setPage("disks");
+            setDiskId(selected.id);
+            setPartitionId("");
+            setBrowsingPartition("");
+          }}
         />
       )}
       {modal === "maintenance" && disk && (

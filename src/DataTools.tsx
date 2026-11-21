@@ -35,6 +35,8 @@ import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
 import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
 import {
   DynamicDiskDialog,
+  type DynamicConversion,
+  type DynamicConversionOutcome,
   type DynamicDiskCandidate,
   type DynamicDiskView,
 } from "./DynamicDiskDialog";
@@ -197,6 +199,8 @@ export function DataTools({
   const [dynamicDiskOpen, setDynamicDiskOpen] = useState(false);
   const [dynamicDiskView, setDynamicDiskView] = useState<DynamicDiskView | null>(null);
   const [dynamicDiskCandidates, setDynamicDiskCandidates] = useState<DynamicDiskCandidate[] | null>(null);
+  const [dynamicConversion, setDynamicConversion] = useState<DynamicConversion | null>(null);
+  const [dynamicConverted, setDynamicConverted] = useState<DynamicConversionOutcome | null>(null);
   const callbacks = useRef({ onBusy, onRefresh });
   callbacks.current = { onBusy, onRefresh };
   const previousJob = useRef("");
@@ -872,6 +876,7 @@ export function DataTools({
                         setError("");
                         setDynamicDiskView(null);
                         setDynamicDiskCandidates(null);
+                        setDynamicConverted(null);
                         setDynamicDiskOpen(true);
                       }}
                     >
@@ -1653,6 +1658,7 @@ export function DataTools({
                 job.title === "读取 Btrfs 成员" ||
                 job.title === "读取 LVM2 逻辑卷" ||
                 job.title === "读取虚拟 RAID 目录" ||
+                job.title === "读取动态卷" ||
                 job.title === "读取找到的分区目录" ||
                 job.title === "重建文件视图"
                   ? t("找到 {count} 个文件", {
@@ -1916,6 +1922,32 @@ export function DataTools({
           busy={busy}
           error={error}
           view={dynamicDiskView}
+          conversion={dynamicConversion}
+          converted={dynamicConverted}
+          conversionProgress={
+            job?.title === "转换为基本磁盘" && job.state === "running" ? job : null
+          }
+          onPreviewConversion={(sessionId) =>
+            void action(async () =>
+              setDynamicConversion(await invoke<DynamicConversion>("data_dynamic_disk_prepare_basic", { sessionId })),
+            )
+          }
+          onExecuteConversion={(token) =>
+            void action(async () => {
+              try {
+                setDynamicConverted(await invoke<DynamicConversionOutcome>("data_dynamic_disk_execute_basic", { token }));
+              } finally {
+                setDynamicConversion(null);
+                setDynamicDiskView(null);
+                await onRefresh().catch(() => {});
+              }
+            })
+          }
+          onCancelConversion={() => {
+            if (dynamicConversion) void invoke("data_dynamic_disk_discard_basic", { token: dynamicConversion.token }).catch(() => {});
+            setDynamicConversion(null);
+            setError("");
+          }}
           onLoadCandidates={() =>
             void action(async () => {
               setDynamicDiskCandidates(null);
@@ -1927,6 +1959,9 @@ export function DataTools({
             setDynamicDiskView(null);
           }}
           onClose={() => {
+            if (dynamicConversion) void invoke("data_dynamic_disk_discard_basic", { token: dynamicConversion.token }).catch(() => {});
+            setDynamicConversion(null);
+            setDynamicConverted(null);
             setError("");
             setDynamicDiskOpen(false);
           }}

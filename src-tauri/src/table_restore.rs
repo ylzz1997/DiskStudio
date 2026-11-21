@@ -312,6 +312,15 @@ pub(crate) fn edit_gpt_entry(
         return Err("GPT 条目编辑范围无效。".into());
     }
     let at = (slot as usize - 1) * 128;
+    rewrite_gpt_entries(current, layout, |table| edit(&mut table[at..at + 128]))
+}
+
+/// Rebuild the CRCs without moving the table or modifying the protective MBR.
+pub(crate) fn rewrite_gpt_entries(
+    current: &Archive,
+    layout: &Layout,
+    edit: impl Fn(&mut [u8]),
+) -> Result<Archive, String> {
     let mut after = current.clone();
     let mut crc = None;
     for extent in &mut after.extents {
@@ -320,7 +329,7 @@ pub(crate) fn edit_gpt_entry(
                 .bytes
                 .get_mut(..layout.count as usize * 128)
                 .ok_or("GPT 条目表不完整")?;
-            edit(&mut table[at..at + 128]);
+            edit(table);
             let hash = crc32fast::hash(table);
             if crc.is_some_and(|prior| prior != hash) {
                 return Err("GPT 条目副本不一致。".into());

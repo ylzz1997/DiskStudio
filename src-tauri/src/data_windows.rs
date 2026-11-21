@@ -214,6 +214,7 @@ fn resolve_impl(
     let inv = Inventory::read()?;
     let d = policy::target_disk(&inv.disks, &s.target)?;
     policy::corroborate(d, &inv.legacy)?;
+    crate::storage_spaces::PoolProtection::read(&inv.con)?.check_disk(d)?;
     if d.is_clustered != Some(false)
         || d.is_boot.is_none()
         || d.is_system.is_none()
@@ -525,13 +526,25 @@ pub(crate) fn offline_physical_reader(
     sector: u64,
     serial: &str,
 ) -> Result<Region<OfflinePhysical>, String> {
-    let file = open_numbered_device(number, false, FILE_SHARE_READ | FILE_SHARE_WRITE, 0)?;
-    verify_device_identity(number, size, Some(sector), Some(serial), |code, input, output| {
-        control(&file, code, input, output)
-    })?;
+    let file = open_bound_physical(number, size, sector, serial, false)?;
     let disk = OfflinePhysical { file };
     disk.verify()?;
     Region::new(disk, 0, size).map_err(err)
+}
+
+pub(crate) fn open_bound_physical(
+    number: u32,
+    size: u64,
+    sector: u64,
+    serial: &str,
+    write: bool,
+) -> Result<File, String> {
+    let share = if write { FILE_SHARE_READ } else { FILE_SHARE_READ | FILE_SHARE_WRITE };
+    let file = open_numbered_device(number, write, share, 0)?;
+    verify_device_identity(number, size, Some(sector), Some(serial), |code, input, output| {
+        control(&file, code, input, output)
+    })?;
+    Ok(file)
 }
 
 pub(crate) struct OfflinePhysical {
@@ -959,6 +972,9 @@ fn numbered_folder_location(path: &Path) -> Result<(PathBuf, Target, u32), Strin
         .ok_or("输出磁盘信息缺失")?;
     policy::corroborate(disk, &inv.legacy)?;
     let target = policy::identity(disk).ok_or("不能唯一确认目录所在磁盘身份")?;
+    if disk.bus_type == Some(16) {
+        return Err("存储空间不能作为独立物理盘操作。".into());
+    }
     Ok((canonical, target, disk.number))
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -1070,6 +1086,9 @@ fn volume_location(volume: &str, inv: &Inventory) -> Result<FileLocation, String
     let target = policy::identity(disk).ok_or("文件所在磁盘身份缺失")?;
     policy::target_disk(&inv.disks, &target)?;
     policy::corroborate(disk, &inv.legacy)?;
+    if disk.bus_type == Some(16) {
+        return Err("存储空间不能作为独立物理盘操作。".into());
+    }
     if disk.is_clustered != Some(false) || disk.is_offline != Some(false) {
         return Err("文件所在磁盘状态不完整或为复杂存储".into());
     }

@@ -1,6 +1,7 @@
 //! Metadata-only candidates and read-only handles for offline LDM members.
 use crate::{data_io::Region, data_windows, disk_identity, partitions::Target};
 use serde::Deserialize;
+use std::fs::File;
 use wmi::WMIConnection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8,6 +9,7 @@ pub(super) struct Member {
     pub target: Target,
     pub number: u32,
     serial: String,
+    unique_id: Option<String>,
     pub size: u64,
     pub sector: u64,
     pub model: String,
@@ -120,6 +122,7 @@ fn bind(legacy: &[Legacy], physical: &[Physical], storage: &[StorageDisk]) -> Ve
                 target: Target(id),
                 number: row.index,
                 serial: value.into(),
+                unique_id: disk.unique_id.clone(),
                 size: disk.size,
                 sector,
                 model,
@@ -147,12 +150,98 @@ pub(super) fn list() -> Result<Vec<Member>, String> {
     if legacy.len() > 256 || physical.len() > 256 || storage.len() > 256 {
         return Err("Windows 返回的磁盘数量超出核验范围。".into());
     }
-    Ok(bind(&legacy, &physical, &storage))
+    let protection = crate::storage_spaces::PoolProtection::read(&con)?;
+    Ok(bind(&legacy, &physical, &storage)
+        .into_iter()
+        .filter(|member| {
+            protection
+                .require_standalone(Some(&member.serial), member.unique_id.as_deref())
+                .is_ok()
+        })
+        .collect())
 }
 
 impl Member {
     pub(super) fn reader(&self) -> Result<Region<data_windows::OfflinePhysical>, String> {
         data_windows::offline_physical_reader(self.number, self.size, self.sector, &self.serial)
+    }
+
+    pub(super) fn conversion_file(&self, write: bool) -> Result<File, String> {
+        let file = data_windows::open_bound_physical(
+            self.number,
+            self.size,
+            self.sector,
+            &self.serial,
+            write,
+        )?;
+        data_windows::confirm_writable_offline(&file)?;
+        Ok(file)
+    }
+
+    pub(super) fn conversion_layout(
+        &self,
+        layout: &crate::table_restore::Layout,
+    ) -> Result<(), String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct LegacyPartition {
+            disk_index: u32,
+            starting_offset: u64,
+            size: u64,
+            boot_partition: Option<bool>,
+            bootable: Option<bool>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct RegisteredPartition {
+            disk_number: u32,
+        }
+        let error = "无法排除启动、群集或联机卷关联，已拒绝转换。";
+        let legacy = WMIConnection::new().map_err(data_windows::err)?;
+        let cluster = legacy
+            .raw_query::<std::collections::HashMap<String, wmi::Variant>>(
+                "SELECT Name FROM Win32_Service WHERE Name = 'ClusSvc'",
+            )
+            .map_err(data_windows::err)?;
+        if !cluster.is_empty() {
+            return Err(error.into());
+        }
+        let partitions: Vec<LegacyPartition> = legacy.raw_query(
+            "SELECT DiskIndex,StartingOffset,Size,BootPartition,Bootable FROM Win32_DiskPartition",
+        ).map_err(data_windows::err)?;
+        let parts: Vec<_> = partitions
+            .iter()
+            .filter(|p| p.disk_index == self.number)
+            .collect();
+        // Win32 may omit Microsoft Reserved while the raw and native GPT
+        // agree on its full record. The plan preserves that record in place.
+        if parts.iter().any(|p| {
+            p.boot_partition != Some(false)
+                || p.bootable != Some(false)
+                || layout
+                    .entries
+                    .iter()
+                    .filter(|entry| p.starting_offset == entry.offset && p.size == entry.size)
+                    .count()
+                    != 1
+        }) || layout.entries.iter().any(|entry| {
+            let matches = parts
+                .iter()
+                .filter(|p| p.starting_offset == entry.offset && p.size == entry.size)
+                .count();
+            matches > 1 || (matches == 0 && entry.kind != crate::ldm_basic::MICROSOFT_RESERVED)
+        }) {
+            return Err("磁盘包含启动分区，或 Win32 分区范围与原始 GPT 不一致。".into());
+        }
+        let storage = WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage")
+            .map_err(data_windows::err)?;
+        let registered: Vec<RegisteredPartition> = storage
+            .raw_query("SELECT DiskNumber FROM MSFT_Partition")
+            .map_err(data_windows::err)?;
+        if registered.iter().any(|p| p.disk_number == self.number) {
+            return Err(error.into());
+        }
+        Ok(())
     }
 }
 
