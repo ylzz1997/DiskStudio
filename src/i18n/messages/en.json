@@ -1,4 +1,5 @@
 {
+  "全部未分配空间": "All unallocated space",
   "单次读取超时（秒）": "Read timeout (seconds)",
   "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。": "Enter 1 to 120 seconds or leave blank for the system default. When a read times out, the scan waits for the driver to acknowledge cancellation. You can adjust the setting before resuming.",
   "单次读取超时须为 1 到 120 秒。": "The read timeout must be between 1 and 120 seconds.",
@@ -162,6 +163,7 @@
   "分区表备份与恢复…": "Back up or restore partition table…",
   "分区表检查与修复…": "Check or repair partition table…",
   "搜索丢失分区…": "Find lost partitions…",
+  "整盘镜像（搜索丢失分区）": "Whole-disk image (search for lost partitions)",
   "继续分区移动…": "Resume partition move…",
   "更改设备状态…": "Change device state…",
   "健康信息（SMART）…": "Health information (SMART)…",

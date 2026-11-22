@@ -41,6 +41,7 @@ mod image_files;
 mod lost_partition_restore;
 mod lost_partition_tasks;
 mod lost_partitions;
+mod lost_search_scope;
 mod ldm_basic;
 mod ldm_tasks;
 mod lvm_tasks;
@@ -382,6 +383,19 @@ fn data_backup_status() -> Option<data_tasks::BackupStatus> {
 #[tauri::command]
 fn data_image_status() -> Option<data_tasks::image_browse_tasks::Status> {
     data_tasks::image_browse_tasks::status()
+}
+use data_tasks::retained_partition_tasks;
+#[tauri::command]
+async fn data_search_retained_partitions(request: retained_partition_tasks::SearchRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || retained_partition_tasks::search(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn data_browse_retained_partition(request: retained_partition_tasks::BrowseRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || retained_partition_tasks::browse(request))
+        .await
+        .map_err(|error| error.to_string())?
 }
 use data_tasks::image_browse_tasks::spaces as image_spaces_tasks;
 #[tauri::command]
@@ -1108,6 +1122,8 @@ fn main() {
             data_reconstruct_filesystem,
             data_backup_status,
             data_image_status,
+            data_search_retained_partitions,
+            data_browse_retained_partition,
             data_image_spaces_select,
             data_image_spaces_open,
             data_image_spaces_discard,

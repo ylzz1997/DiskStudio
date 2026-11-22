@@ -48,6 +48,8 @@ pub struct BackupSource {
     pub point_id: String,
     pub point_label: String,
     pub partition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found_extent: Option<crate::surface_scan::Range>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1014,6 +1016,7 @@ mod tests {
             point_id: "old-point".into(),
             point_label: "最早完整备份".into(),
             partition: "分区 1".into(),
+            found_extent: None,
         });
         for completed in [false, true] {
             let report: serde_json::Value =

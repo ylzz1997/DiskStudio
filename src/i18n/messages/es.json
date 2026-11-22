@@ -1,4 +1,6 @@
 {
+  "全部未分配空间": "Todo el espacio no asignado",
+  "整盘镜像（搜索丢失分区）": "Imagen de disco completo (buscar particiones perdidas)",
   "单次读取超时（秒）": "Tiempo límite por lectura (segundos)",
   "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。": "Introduce de 1 a 120 segundos o deja el campo vacío para usar el valor del sistema. Si vence el plazo, la exploración espera a que el controlador confirme la cancelación. Puedes ajustar el valor antes de reanudar.",
   "单次读取超时须为 1 到 120 秒。": "El límite por lectura debe estar entre 1 y 120 segundos.",

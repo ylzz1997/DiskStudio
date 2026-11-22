@@ -20,7 +20,7 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn b_root() -> Result<(Dir, PathBuf), String> {
+pub(super) fn b_root() -> Result<(Dir, PathBuf), String> {
     let disks = inventory()?;
     let b = disks
         .iter()

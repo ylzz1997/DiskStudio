@@ -1,4 +1,6 @@
 {
+  "全部未分配空间": "Gesamter nicht zugeordneter Speicherplatz",
+  "整盘镜像（搜索丢失分区）": "Ganzes Datenträgerabbild (verlorene Partitionen suchen)",
   "单次读取超时（秒）": "Zeitlimit pro Lesevorgang (Sekunden)",
   "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。": "Geben Sie 1 bis 120 Sekunden ein oder lassen Sie das Feld für die Systemeinstellung leer. Bei einer Zeitüberschreitung wartet die Prüfung auf die Bestätigung des Abbruchs durch den Treiber. Die Einstellung lässt sich vor dem Fortsetzen ändern.",
   "单次读取超时须为 1 到 120 秒。": "Das Zeitlimit muss zwischen 1 und 120 Sekunden liegen.",

@@ -44,6 +44,7 @@ pub struct Status {
     scan_id: Option<String>,
     scan_partition: Option<u32>,
     scan_mode: Option<ScanMode>,
+    search: Option<retained_partition_tasks::Search>,
 }
 fn status_in(s: &State) -> Option<Status> {
     let opened = s.opened_image.as_ref()?;
@@ -51,27 +52,38 @@ fn status_in(s: &State) -> Option<Status> {
         ScanSource::Image {
             opened: scan,
             partition,
-        } if scan.browser.info.id == opened.browser.info.id => Some((id.clone(), *partition)),
+        } if scan.browser.info.id == opened.browser.info.id => Some((id.clone(), Some(*partition))),
+        ScanSource::RetainedFound(found) if found.image() == Some(opened.browser.info.id.as_str()) => Some((id.clone(), None)),
         _ => None,
     });
     Some(Status {
         info: opened.browser.info.clone(),
         source_disks: opened.source_disks.clone(),
         scan_id: current.as_ref().map(|c| c.0.clone()),
-        scan_partition: current.as_ref().map(|c| c.1),
+        scan_partition: current.as_ref().and_then(|c| c.1),
         scan_mode: current.map(|_| s.scan_mode),
+        search: s.retained_partition_search.as_ref().filter(|search| search.for_image(&opened.browser.info.id)).map(retained_partition_tasks::Search::read_only),
     })
 }
 pub fn status() -> Option<Status> {
     status_in(&state())
 }
 fn clear_results(s: &mut State) {
-    if s.scan.as_ref().is_some_and(|(_, source)| matches!(source.original(), ScanSource::Image { .. })) {
+    if s.scan.as_ref().is_some_and(|(_, source)| match source.original() {
+        ScanSource::Image { .. } => true,
+        ScanSource::RetainedFound(found) => found.image().is_some(),
+        _ => false,
+    }) {
         s.scan = None;
         s.candidates.clear();
         s.directories = Catalog::default();
         s.scan_name.clear();
         s.recovery_progress = None;
+    }
+    if s.opened_image.as_ref().is_some_and(|image| {
+        s.retained_partition_search.as_ref().is_some_and(|search| search.for_image(&image.browser.info.id))
+    }) {
+        s.retained_partition_search = None;
     }
     s.pending = None;
 }

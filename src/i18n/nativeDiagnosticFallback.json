@@ -1,4 +1,7 @@
 {
+  "搜索全部未分配空间需要完整的 GPT 或 MBR 分区表。": "Searching all unallocated space requires a complete GPT or MBR partition table.",
+  "没有可搜索的未分配空间。": "There is no unallocated space to search.",
+  "候选已超出保留的搜索范围。": "The candidate is outside the retained search range.",
   "EBR 输入须为最多 64 个不重复、按逻辑扇区对齐且位于磁盘内的完整扇区。": "Supply up to 64 distinct, complete, sector-aligned EBR sectors within the disk.",
   "逻辑扇区大小无效或首尾读取窗口不足一个完整扇区。": "The logical sector size is invalid or a captured disk end is shorter than one logical sector.",
   "MBR 缺少完整的逻辑扇区。": "The MBR capture is shorter than one logical sector.",
@@ -417,5 +420,9 @@
   "请选择 1–64 个 RAW/IMG 成员镜像。": "Select 1–64 RAW/IMG member images.",
   "请选择 RAW/IMG 成员镜像。": "Select RAW/IMG member images.",
   "存储空间缓存含待回放的记录或无法确认，请先通过 Windows 核对此空间。": "Storage Spaces has pending cache records or unknown cache state. Check the space in Windows first.",
-  "缺少精简存储空间所需的条带成员。": "A stripe member required by this thin storage space is missing."
+  "缺少精简存储空间所需的条带成员。": "A stripe member required by this thin storage space is missing.",
+  "已打开整盘镜像以搜索丢失分区。": "The whole-disk image is open for lost partition search.",
+  "请选择当前打开的整盘镜像或整盘备份。": "Select the currently open whole-disk image or backup.",
+  "搜索结束。可浏览通过文件系统校验的候选。": "Search finished. You can browse candidates with verified file systems.",
+  "分区搜索异常退出。": "The partition search ended unexpectedly."
 }

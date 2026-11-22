@@ -10,6 +10,7 @@ import { surfaceRange } from "./surfaceModel";
 import {
   candidateRelation,
   freeSearchRanges,
+  type LostSearchOptions,
   type LostBtrfsChoice,
   type LostCandidate,
   type LostSnapshot,
@@ -56,6 +57,7 @@ export function LostPartitionDialog({
     if (!recovering.current) onBusy(!!busy);
   }, [busy, onBusy]);
   const gaps = freeSearchRanges(disk.partitions, disk.size, disk.sectorSize);
+  const canSearchUnallocated = disk.hardware?.layoutAvailable && ["GPT", "MBR"].includes(disk.scheme);
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -78,9 +80,13 @@ export function LostPartitionDialog({
         ) {
           setSnapshot(next);
           if (!control.current.id) {
-            setPreset("custom");
-            setStart(String(next.options.startSector));
-            setCount(String(next.options.sectorCount));
+            if ("scope" in next.options) {
+              setPreset("all");
+            } else {
+              setPreset("custom");
+              setStart(String(next.options.startSector));
+              setCount(String(next.options.sectorCount));
+            }
           }
           control.current.id = next.id;
           control.current.onBusy(next.state === "running");
@@ -115,6 +121,7 @@ export function LostPartitionDialog({
   }
   function choose(value: string) {
     setPreset(value);
+    if (value === "all") return;
     const range = value.startsWith("p:")
       ? disk.partitions[Number(value.slice(2))]
       : value.startsWith("g:")
@@ -127,13 +134,15 @@ export function LostPartitionDialog({
   }
   let rangeError = "";
   try {
-    surfaceRange(start, count, disk.size, disk.sectorSize);
+    if (preset !== "all") surfaceRange(start, count, disk.size, disk.sectorSize);
   } catch (e) {
     rangeError = (e instanceof Error ? e.message : String(e)).trim();
   }
   async function begin() {
     await action(async () => {
-      const options = surfaceRange(start, count, disk.size, disk.sectorSize);
+      const options: LostSearchOptions = preset === "all"
+        ? { scope: "allUnallocated" }
+        : surfaceRange(start, count, disk.size, disk.sectorSize);
       setSelected([]);
       const id = await invoke<string>("lost_partition_start", {
         request: {
@@ -152,8 +161,9 @@ export function LostPartitionDialog({
         layoutKey: disk.hardware!.layoutKey!,
         state: "running",
         done: 0,
-        total: options.sectorCount * disk.sectorSize,
+        total: "scope" in options ? 0 : options.sectorCount * disk.sectorSize,
         options,
+        ranges: [],
         candidates: [],
         message: "",
       });
@@ -218,6 +228,9 @@ export function LostPartitionDialog({
             onChange={(e) => choose(e.target.value)}
           >
             <option value="whole">{t("整个磁盘")}</option>
+            {(canSearchUnallocated || preset === "all") && (
+              <option value="all">{t("全部未分配空间")}</option>
+            )}
             <option value="custom">{t("指定扇区范围")}</option>
             {gaps.map((g, i) => (
               <option key={`g:${i}`} value={`g:${i}`}>
@@ -235,7 +248,7 @@ export function LostPartitionDialog({
             ))}
           </select>
         </label>
-        <div className="lost-range-numbers">
+        {preset !== "all" && <div className="lost-range-numbers">
           <label>
             {t("起始 LBA")}
             <input
@@ -260,7 +273,7 @@ export function LostPartitionDialog({
               }}
             />
           </label>
-        </div>
+        </div>}
       </div>
       <p className="lost-note">
         {t(
@@ -303,11 +316,13 @@ export function LostPartitionDialog({
                     ? t("已停止")
                     : t("搜索未完成")}
             </span>
-            <span>
+            {snapshot.total > 0 && <span>
               {formatSize(snapshot.done)} / {formatSize(snapshot.total)}
-            </span>
+            </span>}
           </div>
-          <progress value={snapshot.done} max={snapshot.total} />
+          {snapshot.total > 0
+            ? <progress value={snapshot.done} max={snapshot.total} />
+            : running && <progress />}
           <p className="lost-note">
             {snapshot.message
               ? catalogText(snapshot.message)

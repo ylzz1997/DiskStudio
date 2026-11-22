@@ -1,7 +1,8 @@
 use crate::{
     data_tasks::{self, Selection},
     lost_partitions::{self, Candidate},
-    surface_scan::{Options, Range},
+    lost_search_scope::{self, Scope},
+    surface_scan::Range,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,7 +14,7 @@ const MAX_RETAINED_SEARCHES: usize = disk_core::btrfs::MAX_MEMBERS;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub source: Selection,
-    pub options: Options,
+    pub options: Scope,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -60,7 +61,7 @@ fn checked_ids(ids: &[String]) -> Result<(), String> {
 }
 pub fn selected_many(
     request: RecoverRequest,
-) -> Result<(Selection, Range, Vec<Candidate>), String> {
+) -> Result<(Selection, Vec<(Range, Candidate)>), String> {
     checked_ids(&request.candidates)?;
     let saved = state();
     let session = completed(&saved, &request.id).ok_or("请先停止搜索或等待搜索结束。")?;
@@ -87,7 +88,11 @@ pub fn selected_many(
     if candidates.iter().any(|candidate| !candidate.can_restore) {
         return Err("该候选仅允许浏览和提取，无法登记分区记录。".into());
     }
-    Ok((session.source.clone(), session.range, candidates))
+    let candidates = candidates
+        .into_iter()
+        .map(|candidate| Ok((range_for(session, &candidate)?, candidate)))
+        .collect::<Result<_, String>>()?;
+    Ok((session.source.clone(), candidates))
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,14 +103,14 @@ pub struct Snapshot {
     pub state: String,
     pub done: u64,
     pub total: u64,
-    pub options: Options,
+    pub options: Scope,
+    pub ranges: Vec<Range>,
     pub candidates: Vec<Candidate>,
     pub message: String,
 }
 struct Saved {
     snapshot: Snapshot,
     source: Selection,
-    range: Range,
 }
 static STATE: OnceLock<Mutex<VecDeque<Saved>>> = OnceLock::new();
 fn state() -> std::sync::MutexGuard<'static, VecDeque<Saved>> {
@@ -138,12 +143,16 @@ fn find<'a>(
         .ok_or("候选已失效，请重新搜索")?;
     Ok((session, candidate))
 }
-fn bind(saved: &Saved, candidate: &Candidate) -> Source {
-    Source {
+fn range_for(saved: &Saved, candidate: &Candidate) -> Result<Range, String> {
+    lost_search_scope::containing(&saved.snapshot.ranges, candidate.offset, candidate.size)
+}
+
+fn bind(saved: &Saved, candidate: &Candidate) -> Result<Source, String> {
+    Ok(Source {
         selection: saved.source.clone(),
-        range: saved.range,
+        range: range_for(saved, candidate)?,
         candidate: candidate.clone(),
-    }
+    })
 }
 pub(crate) fn selected(request: BrowseRequest) -> Result<Source, String> {
     let saved = state();
@@ -151,7 +160,7 @@ pub(crate) fn selected(request: BrowseRequest) -> Result<Source, String> {
     if !candidate.can_browse {
         return Err("此成员需要与同一 Btrfs 卷的其他成员一起读取。".into());
     }
-    Ok(bind(session, candidate))
+    bind(session, candidate)
 }
 fn overlaps(left: &Candidate, right: &Candidate) -> bool {
     left.offset < right.offset + right.size && right.offset < left.offset + left.size
@@ -193,7 +202,7 @@ pub fn group_choices(request: BrowseRequest) -> Result<Vec<MemberChoice>, String
                 target: other.source.target.0.clone(),
                 layout_key: other.source.layout_key.clone(),
                 member: member.id.to_string(),
-                start_sector: c.offset / other.range.sector,
+                start_sector: c.offset / range_for(other, c)?.sector,
                 size: c.size,
             });
         }
@@ -219,7 +228,7 @@ fn select_group_from(
     }
     let mut members = HashSet::from([anchor.id]);
     let mut uuids = HashSet::from([anchor.uuid]);
-    let mut sources = vec![bind(session, candidate)];
+    let mut sources = vec![bind(session, candidate)?];
     for other in &request.others {
         let (session, candidate) = find(saved, other)?;
         let member = group_anchor(candidate)?;
@@ -234,7 +243,7 @@ fn select_group_from(
         {
             return Err("Btrfs 候选的提交不一致、成员重复或来源范围冲突。".into());
         }
-        sources.push(bind(session, candidate));
+        sources.push(bind(session, candidate)?);
     }
     Ok(sources)
 }
@@ -254,8 +263,7 @@ pub fn start(request: Request) -> Result<String, String> {
             return Err("搜索必须绑定整盘身份，范围通过扇区指定".into());
         }
         let resolved = platform::resolve(&request.source, false, false)?;
-        let range = request.options.range(
-            0,
+        let range = request.options.explicit(
             resolved.size,
             resolved.disk.logical_sector_size.ok_or("缺少扇区大小")?,
         )?;
@@ -268,13 +276,13 @@ pub fn start(request: Request) -> Result<String, String> {
                 layout_key: request.source.layout_key.clone(),
                 state: "running".into(),
                 done: 0,
-                total: range.size,
+                total: range.map_or(0, |range| range.size),
                 options: request.options,
+                ranges: range.into_iter().collect(),
                 candidates: vec![],
                 message: String::new(),
             },
             source: request.source.clone(),
-            range,
         });
         saved.truncate(MAX_RETAINED_SEARCHES);
         drop(saved);
@@ -290,23 +298,46 @@ pub fn start(request: Request) -> Result<String, String> {
                         return Err("搜索已取消，尚未读取设备".into());
                     }
                     let resolved = platform::resolve(&request.source, false, false)?;
-                    let checked = request.options.range(
-                        0,
+                    let sector = resolved.disk.logical_sector_size.ok_or("缺少扇区大小")?;
+                    let checked = request.options.explicit(
                         resolved.size,
-                        resolved.disk.logical_sector_size.ok_or("缺少扇区大小")?,
+                        sector,
                     )?;
                     if checked != range {
                         return Err("搜索范围已变化".into());
                     }
-                    let reader = crate::data_io::Region::new(
-                        platform::device(&resolved, false)?,
-                        range.offset,
-                        range.size,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    lost_partitions::scan(
-                        reader,
-                        Range { offset: 0, ..range },
+                    let mut reader = platform::device(&resolved, false)?;
+                    let checkpoint = || {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err("搜索已取消。".into());
+                        }
+                        Ok(())
+                    };
+                    let (ranges, table) = if let Some(range) = checked {
+                        (vec![range], None)
+                    } else {
+                        let scheme = match resolved.disk.partition_style {
+                            Some(1) => "MBR",
+                            Some(2) => "GPT",
+                            _ => return Err("搜索全部未分配空间需要完整的 GPT 或 MBR 分区表。".into()),
+                        };
+                        let table = crate::table_archive::capture(
+                            &mut reader, resolved.size, sector, request.source.target.0.clone(), false, checkpoint,
+                        )?;
+                        let ranges = lost_search_scope::unallocated(&table, Some((scheme, &resolved.partition_ranges)))?;
+                        (ranges, Some(table))
+                    };
+                    let total = ranges.iter().map(|r| r.size).sum();
+                    {
+                        let mut saved = state();
+                        let saved = saved.front_mut().filter(|s| s.snapshot.id == work_id)
+                            .ok_or("搜索会话已失效")?;
+                        saved.snapshot.ranges = ranges.clone();
+                        saved.snapshot.total = total;
+                    }
+                    lost_partitions::scan_ranges(
+                        reader.try_clone().map_err(|e| e.to_string())?,
+                        &ranges,
                         &cancel,
                         |done, candidate| {
                             let mut saved = state();
@@ -315,19 +346,28 @@ pub fn start(request: Request) -> Result<String, String> {
                                 .filter(|s| s.snapshot.id == work_id)
                                 .ok_or("搜索会话已失效")?;
                             saved.snapshot.done = done;
-                            if let Some(mut c) = candidate {
-                                c.offset += range.offset;
+                            if let Some(c) = candidate {
                                 saved.snapshot.candidates.push(c);
                             }
                             data_tasks::record_progress(
                                 &work_id,
                                 "搜索文件系统边界",
                                 done,
-                                range.size,
+                                total,
                             );
                             Ok(())
                         },
                     )?;
+                    if let Some(table) = table {
+                        let checked = table.matches(&mut reader, checkpoint)
+                            .and_then(|()| platform::resolve(&request.source, false, false).map(|_| ()));
+                        if let Err(error) = checked {
+                            if let Some(saved) = state().front_mut().filter(|s| s.snapshot.id == work_id) {
+                                saved.snapshot.candidates.clear();
+                            }
+                            return Err(error);
+                        }
+                    }
                     Ok((
                         "范围搜索结束。候选需要通过目录和文件内容继续核对；尚未修改分区表。".into(),
                         None,
@@ -356,6 +396,7 @@ pub fn start(request: Request) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::surface_scan::Options;
     #[test]
     fn recovery_accepts_only_unique_retained_ids_never_ranges_or_entry_payloads() {
         let good = serde_json::json!({"id":"session","candidates":["retained"]});
@@ -377,7 +418,20 @@ mod tests {
             serde_json::json!({"id":"x","candidate":"y","offset":0})
         )
         .is_err());
-        assert!(serde_json::from_value::<Request>(serde_json::json!({"source":{"target":"opaque","layoutKey":"x","partition":null},"options":{"startSector":0,"sectorCount":1},"path":"bad"})).is_err());
+        let mut explicit = serde_json::json!({
+            "source": {"target": "a".repeat(64), "layoutKey": "b".repeat(64), "partition": null},
+            "options": {"startSector": 0, "sectorCount": 1}
+        });
+        assert!(serde_json::from_value::<Request>(explicit.clone()).is_ok());
+        explicit["path"] = serde_json::json!("bad");
+        assert!(serde_json::from_value::<Request>(explicit).is_err());
+        let mut search = serde_json::json!({
+            "source": {"target": "a".repeat(64), "layoutKey": "b".repeat(64), "partition": null},
+            "options": {"scope": "allUnallocated"}
+        });
+        assert!(serde_json::from_value::<Request>(search.clone()).is_ok());
+        search["options"]["startSector"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<Request>(search).is_err());
         assert!(selected(BrowseRequest {
             id: "absent".into(),
             candidate: "absent".into()
@@ -423,7 +477,8 @@ mod tests {
                 state: "completed".into(),
                 done: range.size,
                 total: range.size,
-                options,
+                options: Scope::Range(options),
+                ranges: vec![range],
                 candidates: vec![candidate],
                 message: String::new(),
             },
@@ -432,7 +487,6 @@ mod tests {
                 layout_key: "layout".into(),
                 partition: None,
             },
-            range,
         };
         let mut other = base.clone();
         let member = other.btrfs_member.as_mut().unwrap();

@@ -1,4 +1,6 @@
 {
+  "全部未分配空间": "Tutto lo spazio non allocato",
+  "整盘镜像（搜索丢失分区）": "Immagine dell’intero disco (cerca partizioni perse)",
   "单次读取超时（秒）": "Timeout per lettura (secondi)",
   "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。": "Immetti da 1 a 120 secondi o lascia il campo vuoto per usare il valore di sistema. Al timeout, la scansione attende la conferma dell’annullamento dal driver. Puoi cambiare il valore prima di riprendere.",
   "单次读取超时须为 1 到 120 秒。": "Il timeout per lettura deve essere compreso tra 1 e 120 secondi.",

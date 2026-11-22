@@ -107,23 +107,32 @@ impl Browser {
         &self,
         partition: u32,
     ) -> Result<crate::recovery_export::BackupSource, String> {
-        let point = self
-            .info
-            .points
-            .iter()
-            .find(|p| p.id == self.info.selected_point)
-            .ok_or("备份还原点不存在")?;
         let part = self
             .info
             .partitions
             .iter()
             .find(|p| p.id == partition)
             .ok_or("备份分区不存在")?;
+        self.provenance_for(part.name.clone(), None)
+    }
+
+    pub(crate) fn provenance_for(
+        &self,
+        partition: String,
+        found_extent: Option<crate::surface_scan::Range>,
+    ) -> Result<crate::recovery_export::BackupSource, String> {
+        let point = self
+            .info
+            .points
+            .iter()
+            .find(|p| p.id == self.info.selected_point)
+            .ok_or("备份还原点不存在")?;
         Ok(crate::recovery_export::BackupSource {
             archive_name: self.info.name.clone(),
             point_id: point.id.clone(),
             point_label: point.label.clone(),
-            partition: part.name.clone(),
+            partition,
+            found_extent,
         })
     }
     pub fn source_label(&self, partition: u32) -> Result<String, String> {

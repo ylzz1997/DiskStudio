@@ -28,6 +28,8 @@ const backup: BackupInfo = {
   sourceDisks: [],
   scanId: null,
   scanPartition: null,
+  scanMode: null,
+  search: null,
 };
 function Harness() {
   const [info, setInfo] = useState<BackupInfo | null>(null);

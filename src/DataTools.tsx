@@ -32,6 +32,7 @@ import { VirtualRaidDialog, type RaidDetection, type RaidEdit, type RaidFiles, t
 import type { ImageBrowseMode, ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
+import { RetainedPartitionSearch, type RetainedSearch } from "./RetainedPartitionSearch";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
 import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
 import {
@@ -221,6 +222,36 @@ export function DataTools({
   const previousJob = useRef("");
   const lastState = useRef("");
   const busy = pending || job?.state === "running";
+  function retainedSearch(
+    kind: "image" | "backup",
+    id: string,
+    size: number,
+    sector: number,
+    search: RetainedSearch | null,
+    expanded: boolean,
+    canSearchUnallocated: boolean,
+  ) {
+    const source = { kind, id };
+    return (
+      <RetainedPartitionSearch
+        key={id}
+        search={search}
+        size={size}
+        sector={sector}
+        busy={!!busy}
+        expanded={expanded}
+        canSearchUnallocated={canSearchUnallocated}
+        onSearch={(options) => void action(async () => {
+          setOwnJobId(await invoke<string>("data_search_retained_partitions", { request: { source, options } }));
+          setJob(await invoke<Job>("data_status"));
+        })}
+        onBrowse={(searchId, candidate, mode) => void action(async () => {
+          setOwnJobId(await invoke<string>("data_browse_retained_partition", { request: { source, searchId, candidate, mode } }));
+          setJob(await invoke<Job>("data_status"));
+        })}
+      />
+    );
+  }
   const lostSource = page === "recovery" ? scanStatus?.lost : null;
   const resultsScanId =
     page === "backup"
@@ -1054,6 +1085,11 @@ export function DataTools({
         ) : browsingImage ? (
           <ImageBrowserPanel
             info={imageInfo}
+            lostSearch={imageInfo && imageInfo.options.kind !== "partition" && retainedSearch(
+              "image", imageInfo.id, imageInfo.size, imageInfo.options.sector, imageInfo.search,
+              imageInfo.options.kind === "search" || !!imageInfo.search,
+              imageInfo.options.kind === "disk",
+            )}
             busy={!!busy}
             available={native}
             onCopy={() => {
@@ -1105,6 +1141,11 @@ export function DataTools({
         ) : browsingBackup ? (
           <BackupBrowserPanel
             info={backupInfo}
+            lostSearch={backupInfo?.kind === "disk" && retainedSearch(
+              "backup", backupInfo.id, backupInfo.size, backupInfo.sector, backupInfo.search,
+              !!backupInfo.tableIssue || !!backupInfo.search,
+              !backupInfo.tableIssue,
+            )}
             busy={!!busy}
             available={native}
             onOpen={() =>
@@ -1734,6 +1775,7 @@ export function DataTools({
           browsing={
             page === "files" ||
             (page === "recovery" && raidInfo?.scanMode === "existing") ||
+            (page === "backup" && browsingBackup && backupInfo?.scanMode === "existing") ||
             (page === "backup" &&
               browsingImage &&
               (raidInfo?.scanId ? raidInfo.scanMode : imageLvmInfo?.scanId ? imageLvmInfo.scanMode : imageInfo?.scanMode) === "existing")

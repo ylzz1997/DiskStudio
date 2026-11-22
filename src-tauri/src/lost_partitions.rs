@@ -604,10 +604,74 @@ pub(crate) fn candidate_reader<R: Read + Seek + 'static>(
     revalidate_region(&mut reader, sector, candidate, cancel)?;
     Ok(view::Reader::new(reader, Vec::new(), candidate.size))
 }
+
+pub(crate) fn scan_range(
+    reader: impl Read + Seek + 'static,
+    range: Range,
+    cancel: &Arc<AtomicBool>,
+    publish: impl FnMut(u64, Option<Candidate>) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_ranges(reader, &[range], cancel, publish)
+}
+
+pub(crate) fn scan_ranges(
+    reader: impl Read + Seek + 'static,
+    ranges: &[Range],
+    cancel: &Arc<AtomicBool>,
+    mut publish: impl FnMut(u64, Option<Candidate>) -> Result<(), String>,
+) -> Result<(), String> {
+    let reader = SharedReader::new(reader);
+    let mut budget = SearchBudget::new();
+    let mut scanned = 0;
+    for &range in ranges {
+        canceled(cancel)?;
+        let region = Region::new(reader.clone(), range.offset, range.size).map_err(|e| e.to_string())?;
+        scan_with_budget(region, Range { offset: 0, ..range }, cancel, &mut budget, |done, candidate| {
+            publish(scanned + done, candidate.map(|mut candidate| {
+                candidate.offset += range.offset;
+                candidate
+            }))
+        })?;
+        scanned += range.size;
+    }
+    Ok(())
+}
+
+struct SearchBudget {
+    probes: usize,
+    found: usize,
+    btrfs: u64,
+    boot: u64,
+    ext: Rc<Cell<u64>>,
+}
+
+impl SearchBudget {
+    fn new() -> Self {
+        Self {
+            probes: 0,
+            found: 0,
+            btrfs: btrfs::BUDGET,
+            boot: backup_boot::BUDGET,
+            ext: Rc::new(Cell::new(backup_ext::BUDGET)),
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn scan<R: Read + Seek + 'static>(
     reader: R,
     range: Range,
     cancel: &Arc<AtomicBool>,
+    progress: impl FnMut(u64, Option<Candidate>) -> Result<(), String>,
+) -> Result<(), String> {
+    scan_with_budget(reader, range, cancel, &mut SearchBudget::new(), progress)
+}
+
+fn scan_with_budget<R: Read + Seek + 'static>(
+    reader: R,
+    range: Range,
+    cancel: &Arc<AtomicBool>,
+    budget: &mut SearchBudget,
     mut progress: impl FnMut(u64, Option<Candidate>) -> Result<(), String>,
 ) -> Result<(), String> {
     if !matches!(range.sector, 512 | 4096)
@@ -622,14 +686,10 @@ pub fn scan<R: Read + Seek + 'static>(
         return Err("搜索范围无效".into());
     }
     let mut done = 0u64;
-    let mut probes = 0usize;
-    let mut found = 0usize;
     let mut btrfs_offsets = HashSet::new();
-    let mut btrfs_budget = btrfs::BUDGET;
-    let mut boot_budget = backup_boot::BUDGET;
     let mut boot_offsets = HashSet::new();
-    let ext_budget = Rc::new(Cell::new(backup_ext::BUDGET));
     let mut ext_offsets = HashSet::new();
+    let SearchBudget { probes, found, btrfs: btrfs_budget, boot: boot_budget, ext: ext_budget } = budget;
     let mut reader = SharedReader::new(reader);
     progress(0, None)?;
     while done < range.size {
@@ -668,14 +728,14 @@ pub fn scan<R: Read + Seek + 'static>(
                 continue;
             }
             canceled(cancel)?;
-            probes += 1;
-            if probes > MAX_PROBES {
+            *probes += 1;
+            if *probes > MAX_PROBES {
                 return Err("引导特征过多，达到证据检查上限；请缩小搜索范围。".into());
             }
             let mut publish = |candidate| -> Result<(), String> {
-                found += 1;
+                *found += 1;
                 progress(done + i as u64, Some(candidate))?;
-                if found == MAX_CANDIDATES {
+                if *found == MAX_CANDIDATES {
                     return Err("已达到 256 个候选上限；结果不完整，请缩小范围。".into());
                 }
                 Ok(())
@@ -696,7 +756,7 @@ pub fn scan<R: Read + Seek + 'static>(
                 publish(candidate)?;
             } else if let Some(backup) = backup.filter(|_| !known_copy) {
                 if let Some(candidate) =
-                    backup_boot::probe(&mut reader, range.sector, backup, cancel, &mut boot_budget)?
+                    backup_boot::probe(&mut reader, range.sector, backup, cancel, boot_budget)?
                 {
                     boot_offsets.insert((backup.start, backup.filesystem, backup.size));
                     publish(candidate)?;
@@ -709,7 +769,7 @@ pub fn scan<R: Read + Seek + 'static>(
                     start,
                     relative,
                     cancel,
-                    &mut btrfs_budget,
+                    btrfs_budget,
                 )? {
                     btrfs_offsets.insert(start);
                     publish(candidate)?;
@@ -722,7 +782,7 @@ pub fn scan<R: Read + Seek + 'static>(
                         range.sector,
                         backup,
                         cancel,
-                        &ext_budget,
+                        ext_budget,
                     )? {
                         ext_offsets.insert((backup.start, backup.size));
                         publish(candidate)?;

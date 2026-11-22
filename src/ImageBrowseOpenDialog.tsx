@@ -131,6 +131,7 @@ export function ImageBrowseOpenDialog({
               }
             >
               <option value="disk">{t("整盘镜像（GPT / MBR）")}</option>
+              <option value="search">{t("整盘镜像（搜索丢失分区）")}</option>
               <option value="partition">{t("分区镜像（文件系统）")}</option>
             </select>
           </label>
@@ -153,10 +154,17 @@ export function ImageBrowseOpenDialog({
           </label>
         </div>
       ) : (
-        <p className="data-footnote">
-          {format.toUpperCase()}{" "}
-          {t("容器按整盘打开，容量和逻辑扇区由容器元数据确定。")}
-        </p>
+        <>
+          <p className="data-footnote">
+            {format.toUpperCase()}{" "}
+            {t("容器按整盘打开，容量和逻辑扇区由容器元数据确定。")}
+          </p>
+          <label className="image-source-check">
+            <input type="checkbox" checked={settings.kind === "search"} disabled={working}
+              onChange={(event) => setSettings({ ...settings, kind: event.target.checked ? "search" : "disk" })} />
+            {t("搜索丢失分区")}
+          </label>
+        </>
       )}
       {format === "parallels" && (
         <label className="image-source-check">

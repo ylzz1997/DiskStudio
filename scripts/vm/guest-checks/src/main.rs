@@ -82,6 +82,8 @@ mod lost_partition_restore;
 mod lost_partition_tasks;
 #[path = "../../../../src-tauri/src/lost_partitions.rs"]
 mod lost_partitions;
+#[path = "../../../../src-tauri/src/lost_search_scope.rs"]
+mod lost_search_scope;
 #[path = "../../../../src-tauri/src/ldm_tasks.rs"]
 mod ldm_tasks;
 #[path = "../../../../src-tauri/src/ldm_basic.rs"]
@@ -141,6 +143,10 @@ mod recovery_output_checks;
 mod recovery_tree;
 mod resize_clone_checks;
 mod retained_restore_checks;
+mod retained_partition_checks;
+#[path = "../../../../src-tauri/src/image_convert.rs"]
+mod image_convert;
+mod unallocated_search_checks;
 mod archive_restore_checks;
 mod capacity_restore_checks;
 mod fat_restore_checks;
@@ -1211,6 +1217,10 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Lost-Backup-Boot-Verify") => lost_backup_boot_checks::verify(),
         Some("Lost-Ext4-Prepare") => lost_backup_boot_checks::prepare_ext(),
         Some("Lost-Ext4-Verify") => lost_backup_boot_checks::verify_ext(),
+        Some("Retained-Lost-Prepare") => retained_partition_checks::prepare(),
+        Some("Retained-Lost-Verify") => retained_partition_checks::verify(),
+        Some("Unallocated-Search-Prepare") => unallocated_search_checks::prepare(),
+        Some("Unallocated-Search-Verify") => unallocated_search_checks::verify(),
         Some("BitLocker-Marker-Prepare") => bitlocker_checks::prepare(),
         Some("BitLocker-Marker-Verify") => bitlocker_checks::verify(),
         Some("Resize-Clone-Prepare") => resize_clone_checks::prepare(),

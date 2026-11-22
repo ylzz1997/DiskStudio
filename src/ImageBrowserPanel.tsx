@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { FileSearch, FolderOpen, HardDrive, X } from "lucide-react";
 import { useLocale } from "./i18n/LanguageProvider";
 import { formatSize } from "./types";
+import type { RetainedSearch } from "./RetainedPartitionSearch";
 
 export type ImageBrowseOptions = {
-  kind: "disk" | "partition";
+  kind: "disk" | "partition" | "search";
   sector: 512 | 4096;
 };
 export type ImageBrowseMode = "existing" | "allFiles" | "deleted";
@@ -21,6 +23,7 @@ export type ImageBrowseInfo = {
   scanId: string | null;
   scanPartition: number | null;
   scanMode: ImageBrowseMode | null;
+  search: RetainedSearch | null;
 };
 export function ImageBrowserPanel({
   info,
@@ -35,6 +38,7 @@ export function ImageBrowserPanel({
   onLvm,
   raidName,
   onRaid,
+  lostSearch,
 }: {
   info: ImageBrowseInfo | null;
   busy: boolean;
@@ -48,6 +52,7 @@ export function ImageBrowserPanel({
   onLvm: () => void;
   raidName?: string;
   onRaid: () => void;
+  lostSearch?: ReactNode;
 }) {
   const { t, language, catalogText } = useLocale();
   const [options, setOptions] = useState<ImageBrowseOptions>({
@@ -78,7 +83,7 @@ export function ImageBrowserPanel({
             <strong title={info.name}>{info.name}</strong>
             <span>
               {info.format} ·{" "}
-              {info.options.kind === "disk" ? t("整盘镜像") : t("分区镜像")} ·{" "}
+              {info.options.kind === "partition" ? t("分区镜像") : t("整盘镜像")} ·{" "}
               {formatSize(info.size)} ·{" "}
               {t("{size} B 扇区", { size: info.options.sector })}
             </span>
@@ -108,6 +113,7 @@ export function ImageBrowserPanel({
               }
             >
               <option value="disk">{t("整盘镜像（GPT / MBR）")}</option>
+              <option value="search">{t("整盘镜像（搜索丢失分区）")}</option>
               <option value="partition">{t("分区镜像（文件系统）")}</option>
             </select>
           </label>
@@ -151,7 +157,8 @@ export function ImageBrowserPanel({
           {t("虚拟 RAID")}
         </button>
       </div>
-      {info && (
+      {lostSearch}
+      {info && info.options.kind !== "search" && (
         <>
           <label className="backup-browser-partition">
             {t("镜像中的分区")}

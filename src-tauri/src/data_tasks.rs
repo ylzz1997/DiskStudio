@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub mod image_browse_tasks;
 #[path = "recovery_tasks.rs"]
 pub mod recovery_tasks;
+#[path = "retained_partition_tasks.rs"]
+pub mod retained_partition_tasks;
 #[cfg(windows)]
 #[path = "retained_restore_windows.rs"]
 mod retained_restore;
@@ -63,6 +65,7 @@ pub(crate) enum ScanSource {
         partition: u32,
     },
     ImageLvm(image_browse_tasks::lvm::Source),
+    RetainedFound(retained_partition_tasks::Found),
     VirtualRaid(virtual_raid_tasks::Source),
     Reconstructed {
         source: Box<ScanSource>,
@@ -137,6 +140,7 @@ impl ScanSource {
         match self {
             Self::Reconstructed { proof, .. } => Some(proof),
             Self::Lost(source) => source.candidate.reconstruction(),
+            Self::RetainedFound(source) => source.candidate.reconstruction(),
             Self::VirtualRaid(source) => source.reconstruction(),
             _ => None,
         }
@@ -288,7 +292,14 @@ impl ScanSource {
             return Ok(RecoveryReaders::Single(Box::new(lock.reader()?)));
         }
         let reader = self.reader(cancel)?;
-        if matches!(self, Self::Lost(source) if source.candidate.filesystem == "Btrfs") {
+        if let Self::RetainedFound(source) = self {
+            if let Some(proof) = source.candidate.reconstruction() {
+                return Ok(RecoveryReaders::from_view(reader, proof));
+            }
+        }
+        if matches!(self, Self::Lost(source) if source.candidate.filesystem == "Btrfs")
+            || matches!(self, Self::RetainedFound(source) if source.candidate.filesystem == "Btrfs")
+        {
             return Ok(RecoveryReaders::Btrfs {
                 readers: vec![reader],
                 access: BtrfsRead::Recovered {
@@ -306,6 +317,7 @@ impl ScanSource {
                 Ok(Box::new(proof.reopen(source.reader(cancel)?, cancel)?))
             }
             Self::Lost(source) => source.reader(None, cancel),
+            Self::RetainedFound(source) => source.reader(cancel),
             Self::Disk(source) => Ok(Box::new(platform::reader(&platform::resolve(
                 source, false, false,
             )?)?)),
@@ -349,6 +361,7 @@ impl ScanSource {
             Self::Backup { opened, .. } => opened.source_disks.clone(),
             Self::Image { opened, .. } => opened.source_disks.clone(),
             Self::ImageLvm(source) => source.disks(),
+            Self::RetainedFound(source) => source.disks(),
             Self::VirtualRaid(source) => source.disks(),
         }
     }
@@ -357,6 +370,7 @@ impl ScanSource {
         match self {
             Self::Reconstructed { source, .. } => Ok(recovery_view_label(&source.label()?)),
             Self::Lost(source) => source.label(),
+            Self::RetainedFound(source) => source.label(),
             Self::Lvm(source) => {
                 let labels = source
                     .members
@@ -593,6 +607,7 @@ struct State {
     image_lvm: Option<Arc<image_browse_tasks::lvm::Saved>>,
     virtual_raid: Option<Arc<virtual_raid_tasks::Saved>>,
     raid_search: Option<virtual_raid_tasks::Search>,
+    retained_partition_search: Option<retained_partition_tasks::Search>,
     #[cfg(windows)]
     raid_draft: Option<Arc<virtual_raid_tasks::Draft>>,
     scan_name: String,
@@ -614,6 +629,7 @@ impl Default for State {
             image_lvm: None,
             virtual_raid: None,
             raid_search: None,
+            retained_partition_search: None,
             #[cfg(windows)]
             raid_draft: None,
             scan_name: String::new(),
@@ -695,6 +711,7 @@ fn scan_status_in(s: &State) -> Option<ScanStatus> {
             ScanSource::Backup { .. }
             | ScanSource::Image { .. }
             | ScanSource::ImageLvm(_)
+            | ScanSource::RetainedFound(_)
             | ScanSource::VirtualRaid(_) => {
                 return None;
             }
@@ -747,6 +764,8 @@ pub struct BackupStatus {
     source_disks: Vec<Target>,
     scan_id: Option<String>,
     scan_partition: Option<u32>,
+    search: Option<retained_partition_tasks::Search>,
+    scan_mode: Option<ScanMode>,
 }
 pub fn backup_status() -> Option<BackupStatus> {
     let s = state();
@@ -757,6 +776,7 @@ pub fn backup_status() -> Option<BackupStatus> {
         {
             Some(id.clone())
         }
+        ScanSource::RetainedFound(found) if found.backup() == Some(opened.browser.info.id.as_str()) => Some(id.clone()),
         _ => None,
     });
     Some(BackupStatus {
@@ -769,6 +789,8 @@ pub fn backup_status() -> Option<BackupStatus> {
             } if scan.browser.info.id == opened.browser.info.id => Some(*partition),
             _ => None,
         }),
+        search: s.retained_partition_search.as_ref().filter(|search| search.for_backup(&opened.browser.info.id)).map(retained_partition_tasks::Search::read_only),
+        scan_mode: scan_id.as_ref().map(|_| s.scan_mode),
         scan_id,
     })
 }
@@ -784,17 +806,28 @@ pub fn close_backup(id: String) -> Result<(), String> {
     {
         return Err("备份浏览会话已失效".into());
     }
-    if s.scan.as_ref().is_some_and(
-        |(_, source)| matches!(source.original(),ScanSource::Backup{opened,..} if opened.browser.info.id==id),
-    ) {
+    clear_backup_results(&mut s);
+    s.opened_backup = None;
+    Ok(())
+}
+
+fn clear_backup_results(s: &mut State) {
+    if s.scan.as_ref().is_some_and(|(_, source)| match source.original() {
+        ScanSource::Backup { .. } => true,
+        ScanSource::RetainedFound(found) => found.backup().is_some(),
+        _ => false,
+    }) {
         s.scan = None;
         s.candidates.clear();
         s.directories = Catalog::default();
         s.scan_name.clear();
     }
+    if s.opened_backup.as_ref().is_some_and(|backup| {
+        s.retained_partition_search.as_ref().is_some_and(|search| search.for_backup(&backup.browser.info.id))
+    }) {
+        s.retained_partition_search = None;
+    }
     s.pending = None;
-    s.opened_backup = None;
-    Ok(())
 }
 pub fn open_backup() -> Result<Option<String>, String> {
     #[cfg(not(windows))]
@@ -1001,17 +1034,8 @@ fn commit_backup(
     if s.cancel.load(Ordering::Relaxed) {
         return Err("操作已取消，保留原备份还原点和目录".into());
     }
-    if s.scan
-        .as_ref()
-        .is_some_and(|(_, source)| matches!(source.original(), ScanSource::Backup { .. }))
-    {
-        s.scan = None;
-        s.candidates.clear();
-        s.directories = Catalog::default();
-        s.scan_name.clear();
-    }
+    clear_backup_results(s);
     s.opened_backup = Some(opened);
-    s.pending = None;
     let job = s.job.as_mut().unwrap();
     job.state = "completed".into();
     job.phase = "完成".into();
@@ -1395,6 +1419,10 @@ fn scan_source_input(
             #[cfg(windows)]
             for lock in &locks {
                 lock.verify()?;
+            }
+            #[cfg(windows)]
+            if let ScanSource::RetainedFound(found) = &source_for_io {
+                found.validate()?;
             }
             if let Some(bridge) = image_bridge {
                 bridge.healthy()?;
@@ -2545,6 +2573,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     }
                     if let ScanSource::Image { opened, partition } = source.original() {
                         export.image_source = Some(opened.browser.provenance(*partition)?);
+                    }
+                    if let ScanSource::RetainedFound(found) = source.original() {
+                        found.provenance(&mut export)?;
                     }
                     if let ScanSource::ImageLvm(source) = &source {
                         export.image_lvm_source = Some(source.provenance()?);

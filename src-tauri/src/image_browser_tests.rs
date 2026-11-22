@@ -15,6 +15,39 @@ fn open(bytes: Vec<u8>, kind: Kind, sector: u64) -> Browser {
     )
     .unwrap()
 }
+
+#[test]
+fn explicit_search_opens_an_image_with_no_table_and_finds_a_bounded_partition() {
+    use crate::{lost_partitions, surface_scan::Options as SearchOptions};
+
+    let mut bytes = vec![0; MIB];
+    bytes.extend_from_slice(NTFS);
+    bytes.resize(bytes.len() + MIB, 0);
+    assert!(Browser::open(
+        Cursor::new(bytes.clone()),
+        "no-table.img".into(),
+        Options { kind: Kind::Disk, sector: 512 },
+        || Ok(()),
+    ).is_err());
+    let browser = open(bytes, Kind::Search, 512);
+    assert!(browser.info.partitions.is_empty());
+    assert!(browser.reader(0).is_err());
+    let range = SearchOptions { start_sector: 1, sector_count: browser.info.size / 512 - 1 }
+        .range(0, browser.info.size, 512).unwrap();
+    let mut candidates = Vec::new();
+    lost_partitions::scan_range(
+        browser.logical_reader().unwrap(),
+        range,
+        &Arc::new(AtomicBool::new(false)),
+        |_, candidate| {
+            candidates.extend(candidate);
+            Ok(())
+        },
+    ).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].offset, MIB as u64);
+    assert!(candidates[0].can_browse);
+}
 fn scan(browser: &Browser, part: u32, mode: ScanMode) -> (Vec<Candidate>, Catalog) {
     let mut files = vec![];
     let mut catalog = Catalog::default();

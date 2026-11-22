@@ -71,7 +71,7 @@ fn scan_candidates(
     cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<lost_partitions::Candidate>, String> {
     let mut found = Vec::new();
-    lost_partitions::scan(reader, local, cancel, |_, item| {
+    lost_partitions::scan_range(reader, local, cancel, |_, item| {
         found.extend(item);
         Ok(())
     })?;

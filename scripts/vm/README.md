@@ -106,6 +106,10 @@ Ext4 备用超级块验收使用 `build-guest-checks.ps1 -ExtReconstruction` 和
 
 Ext4 丢失分区验收使用 `build-guest-checks.ps1 -LostExt4` 和独立 512 字节 `start --ext-copy` 配置。匹配的只读光盘包含 `Lost-Ext4-Prepare.exe` 和 `Lost-Ext4-Verify.exe`。Prepare 在 B 的 8 GiB 起点核对 66 MiB 全零空闲范围，在其中写入主超级块签名损坏的 64 MiB 未登记卷，并保留 B 脱机。在正式程序中按 Prepare 提示搜索 B，核对候选起点和「仅浏览与提取」，预览 `small_file` 并平铺导出到 A/2 的 `DS-LostExt4`。Verify 比较文件字节、SHA-256、备用块组和偏移，并复核全部源范围、相邻扇区及三块盘的布局。
 
+镜像与备份的丢失分区验收使用 `build-guest-checks.ps1 -RetainedLost` 和默认 512 字节配置。Prepare 在 B 的已核对 NTFS 数据卷放置无分区表的 RAW 镜像和一条两层整盘备份链。用匹配的正式程序搜索镜像及最新备份还原点，预览 `file-with-12345`，平铺导出到 A/2 的 `DS-Retained-Lost\image` 与 `DS-Retained-Lost\backup`。切换到基础点后重新搜索，核对候选起点改变。Verify 比较输出和源文件的 SHA-256、报告中的候选范围和还原点，以及两张测试盘的分区表与来宾系统盘布局。
+
+全部未分配空间验收使用 `build-guest-checks.ps1 -UnallocatedSearch` 和已完成 Ext4 丢失分区验收的 `start --ext-copy` 配置。Prepare 先复核脱机 B 的 Ext4 和 A/2 上一轮导出，再在 A/2 的 `DS-Unallocated-Search` 创建两个 4Kn 逻辑来源。用匹配的正式程序分别打开 VHDX 和整盘备份，每次选择「全部未分配空间」，核对只找到 LBA 512 和 8192，跳过 LBA 4096 的已登记 exFAT。对实体 B 运行同一范围预设，核对 LBA 16777217 的 Ext4 候选。Verify 复核两个保留文件的 SHA-256、Ext4 原始范围及邻区、两盘 GPT 和来宾系统盘布局。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。

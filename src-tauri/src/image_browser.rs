@@ -12,6 +12,7 @@ use std::{
 pub enum Kind {
     Disk,
     Partition,
+    Search,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -105,6 +106,10 @@ impl Browser {
         tick()?;
         let mut warning = String::new();
         let partitions = match options.kind {
+            Kind::Search => {
+                warning = "已打开整盘镜像以搜索丢失分区。".into();
+                Vec::new()
+            }
             Kind::Partition => vec![Part {
                 id: 0,
                 name: "镜像分区".into(),

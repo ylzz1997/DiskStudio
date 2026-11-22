@@ -29,7 +29,7 @@ export async function openImageBrowser(
     throw Error("请确认此 Parallels 文件是独立镜像，不依赖其他快照。");
   const initial = await browseReader(group, options, read);
   const effective = {
-    kind: format === "raw" ? options.kind : ("disk" as const),
+    kind: format === "raw" || options.kind === "search" ? options.kind : ("disk" as const),
     sector: initial.sectorSize,
   };
   let first: typeof initial | null = initial;

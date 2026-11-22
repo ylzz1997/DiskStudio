@@ -1,4 +1,6 @@
 {
+  "全部未分配空间": "Tout l’espace non alloué",
+  "整盘镜像（搜索丢失分区）": "Image du disque entier (rechercher les partitions perdues)",
   "单次读取超时（秒）": "Délai par lecture (secondes)",
   "填写 1 到 120 秒，留空使用系统默认。超时时等待驱动确认取消，续扫前可调整设置。": "Saisissez de 1 à 120 secondes ou laissez le champ vide pour utiliser le réglage système. Si le délai est dépassé, l’analyse attend la confirmation de l’annulation par le pilote. Le réglage peut être modifié avant la reprise.",
   "单次读取超时须为 1 到 120 秒。": "Le délai par lecture doit être compris entre 1 et 120 secondes.",

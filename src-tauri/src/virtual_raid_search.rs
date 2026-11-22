@@ -1,5 +1,6 @@
 //! Bounded lost-partition search on a reconstructed RAID logical address space.
 use super::*;
+use crate::lost_partitions::scan_range;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,30 +118,6 @@ pub fn search(request: SearchRequest) -> Result<String, String> {
         });
         Ok(id)
     }
-}
-
-fn scan_range(
-    reader: impl Read + Seek + 'static,
-    range: surface_scan::Range,
-    cancel: &std::sync::Arc<AtomicBool>,
-    mut publish: impl FnMut(u64, Option<lost_partitions::Candidate>) -> Result<(), String>,
-) -> Result<(), String> {
-    let reader =
-        data_io::Region::new(reader, range.offset, range.size).map_err(|e| e.to_string())?;
-    lost_partitions::scan(
-        reader,
-        surface_scan::Range { offset: 0, ..range },
-        cancel,
-        |done, candidate| {
-            publish(
-                done,
-                candidate.map(|mut candidate| {
-                    candidate.offset += range.offset;
-                    candidate
-                }),
-            )
-        },
-    )
 }
 
 #[derive(Deserialize)]

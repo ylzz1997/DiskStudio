@@ -1,4 +1,8 @@
 import type { Partition } from "./types";
+import type { surfaceRange } from "./surfaceModel";
+export type LostSearchOptions =
+  | ReturnType<typeof surfaceRange>
+  | { scope: "allUnallocated" };
 export interface LostCandidate {
   id: string;
   filesystem: string;
@@ -26,7 +30,8 @@ export interface LostSnapshot {
   state: "running" | "completed" | "canceled" | "failed";
   done: number;
   total: number;
-  options: { startSector: number; sectorCount: number };
+  options: LostSearchOptions;
+  ranges: { offset: number; size: number; sector: number }[];
   candidates: LostCandidate[];
   message: string;
 }

@@ -101,7 +101,7 @@ impl Descriptor {
         if !matches!(self.format, Format::Vhd | Format::Vmdk) && info.files.len() != 1 {
             return Err("此容器类型不接受父盘或分卷。".into());
         }
-        if self.format != Format::Raw && self.options.kind != crate::image_browser::Kind::Disk {
+        if self.format != Format::Raw && self.options.kind == crate::image_browser::Kind::Partition {
             return Err("虚拟磁盘容器须按整盘镜像打开。".into());
         }
         if !matches!(self.format, Format::Raw | Format::Vhdx) && self.options.sector != 512 {
@@ -168,10 +168,12 @@ pub fn attach(
                 };
                 opened.validate()?;
                 commit(&mut state(), &work_id, opened)?;
-                Ok((
-                    "镜像已打开。选择分区并读取目录；没有挂载或修改镜像。".into(),
-                    None,
-                ))
+                let message = if request.options.kind == crate::image_browser::Kind::Search {
+                    "已打开整盘镜像以搜索丢失分区。"
+                } else {
+                    "镜像已打开。选择分区并读取目录；没有挂载或修改镜像。"
+                };
+                Ok((message.into(), None))
             }))
             .unwrap_or_else(|_| Err("镜像读取异常退出，保留原镜像及目录。".into()));
             finish(&work_id, result);

@@ -374,16 +374,14 @@ mod windows {
         cancel: &AtomicBool,
     ) -> Result<Preview, String> {
         *pending() = None;
-        let (source, range, candidates) = crate::lost_partition_tasks::selected_many(request)?;
+        let (source, candidates) = crate::lost_partition_tasks::selected_many(request)?;
         let (ctx, guid, protected) = platform::table_restore_context(&source, None)?;
         let d = &ctx.resolved.disk;
         let sector = d.logical_sector_size.ok_or("缺少逻辑扇区")?;
-        if range.sector != sector
-            || range
-                .offset
-                .checked_add(range.size)
-                .is_none_or(|end| end > d.size)
-        {
+        if candidates.iter().any(|(range, _)| {
+            range.sector != sector
+                || range.offset.checked_add(range.size).is_none_or(|end| end > d.size)
+        }) {
             return Err("候选搜索范围或设备几何变化。".into());
         }
         let identity = crate::disk_identity::key(
@@ -399,7 +397,7 @@ mod windows {
         let current =
             table_archive::capture(&mut file, d.size, sector, identity, false, || check(cancel))?;
         let mut recovered = vec![];
-        for candidate in candidates {
+        for (range, candidate) in candidates {
             let extent =
                 crate::lost_partition_restore::extent(&mut file, range, &candidate, cancel)?;
             recovered.push(crate::lost_partition_restore::Evidence {

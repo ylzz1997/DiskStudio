@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { Archive, FolderOpen, Search, X } from "lucide-react";
 import { formatSize } from "./types";
 import { useLocale } from "./i18n/LanguageProvider";
 import type { Translate } from "./i18n/translate";
+import type { ImageBrowseMode } from "./ImageBrowserPanel";
+import type { RetainedSearch } from "./RetainedPartitionSearch";
 
 export type BackupInfo = {
   id: string;
@@ -27,6 +30,8 @@ export type BackupInfo = {
   sourceDisks: string[];
   scanId: string | null;
   scanPartition: number | null;
+  scanMode: ImageBrowseMode | null;
+  search: RetainedSearch | null;
 };
 
 export function backupPointLabel(
@@ -49,6 +54,7 @@ export function BackupBrowserPanel({
   onReconstruct,
   onPoint,
   onRestore,
+  lostSearch,
 }: {
   info: BackupInfo | null;
   busy: boolean;
@@ -59,6 +65,7 @@ export function BackupBrowserPanel({
   onReconstruct: (partition: number) => void;
   onPoint: (point: string) => void;
   onRestore?: (partition: number | null) => void;
+  lostSearch?: ReactNode;
 }) {
   const { language, t, catalogText } = useLocale();
   const [partition, setPartition] = useState("");
@@ -119,6 +126,7 @@ export function BackupBrowserPanel({
               </select>
             </label>
           )}
+          {lostSearch}
           <label className="backup-browser-partition">
             {t("备份中的分区")}
             <select
@@ -151,7 +159,7 @@ export function BackupBrowserPanel({
           {info.tableIssue !== undefined && (
             <details className="data-footnote">
               <summary>
-                {t("无法校验分区表。此还原点仅支持整盘还原。")}
+                {t("此还原点的分区表无法解析或未通过校验。整盘还原会保留归档中的分区表原始状态。")}
               </summary>
               <p>{catalogText(info.tableIssue)}</p>
             </details>
