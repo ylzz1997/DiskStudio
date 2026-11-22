@@ -14,7 +14,7 @@ const mdRaidMetadata = 'virtual-raid-md-metadata-4kn';
 const mdRaidZones = 'virtual-raid-md-zones-4kn';
 const mdRaid10 = 'virtual-raid-md10-4kn';
 const mdFixtures = [mdRaid6, mdRaidMetadata, mdRaidZones, mdRaid10, 'virtual-raid-md10-advanced-4kn'];
-const imageFixtures = [...btrfsImages, 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn', ...mdFixtures];
+const imageFixtures = [...btrfsImages, 'ext-journal-image', 'lvm-images-4kn', 'lvm-raid-matrix-4kn', 'lvm-thin-snapshots-4kn', 'lvm-cow-persistent-4kn', 'lvm-cross-deleted-4kn', 'lvm-raid10-layouts-4kn', ...mdFixtures];
 const spacesFixtures = ['storage-spaces-metadata-4kn', 'storage-spaces-witness-4kn', 'storage-spaces-witness-full-4kn', 'storage-spaces-internal-4kn', 'storage-spaces-cache-4kn', 'storage-spaces-cache-complete-4kn'];
 const phases = ['populate', 'verify', 'ext-populate', 'ext-verify', 'btrfs-verify', 'btrfs-move-verify', 'btrfs-sha256-verify', ...spacesFixtures, ...imageFixtures];
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -63,9 +63,11 @@ async function main() {
     fs.mkdirSync(stage);
     const mdFixture = mdFixtures.includes(phase);
     const spacesFixture = spacesFixtures.includes(phase);
-    const scriptName = spacesFixture ? 'ubuntu-storage-spaces.py' : mdFixture ? 'ubuntu-md6.py' : phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
+    const scriptName = spacesFixture ? 'ubuntu-storage-spaces.py' : mdFixture ? 'ubuntu-md6.py' : phase.startsWith('lvm-') ? 'ubuntu-lvm.py' : phase.startsWith('btrfs-') ? 'ubuntu-btrfs.py' : phase === 'ext-journal-image' ? 'ubuntu-ext-journal.py' : phase.startsWith('ext-') ? 'ubuntu-ext.py' : 'ubuntu-ext4.py';
     const script = fs.readFileSync(path.join(project, 'scripts/vm', scriptName)).toString('base64');
-    const seedRevision = mdFixture || spacesFixture ? crypto.createHash('sha256').update(script).digest('hex').slice(0, 12) : '1';
+    const seedRevision = mdFixture || spacesFixture || phase === 'ext-journal-image'
+      ? crypto.createHash('sha256').update(script).digest('hex').slice(0, 12)
+      : '1';
     fs.writeFileSync(path.join(stage, 'meta-data'), `instance-id: diskstudio-ext4-${phase}-${seedRevision}\nlocal-hostname: diskstudio-ubuntu\n`);
     fs.writeFileSync(path.join(stage, 'user-data'), `#cloud-config
 users: []

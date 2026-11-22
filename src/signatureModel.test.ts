@@ -12,15 +12,15 @@ import {
 } from "./signatureModel";
 describe("signature scan request", () => {
   it("keeps ZIP and Office selections separate and includes them in the default set", () => {
-    const kinds = ["zip", "docx", "xlsx", "pptx"] as const;
+    const kinds = ["zip", "docx", "xlsx", "pptx", "docm", "xlsm", "pptm", "odt", "ods", "odp"] as const;
     for (const kind of kinds)
       expect(defaultSignatureSettings.kinds).toContain(kind);
     expect(
       signatureRequest(
-        { ...defaultSignatureSettings, kinds: ["docx", "pptx"] },
+        { ...defaultSignatureSettings, kinds: ["docx", "docm", "ods", "odp"] },
         1024,
       ).kinds,
-    ).toEqual(["docx", "pptx"]);
+    ).toEqual(["docx", "docm", "ods", "odp"]);
   });
   it("never treats archive or Office candidates as browser images", () => {
     for (const name of ["file.zip", "file.docx", "file.xlsx", "file.pptx"])
@@ -96,6 +96,7 @@ describe("signature scan request", () => {
     expect(previewMediaMime("video.mov")).toBe("video/quicktime");
     expect(previewMediaMime("stream.ogg")).toBe("application/ogg");
     expect(previewMediaMime("audio.wav")).toBe("audio/wav");
+    expect(previewMediaMime("audio.FLAC")).toBe("audio/flac");
     expect(previewMediaMime("video.mp4.exe")).toBeNull();
   });
 });

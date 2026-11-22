@@ -53,6 +53,7 @@ pub struct Extraction {
 pub enum Locator {
     Btrfs(crate::btrfs_recovery::Location),
     Ext(crate::ext_recovery::Location),
+    ExtDeleted(crate::ext_recovery::deleted::Location),
     Fat(crate::fat_recovery::Location),
     Ntfs {
         record: u64,
@@ -144,6 +145,9 @@ pub fn extract_owned_with_metadata<R: Read + Seek + 'static, W: Write>(
         return crate::ext_recovery::extract_with_metadata(
             reader, candidate, location, out, limit, cancel, tick,
         );
+    }
+    if let Locator::ExtDeleted(location) = &candidate.locator {
+        return crate::ext_recovery::deleted::extract(reader, candidate, location, out, limit, cancel, tick);
     }
     if let Locator::Btrfs(location) = &candidate.locator {
         if !candidate.supported {
@@ -289,7 +293,7 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
                 tick,
             );
         }
-        Locator::Ext(_) => return Err("Ext 提取需要使用拥有源读取流的入口。".into()),
+        Locator::Ext(_) | Locator::ExtDeleted(_) => return Err("Ext 提取需要使用拥有源读取流的入口。".into()),
         Locator::Fat(location) => {
             return crate::fat_recovery::extract_with_metadata(
                 reader, c, location, out, limit, tick,

@@ -18,7 +18,7 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery'];
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery'];
 function profileDisks(fourKn, fixture) {
   const base = fourKn ? fourKnDisks : disks;
   return fixture ? base.map(disk => disk.bus === 'nvme' ? {
@@ -494,6 +494,10 @@ async function preflight() {
     if (stateFixture(state) === 'signature-scope') console.log('Signature scan scope uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-formats') console.log('Signature formats use their independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-media') console.log('Media recovery uses its independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'signature-audio') console.log('FLAC, MIDI and DSD recovery use their independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'signature-documents') console.log('OpenDocument and macro-enabled Office recovery use their independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'ext-journal') console.log('Ext4 journal recovery uses its independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'signature-containers') console.log('RAR, AVI and AIFF recovery use their independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-images') console.log('Image signature recovery uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'table-mbr') console.log('MBR table inspection and backup use their independent 4Kn A/B pair.');
     console.log('Partition tests may target ONLY DS-TEST-A-0001 and DS-TEST-B-0001 (16 GiB each), never the 80 GiB OS disk.');
@@ -646,6 +650,10 @@ async function main() {
     console.log('start --4kn --signature-formats: use the dedicated 4Kn signature format fixtures');
     console.log('start --4kn --signature-media: use the dedicated 4Kn media recovery fixtures');
     console.log('start --4kn --signature-images: use the dedicated 4Kn image signature fixtures');
+    console.log('start --4kn --signature-containers: use the dedicated 4Kn RAR, AVI and AIFF signature fixtures');
+    console.log('start --4kn --signature-audio: use the dedicated 4Kn FLAC, MIDI and DSD signature fixtures');
+    console.log('start --4kn --signature-documents: use the dedicated 4Kn document signature fixtures');
+    console.log('start --4kn --ext-journal: use the dedicated 4Kn Ext4 journal fixture');
     console.log('start --4kn --table-mbr: use the dedicated 4Kn MBR partition table fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');

@@ -16,6 +16,8 @@ const MAX_XML: u64 = 2 * 1024 * 1024;
 pub(crate) const MAX_OFFICE_PACKAGE: u64 = 8 * 1024 * 1024;
 const MAX_OFFICE_EXPANDED: u64 = 48 * 1024 * 1024;
 const MAX_OFFICE_XML: u64 = 16 * 1024 * 1024;
+const ODF_MANIFEST: &[u8] = b"META-INF/manifest.xml";
+const ODF_MANIFEST_NS: &[u8] = b"urn:oasis:names:tc:opendocument:xmlns:manifest:1.0";
 const BLOCK: usize = 64 * 1024;
 pub struct Budget {
     remaining: u64,
@@ -409,7 +411,12 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
         } else {
             require(data_end == next)?;
         }
-        let metadata = e.name == b"[Content_Types].xml" || e.name == b"_rels/.rels";
+        let odf_mime =
+            i == 0 && e.name == b"mimetype" && e.method == 0 && x == 0 && e.unpacked <= 127;
+        let metadata = e.name == b"[Content_Types].xml"
+            || e.name == b"_rels/.rels"
+            || e.name == ODF_MANIFEST
+            || odf_mime;
         let preview_part = preview && (e.name.ends_with(b".xml") || e.name.ends_with(b".rels"));
         let capture = e.unpacked <= MAX_XML
             && (metadata || preview_part && preview_xml + e.unpacked <= MAX_OFFICE_XML);
@@ -419,7 +426,11 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
             xml.insert(e.name.clone(), bytes);
         }
     }
-    let identity = office_identity(&xml, &names);
+    let identity = match (office_identity(&xml, &names), odf_identity(&xml, &names)) {
+        (office, None) => office,
+        (None, odf) => odf,
+        (Some(_), Some(_)) => None,
+    };
     let kind = identity.as_ref().map_or(Kind::Zip, |(kind, _)| *kind);
     let package = if preview {
         identity.map(|(kind, main)| OfficePackage { kind, main, xml })
@@ -535,6 +546,15 @@ pub(crate) fn flat_xml(
     namespace: &[u8],
     root: &[u8],
 ) -> Option<Vec<(Vec<u8>, BTreeMap<Vec<u8>, String>)>> {
+    flat_xml_attributes(bytes, namespace, root, None)
+}
+
+fn flat_xml_attributes(
+    bytes: &[u8],
+    namespace: &[u8],
+    root: &[u8],
+    attribute_namespace: Option<&[u8]>,
+) -> Option<Vec<(Vec<u8>, BTreeMap<Vec<u8>, String>)>> {
     use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
     std::str::from_utf8(bytes).ok()?;
     let mut reader = NsReader::from_reader(bytes);
@@ -560,12 +580,23 @@ pub(crate) fn flat_xml(
                 let mut attributes = BTreeMap::new();
                 for a in e.attributes() {
                     let a = a.ok()?;
+                    let (resolved, local) = reader.resolver().resolve_attribute(a.key);
+                    let selected = match resolved {
+                        ResolveResult::Unbound => attribute_namespace.is_none(),
+                        ResolveResult::Bound(uri) => {
+                            attribute_namespace == Some(uri.as_ref().as_bytes())
+                        }
+                        ResolveResult::Unknown(_) => return None,
+                    };
+                    if !selected {
+                        continue;
+                    }
                     let value = a
                         .normalized_value(quick_xml::XmlVersion::default())
                         .ok()?
                         .into_owned();
                     if attributes
-                        .insert(a.key.as_ref().as_bytes().to_vec(), value)
+                        .insert(local.as_ref().as_bytes().to_vec(), value)
                         .is_some()
                     {
                         return None;
@@ -673,6 +704,9 @@ fn office_identity(
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml" => Some(Kind::Docx),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" => Some(Kind::Xlsx),
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml" => Some(Kind::Pptx),
+                    "application/vnd.ms-word.document.macroEnabled.main+xml" => Some(Kind::Docm),
+                    "application/vnd.ms-excel.sheet.macroEnabled.main+xml" => Some(Kind::Xlsm),
+                    "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml" => Some(Kind::Pptm),
                     _ => None,
                 };
             }
@@ -681,6 +715,57 @@ fn office_identity(
         }
     }
     identified.map(|kind| (kind, target.to_owned()))
+}
+
+fn odf_identity(
+    xml: &BTreeMap<Vec<u8>, Vec<u8>>,
+    names: &BTreeSet<Vec<u8>>,
+) -> Option<(Kind, String)> {
+    let mime = xml.get(b"mimetype".as_slice())?;
+    let kind = match mime.as_slice() {
+        b"application/vnd.oasis.opendocument.text" => Kind::Odt,
+        b"application/vnd.oasis.opendocument.spreadsheet" => Kind::Ods,
+        b"application/vnd.oasis.opendocument.presentation" => Kind::Odp,
+        _ => return None,
+    };
+    let manifest = flat_xml_attributes(
+        xml.get(ODF_MANIFEST)?,
+        ODF_MANIFEST_NS,
+        b"manifest",
+        Some(ODF_MANIFEST_NS),
+    )?;
+    let mut entries = BTreeSet::new();
+    for (tag, attrs) in &manifest {
+        if tag != b"file-entry" {
+            return None;
+        }
+        let path = attrs.get(b"full-path".as_slice())?.as_bytes();
+        let media_type = attrs.get(b"media-type".as_slice())?;
+        if !entries.insert(path) {
+            return None;
+        }
+        if path == b"/" {
+            if media_type.as_bytes() != mime {
+                return None;
+            }
+        } else if path == b"mimetype" || path == ODF_MANIFEST {
+            return None;
+        } else if !path.ends_with(b"/") && !names.contains(path) {
+            return None;
+        }
+    }
+    if !entries.contains(b"/".as_slice())
+        || !entries.contains(b"content.xml".as_slice())
+        || names.iter().any(|name| {
+            name != b"mimetype"
+                && !name.starts_with(b"META-INF/")
+                && !name.ends_with(b"/")
+                && !entries.contains(name.as_slice())
+        })
+    {
+        return None;
+    }
+    Some((kind, "content.xml".to_owned()))
 }
 
 #[cfg(test)]

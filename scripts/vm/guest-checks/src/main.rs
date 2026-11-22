@@ -687,6 +687,14 @@ fn main() {
                 | "Complete-Recovery-4Kn-Verify"
                 | "Signature-Images-4Kn-Prepare"
                 | "Signature-Images-4Kn-Verify"
+                | "Signature-Containers-4Kn-Prepare"
+                | "Signature-Containers-4Kn-Verify"
+                | "Signature-Audio-4Kn-Prepare"
+                | "Signature-Audio-4Kn-Verify"
+                | "Signature-Documents-4Kn-Prepare"
+                | "Signature-Documents-4Kn-Verify"
+                | "Ext-Journal-4Kn-Prepare"
+                | "Ext-Journal-4Kn-Verify"
                 | "Table-MBR-4Kn-Prepare"
                 | "Table-MBR-4Kn-Verify"
                 | "Table-MBR-4Kn-Record"
@@ -872,6 +880,14 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Complete-Recovery-4Kn-Verify") => signature_scope_checks::verify_complete(),
         Some("Signature-Images-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Images),
         Some("Signature-Images-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Images),
+        Some("Signature-Containers-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Containers),
+        Some("Signature-Containers-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Containers),
+        Some("Signature-Audio-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Audio),
+        Some("Signature-Audio-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Audio),
+        Some("Signature-Documents-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Documents),
+        Some("Signature-Documents-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Documents),
+        Some("Ext-Journal-4Kn-Prepare") => signature_scope_checks::prepare_ext_journal(),
+        Some("Ext-Journal-4Kn-Verify") => signature_scope_checks::verify_ext_journal(),
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
         Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
         Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),

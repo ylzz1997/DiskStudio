@@ -199,6 +199,34 @@ struct Ext4Inner {
 pub struct Ext4(Rc<Ext4Inner>);
 
 impl Ext4 {
+    /// Open the already identified internal journal as a read-only file.
+    /// The caller is responsible for verifying the journal's identity and state.
+    pub fn open_internal_journal(&self, inode_number: u32) -> Result<File, Ext4Error> {
+        let index = crate::inode::InodeIndex::new(inode_number).ok_or(CorruptKind::JournalInode)?;
+        let inode = crate::inode::Inode::read(self, index)?;
+        if !inode.metadata.file_type.is_regular_file() {
+            return Err(CorruptKind::JournalInode.into());
+        }
+        File::open_inode(self, inode)
+    }
+
+    /// Return the current physical block numbers of a bounded directory.
+    /// Zero entries are holes. No filesystem mutation is performed.
+    pub fn directory_blocks<'p, P>(&self, path: P, limit: u64) -> Result<Vec<u64>, Ext4Error>
+    where
+        P: TryInto<crate::Path<'p>>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let inode = self.path_to_inode(path, FollowSymlinks::ExcludeFinalComponent)?;
+        if !inode.metadata.is_dir() {
+            return Err(Ext4Error::NotADirectory);
+        }
+        if inode.metadata.size_in_bytes > limit {
+            return Err(Ext4Error::FileTooLarge);
+        }
+        crate::iters::file_blocks::FileBlocks::new(self.clone(), &inode)?.collect()
+    }
+
     /// Read the first 1024 bytes of this filesystem's internal journal.
     /// The caller can inspect the header without replaying the journal.
     pub fn internal_journal_header(

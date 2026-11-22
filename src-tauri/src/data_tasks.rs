@@ -453,6 +453,14 @@ impl ScanSource {
 fn free_signature(c: &Candidate) -> bool {
     matches!(c.locator, recovery::Locator::Signature { allocation_digest: Some(_), .. })
 }
+#[cfg(windows)]
+fn recovery_needs_lock(c: &Candidate) -> bool {
+    free_signature(c)
+        || matches!(
+            c.locator,
+            recovery::Locator::Btrfs(_) | recovery::Locator::ExtDeleted(_)
+        )
+}
 
 enum RecoveryReaders {
     Single(Box<dyn backup_archive::Source>),
@@ -1867,8 +1875,7 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
                     .clone(),
             )
         };
-        let locked = source
-            .lock_sources(free_signature(&c) || matches!(c.locator, recovery::Locator::Btrfs(_)))?;
+        let locked = source.lock_sources(recovery_needs_lock(&c))?;
         let cancel = Arc::new(AtomicBool::new(false));
         source.verify_signature_ranges(&locked, std::slice::from_ref(&c), &cancel)?;
         let readers = source.extraction_readers(&locked, &cancel)?;
@@ -1887,7 +1894,7 @@ pub fn preview(scan_id: String, file_id: u32) -> Result<Preview, String> {
             .map(|_| crate::signature_zip::MAX_OFFICE_PACKAGE)
             .or_else(|| raster_kind.map(|_| crate::raster_preview::MAX_SOURCE_BYTES));
         let limit = complete_limit.filter(|cap| c.size <= *cap).unwrap_or_else(|| {
-            if ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "mp4", "mov", "ogg", "wav"]
+            if ["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "mp4", "mov", "ogg", "wav", "flac"]
                 .contains(&extension.as_str())
             {
                 8 * 1024 * 1024
@@ -3172,7 +3179,7 @@ pub(crate) fn run(
             let locked = source.lock_sources(
                 files
                     .iter()
-                    .any(|c| free_signature(c) || matches!(c.locator, recovery::Locator::Btrfs(_)))
+                    .any(recovery_needs_lock)
                     || export.folders.iter().any(|folder| {
                         folder.source.as_ref().is_some_and(|d| {
                             matches!(

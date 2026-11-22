@@ -4,10 +4,18 @@ use crate::recovery::{Candidate, Locator, MAX_RESULTS};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 
+#[path = "signature_audio.rs"]
+mod audio;
+#[path = "signature_audiovisual.rs"]
+mod audiovisual;
+#[path = "signature_flac.rs"]
+mod flac;
 #[path = "signature_images.rs"]
 mod images;
 #[path = "signature_media.rs"]
 mod media;
+#[path = "signature_rar.rs"]
+mod rar;
 
 pub const MAX_FILE: u64 = 256 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
@@ -30,6 +38,12 @@ pub enum Kind {
     Docx,
     Xlsx,
     Pptx,
+    Docm,
+    Xlsm,
+    Pptm,
+    Odt,
+    Ods,
+    Odp,
     SevenZip,
     Sqlite,
     Mp4,
@@ -38,8 +52,16 @@ pub enum Kind {
     Tiff,
     Ico,
     Cur,
+    Rar,
+    Avi,
+    Aiff,
+    Aifc,
+    Flac,
+    Midi,
+    Dsf,
+    Dff,
 }
-const ALL: [Kind; 19] = [
+const ALL: [Kind; 33] = [
     Kind::Png,
     Kind::Jpeg,
     Kind::Pdf,
@@ -51,6 +73,12 @@ const ALL: [Kind; 19] = [
     Kind::Docx,
     Kind::Xlsx,
     Kind::Pptx,
+    Kind::Docm,
+    Kind::Xlsm,
+    Kind::Pptm,
+    Kind::Odt,
+    Kind::Ods,
+    Kind::Odp,
     Kind::SevenZip,
     Kind::Sqlite,
     Kind::Mp4,
@@ -59,6 +87,14 @@ const ALL: [Kind; 19] = [
     Kind::Tiff,
     Kind::Ico,
     Kind::Cur,
+    Kind::Rar,
+    Kind::Avi,
+    Kind::Aiff,
+    Kind::Aifc,
+    Kind::Flac,
+    Kind::Midi,
+    Kind::Dsf,
+    Kind::Dff,
 ];
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -116,7 +152,19 @@ impl Options {
 }
 impl Kind {
     fn zip_family(self) -> bool {
-        matches!(self, Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx)
+        matches!(
+            self,
+            Self::Zip
+                | Self::Docx
+                | Self::Xlsx
+                | Self::Pptx
+                | Self::Docm
+                | Self::Xlsm
+                | Self::Pptm
+                | Self::Odt
+                | Self::Ods
+                | Self::Odp
+        )
     }
 
     fn requires_digest(self) -> bool {
@@ -131,6 +179,14 @@ impl Kind {
                     | Self::Tiff
                     | Self::Ico
                     | Self::Cur
+                    | Self::Rar
+                    | Self::Avi
+                    | Self::Aiff
+                    | Self::Aifc
+                    | Self::Flac
+                    | Self::Midi
+                    | Self::Dsf
+                    | Self::Dff
             )
     }
 
@@ -149,7 +205,22 @@ impl Kind {
             Self::Ogg => media::ogg_start(b),
             Self::Tiff => images::tiff_start(b),
             Self::Ico | Self::Cur => images::icon_kind(b) == Some(self),
-            Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => false, // EOCD-anchored, below.
+            Self::Rar => rar::starts(b),
+            Self::Avi | Self::Aiff | Self::Aifc => audiovisual::kind(b) == Some(self),
+            Self::Flac => b.starts_with(b"fLaC"),
+            Self::Midi => audio::midi_start(b),
+            Self::Dsf => audio::dsf_start(b),
+            Self::Dff => audio::dff_start(b),
+            Self::Zip
+            | Self::Docx
+            | Self::Xlsx
+            | Self::Pptx
+            | Self::Docm
+            | Self::Xlsm
+            | Self::Pptm
+            | Self::Odt
+            | Self::Ods
+            | Self::Odp => false, // EOCD-anchored, below.
         }
     }
     fn extension(self) -> &'static str {
@@ -165,6 +236,12 @@ impl Kind {
             Self::Docx => "docx",
             Self::Xlsx => "xlsx",
             Self::Pptx => "pptx",
+            Self::Docm => "docm",
+            Self::Xlsm => "xlsm",
+            Self::Pptm => "pptm",
+            Self::Odt => "odt",
+            Self::Ods => "ods",
+            Self::Odp => "odp",
             Self::SevenZip => "7z",
             Self::Sqlite => "sqlite",
             Self::Mp4 => "mp4",
@@ -173,6 +250,14 @@ impl Kind {
             Self::Tiff => "tif",
             Self::Ico => "ico",
             Self::Cur => "cur",
+            Self::Rar => "rar",
+            Self::Avi => "avi",
+            Self::Aiff => "aiff",
+            Self::Aifc => "aifc",
+            Self::Flac => "flac",
+            Self::Midi => "mid",
+            Self::Dsf => "dsf",
+            Self::Dff => "dff",
         }
     }
     fn footer(self) -> Option<&'static [u8]> {
@@ -197,7 +282,22 @@ impl Kind {
             Self::Ogg => 27,
             Self::Tiff => 16,
             Self::Ico | Self::Cur => 6,
-            Self::Zip | Self::Docx | Self::Xlsx | Self::Pptx => 0,
+            Self::Rar => 8,
+            Self::Avi | Self::Aiff | Self::Aifc => 12,
+            Self::Flac => 42,
+            Self::Midi => 14,
+            Self::Dsf => 28,
+            Self::Dff => 16,
+            Self::Zip
+            | Self::Docx
+            | Self::Xlsx
+            | Self::Pptx
+            | Self::Docm
+            | Self::Xlsm
+            | Self::Pptm
+            | Self::Odt
+            | Self::Ods
+            | Self::Odp => 0,
         }
     }
 }
@@ -227,6 +327,18 @@ fn candidate(
             Kind::Ogg => "连续 Ogg 候选。已核对各流的页序列、包边界与 CRC，未解码音频或视频。",
             Kind::Tiff => "连续 TIFF 候选。已核对图像目录和像素数据范围，未解码像素。",
             Kind::Ico | Kind::Cur => "连续图标或光标候选。已核对目录与内嵌图像范围，未解码像素。",
+            Kind::Rar => "连续 RAR 候选。已核对各块头 CRC 和结束块，未解压存档内容。",
+            Kind::Avi => "连续 AVI 候选。已核对流头、媒体块和现有索引，未解码音频或视频。",
+            Kind::Aiff | Kind::Aifc => {
+                "连续 AIFF 音频候选。已核对采样格式、帧数和声音数据范围，未解码音频。"
+            }
+            Kind::Flac => {
+                "连续 FLAC 候选。已核对音频帧顺序、采样数和帧 CRC，未解码 PCM 或核对其 MD5。"
+            }
+            Kind::Midi => "连续 MIDI 候选。已核对音轨、事件范围和音轨结束标记。",
+            Kind::Dsf | Kind::Dff => {
+                "连续 DSD 音频候选。已核对声道、数据边界和封装结构，未解码音频。"
+            }
             _ => "连续数据候选；未验证解码完整性，原文件名和删除状态未知",
         }
         .into(),
@@ -330,6 +442,9 @@ impl StoredCandidate {
         let stored_length = match self.kind {
             Kind::SevenZip => seven_zip_geometry(&self.header).map(|geometry| geometry.end),
             Kind::Sqlite => sqlite_geometry(&self.header).map(|geometry| geometry.size()),
+            Kind::Avi | Kind::Aiff | Kind::Aifc => audiovisual::declared_size(&self.header),
+            Kind::Flac => flac::valid_streaminfo(&self.header).then_some(self.size),
+            Kind::Dsf | Kind::Dff => audio::declared_size(self.kind, &self.header),
             _ => Some(self.size),
         };
         if stored_length != Some(self.size) {
@@ -620,10 +735,32 @@ pub fn continue_scan_scoped<R: Read + Seek>(
             Kind::Gif => b'G',
             Kind::Bmp => b'B',
             Kind::Wav | Kind::Webp => b'R',
-            Kind::Zip | Kind::Docx | Kind::Xlsx | Kind::Pptx => b'P',
+            Kind::Zip
+            | Kind::Docx
+            | Kind::Xlsx
+            | Kind::Pptx
+            | Kind::Docm
+            | Kind::Xlsm
+            | Kind::Pptm
+            | Kind::Odt
+            | Kind::Ods
+            | Kind::Odp => b'P',
             Kind::SevenZip => SEVEN_ZIP_MAGIC[0],
             Kind::Sqlite => SQLITE_MAGIC[0],
-            Kind::Mp4 | Kind::Mov | Kind::Ogg | Kind::Tiff | Kind::Ico | Kind::Cur => continue,
+            Kind::Mp4
+            | Kind::Mov
+            | Kind::Ogg
+            | Kind::Tiff
+            | Kind::Ico
+            | Kind::Cur
+            | Kind::Rar
+            | Kind::Avi
+            | Kind::Aiff
+            | Kind::Aifc
+            | Kind::Flac
+            | Kind::Midi
+            | Kind::Dsf
+            | Kind::Dff => continue,
         } as usize] = true;
     }
     let (mut carry, mut consumed, mut searched) = (
@@ -640,8 +777,17 @@ pub fn continue_scan_scoped<R: Read + Seek>(
     let ogg = options.kinds.contains(&Kind::Ogg);
     let tiff = options.kinds.contains(&Kind::Tiff);
     let icons = options.kinds.contains(&Kind::Ico) || options.kinds.contains(&Kind::Cur);
-    let lookahead = if options.kinds.contains(&Kind::Sqlite) {
-        SQLITE_MAGIC.len()
+    let rar = options.kinds.contains(&Kind::Rar);
+    let flac = options.kinds.contains(&Kind::Flac);
+    let midi = options.kinds.contains(&Kind::Midi);
+    let dsf = options.kinds.contains(&Kind::Dsf);
+    let dff = options.kinds.contains(&Kind::Dff);
+    let audiovisual = options
+        .kinds
+        .iter()
+        .any(|kind| matches!(kind, Kind::Avi | Kind::Aiff | Kind::Aifc));
+    let lookahead = if dff || options.kinds.contains(&Kind::Sqlite) {
+        16
     } else {
         12
     };
@@ -743,6 +889,14 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                 let structured = aligned
                     .then(|| match buffer[i] {
                         b'O' if ogg && media::ogg_start(bytes) => Some(Kind::Ogg),
+                        b'R' if rar && rar::starts(bytes) => Some(Kind::Rar),
+                        b'f' if flac && Kind::Flac.starts(bytes) => Some(Kind::Flac),
+                        b'M' if midi && audio::midi_start(bytes) => Some(Kind::Midi),
+                        b'D' if dsf && audio::dsf_start(bytes) => Some(Kind::Dsf),
+                        b'F' if dff && audio::dff_start(bytes) => Some(Kind::Dff),
+                        b'R' | b'F' if audiovisual => {
+                            audiovisual::kind(bytes).filter(|kind| options.kinds.contains(kind))
+                        }
                         b'I' | b'M' if tiff && images::tiff_start(bytes) => Some(Kind::Tiff),
                         0 if movies && bytes.get(4..8) == Some(b"ftyp") => {
                             media::movie_kind(bytes).filter(|kind| options.kinds.contains(kind))
@@ -1377,6 +1531,33 @@ fn probe<R: Read + Seek>(
                 images::icon(&mut p, kind, budget)?,
                 p.bytes::<6>(0)?.to_vec(),
             ),
+            Kind::Rar => {
+                let header = p.bytes::<8>(0)?;
+                (rar::inspect(&mut p, &header, budget)?, header.to_vec())
+            }
+            Kind::Avi | Kind::Aiff | Kind::Aifc => {
+                let header = p.bytes::<12>(0)?;
+                (
+                    audiovisual::inspect(&mut p, kind, &header, budget)?,
+                    header.to_vec(),
+                )
+            }
+            Kind::Flac => {
+                let header = p.bytes::<42>(0)?;
+                (flac::inspect(&mut p, &header, budget)?, header.to_vec())
+            }
+            Kind::Midi => {
+                let header = p.bytes::<14>(0)?;
+                (audio::midi(&mut p, &header, budget)?, header.to_vec())
+            }
+            Kind::Dsf => {
+                let header = p.bytes::<28>(0)?;
+                (audio::dsf(&mut p, &header, budget)?, header.to_vec())
+            }
+            Kind::Dff => {
+                let header = p.bytes::<16>(0)?;
+                (audio::dff(&mut p, &header, budget)?, header.to_vec())
+            }
             _ => return Err(ProbeError::Invalid),
         };
         let footer = p
@@ -1405,6 +1586,116 @@ mod tests {
     const BIG_TIFF: &[u8] = include_bytes!("../../tests/fixtures/signature-bigtiff-tiles.tif");
     const ICON: &[u8] = include_bytes!("../../tests/fixtures/signature-icon-png.ico");
     const CURSOR: &[u8] = include_bytes!("../../tests/fixtures/signature-cursor-dib.cur");
+    const RAR4: &[u8] = include_bytes!("../../tests/fixtures/signature-sample-rar4.rar");
+    const RAR5: &[u8] = include_bytes!("../../tests/fixtures/signature-sample-rar5.rar");
+    const AVI: &[u8] = include_bytes!("../../tests/fixtures/signature-sample.avi");
+    const AIFF: &[u8] = include_bytes!("../../tests/fixtures/signature-sample.aiff");
+    const AIFC: &[u8] = include_bytes!("../../tests/fixtures/signature-sample.aifc");
+    const FLAC: &[u8] = include_bytes!("../../tests/fixtures/signature-audio.flac");
+    const MIDI: &[u8] = include_bytes!("../../tests/fixtures/signature-audio.mid");
+    const DSF: &[u8] = include_bytes!("../../tests/fixtures/signature-audio.dsf");
+    const DFF: &[u8] = include_bytes!("../../tests/fixtures/signature-audio.dff");
+
+    #[test]
+    fn audio_signatures_resume_and_extract_independent_samples() {
+        assert_resume_and_extract(
+            [
+                (CHUNK - 2, Kind::Flac, FLAC),
+                (2 * CHUNK - 12, Kind::Dff, DFF),
+                (2 * CHUNK + 4096, Kind::Dsf, DSF),
+                (2 * CHUNK + 20 * 1024, Kind::Midi, MIDI),
+            ],
+            vec![Kind::Pdf, Kind::Flac, Kind::Dff, Kind::Dsf, Kind::Midi],
+        );
+    }
+
+    #[test]
+    fn audio_signatures_reject_inconsistent_headers_truncation_and_payload_boundaries() {
+        for (kind, bytes) in [
+            (Kind::Flac, FLAC),
+            (Kind::Midi, MIDI),
+            (Kind::Dsf, DSF),
+            (Kind::Dff, DFF),
+        ] {
+            assert_eq!(collect(bytes, vec![kind]).len(), 1, "{kind:?}");
+            assert!(
+                collect(&bytes[..bytes.len() - 1], vec![kind]).is_empty(),
+                "{kind:?}"
+            );
+        }
+        let mut flac = FLAC.to_vec();
+        flac[25] ^= 1; // The total sample count disagrees with the frames.
+        assert!(collect(&flac, vec![Kind::Flac]).is_empty());
+        let mut flac = FLAC.to_vec();
+        *flac.last_mut().unwrap() ^= 1;
+        assert!(collect(&flac, vec![Kind::Flac]).is_empty());
+        let mut midi = MIDI.to_vec();
+        let end_marker = midi.len() - 2;
+        midi[end_marker] = 0x01;
+        assert!(collect(&midi, vec![Kind::Midi]).is_empty());
+        let mut dsf = DSF.to_vec();
+        dsf[92 + 4000] = 0x80; // Padding of the left channel.
+        assert!(collect(&dsf, vec![Kind::Dsf]).is_empty());
+        let mut dsf = DSF.to_vec();
+        dsf[20] ^= 1; // ID3 metadata offset.
+        assert!(collect(&dsf, vec![Kind::Dsf]).is_empty());
+        let mut dff = DFF.to_vec();
+        let channel = dff.windows(4).position(|bytes| bytes == b"SRGT").unwrap();
+        dff[channel..channel + 4].copy_from_slice(b"SLFT");
+        assert!(collect(&dff, vec![Kind::Dff]).is_empty());
+    }
+
+    #[test]
+    fn container_signatures_resume_and_extract_independent_samples() {
+        assert_resume_and_extract(
+            [
+                (CHUNK - 6, Kind::Rar, RAR4),
+                (2 * CHUNK - 7, Kind::Avi, AVI),
+                (2 * CHUNK + 12 * 1024, Kind::Rar, RAR5),
+                (2 * CHUNK + 16 * 1024, Kind::Aiff, AIFF),
+                (2 * CHUNK + 20 * 1024, Kind::Aifc, AIFC),
+            ],
+            vec![Kind::Pdf, Kind::Rar, Kind::Avi, Kind::Aiff, Kind::Aifc],
+        );
+    }
+
+    #[test]
+    fn container_signatures_reject_truncation_and_invalid_structure() {
+        for (kind, bytes) in [
+            (Kind::Rar, RAR4),
+            (Kind::Rar, RAR5),
+            (Kind::Avi, AVI),
+            (Kind::Aiff, AIFF),
+            (Kind::Aifc, AIFC),
+        ] {
+            assert_eq!(collect(bytes, vec![kind]).len(), 1, "{kind:?}");
+            assert!(collect(&bytes[..bytes.len() - 1], vec![kind]).is_empty());
+        }
+        for (source, header) in [(RAR4, 7), (RAR5, 8)] {
+            let mut corrupt = source.to_vec();
+            corrupt[header] ^= 1;
+            assert!(collect(&corrupt, vec![Kind::Rar]).is_empty());
+            let mut corrupt = source.to_vec();
+            let last = corrupt.len() - 1;
+            corrupt[last] ^= 1;
+            assert!(collect(&corrupt, vec![Kind::Rar]).is_empty());
+        }
+        let mut avi = AVI.to_vec();
+        let index = avi.windows(4).position(|window| window == b"idx1").unwrap();
+        avi[index + 16] ^= 1; // First chunk pointer must address an observed packet.
+        assert!(collect(&avi, vec![Kind::Avi]).is_empty());
+        let mut multi = AVI.to_vec();
+        multi.extend(b"RIFF\x04\0\0\0AVIX");
+        assert!(collect(&multi, vec![Kind::Avi]).is_empty());
+        let mut aiff = AIFF.to_vec();
+        aiff[23] ^= 1; // Declared frame count no longer matches SSND.
+        assert!(collect(&aiff, vec![Kind::Aiff]).is_empty());
+        let mut aifc = AIFC.to_vec();
+        aifc[20] ^= 1;
+        assert!(collect(&aifc, vec![Kind::Aifc]).is_empty());
+        assert!(collect(AIFF, vec![Kind::Aifc]).is_empty());
+        assert!(collect(AIFC, vec![Kind::Aiff]).is_empty());
+    }
 
     #[test]
     fn media_signatures_resume_and_extract_independent_samples() {

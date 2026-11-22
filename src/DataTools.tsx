@@ -1045,7 +1045,7 @@ export function DataTools({
                         ? t("完整恢复适用于未加密分区。目录阶段支持 NTFS、FAT、exFAT 和干净卸载的 Ext2/3/4。类型和范围设置用于签名阶段。")
                         : mode === "signatures"
                         ? t(
-                            "支持上列 文件类型；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
+                            "BMP 限未压缩格式，WAV 限 RIFF/WAVE。每个连续候选最多 256 MiB。",
                           )
                         : selectedPart?.encryption
                           ? t("请在 Windows 解锁已完成加密的 BitLocker NTFS 数据卷，再读取目录。")
@@ -1059,6 +1059,10 @@ export function DataTools({
                             " " +
                             t(
                               "Btrfs 删除恢复需要可核对的只读快照或保留事务，且提取时必须通过数据校验。",
+                            ) +
+                            " " +
+                            catalogText(
+                              "Ext4 可从干净卷的内部 JBD2 v3 日志找回保留了 inode 和空闲数据块的删除候选。",
                             )}
                     </span>}
                     {!useMembers && mode !== "reconstruct" && (
@@ -1662,11 +1666,13 @@ export function DataTools({
                     },
                   );
                   setMode(
-                    recoveryProgress.mode === "existing"
+                    recoveryProgress.combined
+                      ? "complete"
+                      : recoveryProgress.mode === "existing"
                       ? "allFiles"
                       : recoveryProgress.mode,
                   );
-                  if (recoveryProgress.engine === "signatures")
+                  if (recoveryProgress.combined || recoveryProgress.engine === "signatures")
                     setSignatureSettings(
                       settingsFromProgress(recoveryProgress),
                     );
@@ -2245,6 +2251,8 @@ export function DataTools({
                 className="recovery-preview-image"
                 src={displayedPreview.url}
                 alt={preview.name}
+                draggable={false}
+                onContextMenu={(event) => event.preventDefault()}
                 onError={() => setPreviewError(preview)}
               />
             ) : displayedPreview.mime.startsWith("audio/") ? (
@@ -2252,8 +2260,10 @@ export function DataTools({
                 className="recovery-preview-media"
                 src={displayedPreview.url}
                 controls
+                controlsList="nodownload"
                 preload="metadata"
                 aria-label={preview.name}
+                onContextMenu={(event) => event.preventDefault()}
                 onError={() => setPreviewError(preview)}
               />
             ) : (
@@ -2261,8 +2271,10 @@ export function DataTools({
                 className="recovery-preview-media"
                 src={displayedPreview.url}
                 controls
+                controlsList="nodownload"
                 preload="metadata"
                 aria-label={preview.name}
+                onContextMenu={(event) => event.preventDefault()}
                 onError={() => setPreviewError(preview)}
               />
             )

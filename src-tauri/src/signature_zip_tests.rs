@@ -699,11 +699,12 @@ fn zip_office_package_relationships_types_and_filters_select_correct_extension()
         assert!(found[0].name.ends_with(extension));
         assert!(scan(&file, vec![Kind::Zip]).is_empty());
         assert_eq!(scan(&file, vec![kind]).len(), 1);
-        for (external, macros) in [(true, false), (false, true)] {
-            let other = office(kind, external, macros);
-            assert!(scan(&other, vec![kind]).is_empty());
-            assert_eq!(scan(&other, vec![Kind::Zip]).len(), 1);
-        }
+        let external = office(kind, true, false);
+        assert!(scan(&external, vec![kind]).is_empty());
+        assert_eq!(scan(&external, vec![Kind::Zip]).len(), 1);
+        let macros = office(kind, false, true);
+        assert!(scan(&macros, vec![kind, Kind::Zip]).is_empty());
+        assert_eq!(scan(&macros, vec![Kind::Docm]).len(), 1);
     }
     let fake = build(
         &[("word/document.xml", b"fake")],
@@ -714,6 +715,182 @@ fn zip_office_package_relationships_types_and_filters_select_correct_extension()
         b"",
     );
     assert!(scan(&fake, vec![Kind::Docx]).is_empty());
+}
+
+#[test]
+fn new_document_kinds_keep_archive_evidence_and_preview_saved_content() {
+    let cases: [(Kind, &str, &[u8]); 6] = [
+        (
+            Kind::Docm,
+            "docm",
+            include_bytes!("../../tests/fixtures/signature-document.docm"),
+        ),
+        (
+            Kind::Xlsm,
+            "xlsm",
+            include_bytes!("../../tests/fixtures/signature-document.xlsm"),
+        ),
+        (
+            Kind::Pptm,
+            "pptm",
+            include_bytes!("../../tests/fixtures/signature-document.pptm"),
+        ),
+        (
+            Kind::Odt,
+            "odt",
+            include_bytes!("../../tests/fixtures/signature-document.odt"),
+        ),
+        (
+            Kind::Ods,
+            "ods",
+            include_bytes!("../../tests/fixtures/signature-document.ods"),
+        ),
+        (
+            Kind::Odp,
+            "odp",
+            include_bytes!("../../tests/fixtures/signature-document.odp"),
+        ),
+    ];
+    for (kind, extension, bytes) in cases {
+        assert!(scan(bytes, vec![Kind::Zip]).is_empty());
+        let options = Options {
+            kinds: vec![kind],
+            ..Options::default()
+        };
+        let mut source = vec![0; 4096];
+        source.extend_from_slice(bytes);
+        source.extend_from_slice(&[0; 17]);
+        let end = source.len() as u64;
+        let mut found = scan(&source, vec![kind, Kind::Zip]);
+        assert_eq!(found.len(), 1);
+        let item = found.pop().unwrap();
+        assert_eq!(item.name, format!("recovered_0000000000001000.{extension}"));
+        let saved = signature_scan::StoredCandidate::from_candidate(&item).unwrap();
+        let decoded: signature_scan::StoredCandidate =
+            serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        let restored = decoded.candidate(item.id, 0..end, &options, None).unwrap();
+        let mut output = vec![];
+        let mut reader = Cursor::new(source);
+        crate::recovery::extract(&mut reader, &restored, &mut output, end, |_| Ok(())).unwrap();
+        assert_eq!(output, bytes);
+        assert!(crate::office_preview::read(bytes, Kind::Zip).is_none());
+        let preview =
+            serde_json::to_value(crate::office_preview::read(bytes, kind).unwrap()).unwrap();
+        assert_eq!(preview["limited"], false);
+        match kind {
+            Kind::Docm => {
+                assert_eq!(preview["paragraphs"][0], "Recovered DOCM text & 中文");
+                assert_eq!(preview["paragraphs"][1], "DOCM second paragraph");
+            }
+            Kind::Odt => {
+                assert_eq!(preview["paragraphs"][0], "Recovered ODT");
+                assert_eq!(
+                    preview["paragraphs"][1],
+                    "Before bold & 中文 after   end\ttab\nline"
+                );
+            }
+            Kind::Xlsm | Kind::Ods => {
+                assert_eq!(preview["sheets"][0]["name"], "Saved totals");
+                assert_eq!(preview["sheets"][0]["rows"][0]["number"], 7);
+                assert!(preview["sheets"][0]["rows"][0]["cells"][1].is_null());
+                assert_eq!(preview["sheets"][0]["rows"][0]["cells"][2], "42");
+                assert_eq!(preview["sheets"][1]["name"], "Notes");
+                let cells = &preview["sheets"][1]["rows"][0]["cells"];
+                assert_eq!(
+                    cells[0],
+                    format!("{} worksheet two", extension.to_uppercase())
+                );
+                if kind == Kind::Ods {
+                    assert_eq!(cells[0], cells[1]);
+                }
+            }
+            Kind::Pptm | Kind::Odp => {
+                for (i, suffix) in ["one", "two"].iter().enumerate() {
+                    assert_eq!(preview["slides"][i]["number"], i + 1);
+                    assert_eq!(
+                        preview["slides"][i]["paragraphs"][0],
+                        format!("Recovered {} slide {suffix}", extension.to_uppercase())
+                    );
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+const ODT_MIME: &[u8] = b"application/vnd.oasis.opendocument.text";
+const ODT_MANIFEST: &str = r#"<m:manifest xmlns:m="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><m:file-entry m:full-path="/" m:media-type="application/vnd.oasis.opendocument.text"/><m:file-entry m:full-path="content.xml" m:media-type="text/xml"/></m:manifest>"#;
+
+#[test]
+fn odf_identity_requires_owned_first_mime_and_unambiguous_unencrypted_manifest() {
+    let content = ("content.xml", b"<content/>".as_slice());
+    let mime = ("mimetype", ODT_MIME);
+    let manifest = ("META-INF/manifest.xml", ODT_MANIFEST.as_bytes());
+    for (files, deflate, wide) in [
+        (vec![content, mime, manifest], false, false),
+        (vec![mime, content, manifest], true, false),
+        (vec![mime, content, manifest], false, true),
+        (vec![mime, manifest], false, false),
+        (
+            vec![mime, content, manifest, ("unlisted.xml", b"x")],
+            false,
+            false,
+        ),
+    ] {
+        let file = build(&files, deflate, 0, wide, true, b"");
+        assert_eq!(inspect_bytes(&file).unwrap().kind, Kind::Zip);
+    }
+    for invalid in [
+        ODT_MANIFEST.replace("opendocument.text", "opendocument.presentation"),
+        ODT_MANIFEST.replace("m:full-path", "full-path"),
+        ODT_MANIFEST.replace(
+            "/></m:manifest>",
+            "><m:encryption-data/></m:file-entry></m:manifest>",
+        ),
+        ODT_MANIFEST.replace(
+            "</m:manifest>",
+            r#"<m:file-entry m:full-path="/" m:media-type="text/xml"/></m:manifest>"#,
+        ),
+    ] {
+        let file = build(
+            &[mime, content, ("META-INF/manifest.xml", invalid.as_bytes())],
+            false,
+            0,
+            false,
+            false,
+            b"",
+        );
+        assert_eq!(inspect_bytes(&file).unwrap().kind, Kind::Zip);
+        assert!(crate::office_preview::read(&file, Kind::Odt).is_none());
+    }
+    let named = build(&[mime, content, manifest], false, 0, false, true, b"");
+    assert_eq!(inspect_bytes(&named).unwrap().kind, Kind::Odt);
+    assert!(crate::office_preview::read(&named, Kind::Odt).is_none());
+}
+
+#[test]
+fn odf_preview_bounds_space_and_omits_active_objects() {
+    let content = br#"<o:document-content xmlns:o="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:t="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><o:scripts><t:p>not body</t:p></o:scripts><o:body><o:text><t:p>first<o:annotation><t:p>annotation</t:p></o:annotation><t:a>label</t:a></t:p><t:p>X<t:s t:c="4294967295"/>Y</t:p></o:text></o:body></o:document-content>"#;
+    let file = build(
+        &[
+            ("mimetype", ODT_MIME),
+            ("content.xml", content),
+            ("META-INF/manifest.xml", ODT_MANIFEST.as_bytes()),
+        ],
+        false,
+        0,
+        false,
+        false,
+        b"",
+    );
+    let preview =
+        serde_json::to_value(crate::office_preview::read(&file, Kind::Odt).unwrap()).unwrap();
+    assert_eq!(preview["limited"], true);
+    assert_eq!(preview["paragraphs"].as_array().unwrap().len(), 2);
+    assert_eq!(preview["paragraphs"][0], "firstlabel");
+    let bounded = preview["paragraphs"][1].as_str().unwrap();
+    assert_eq!(bounded.len(), 4096);
+    assert_eq!(bounded.trim_end(), "X");
 }
 #[test]
 fn zip_xml_entities_nested_documents_duplicate_attributes_and_uri_fetches_are_rejected() {

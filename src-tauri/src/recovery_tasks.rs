@@ -50,7 +50,7 @@ fn identify_metadata(
         let mut magic = [0; 2];
         reader.read_exact(&mut magic).map_err(err)?;
         reader.seek(SeekFrom::Start(0)).map_err(err)?;
-        if magic == [0x53, 0xef] {
+        if magic == [0x53, 0xef] && mode != ScanMode::Deleted {
             return Ok(Some(Cursor::Ext {
                 mode,
                 cursor: Default::default(),
@@ -470,16 +470,41 @@ fn launch(
                                     found(candidate);
                                 },
                             )?;
-                            if metadata.is_none() {
-                                format!("此分区未识别到完整恢复支持的文件记录。{scanned}")
+                            let locale = crate::native_locale::current();
+                            let directory_summary = if metadata.is_none() {
+                                locale
+                                    .text("此分区未识别到完整恢复支持的文件记录。")
+                                    .to_owned()
                             } else {
-                                format!("文件记录扫描找到 {count} 个候选。{scanned}")
-                            }
+                                locale.format(
+                                    "文件记录扫描找到 {count} 个候选。",
+                                    &[("count", &count.to_string())],
+                                )
+                            };
+                            format!("{directory_summary} {scanned}")
                         }
                         Some(cursor) => {
                             scan_metadata(&mut reader, cursor, &cancel, tick, found, directory)?
                         }
                         None => {
+                            if mode == ScanMode::Deleted
+                                && crate::ext_allocation::has_magic(&mut reader, r.size)?
+                            {
+                                if source.partition.is_none() {
+                                    return Err("Ext4 日志删除恢复需要选择分区。".into());
+                                }
+                                drop(reader);
+                                let locked = platform::StableRead::lock(&source)?;
+                                let message = crate::ext_recovery::deleted::scan(
+                                    locked.reader()?,
+                                    cancel.clone(),
+                                    tick,
+                                    found,
+                                    directory,
+                                )?;
+                                locked.verify()?;
+                                return Ok((message, None));
+                            }
                             if disk_core::btrfs::has_magic(&mut reader, r.size)? {
                                 drop(reader);
                                 let locked = platform::StableRead::lock(&source)?;

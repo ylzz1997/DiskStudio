@@ -309,10 +309,13 @@ fn file_kind(name: &str) -> FileKind {
         ) => FileKind::Images,
         Some(
             "txt" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "md" | "rtf"
-            | "odt",
+            | "docm" | "xlsm" | "pptm" | "odt" | "ods" | "odp",
         ) => FileKind::Documents,
         Some("mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" | "mpeg") => FileKind::Videos,
-        Some("mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma") => FileKind::Audio,
+        Some(
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "aif" | "aiff" | "aifc"
+            | "mid" | "midi" | "dsf" | "dff",
+        ) => FileKind::Audio,
         Some("zip" | "7z" | "rar" | "gz" | "bz2" | "xz" | "tar" | "zst") => FileKind::Archives,
         _ => FileKind::Other,
     }

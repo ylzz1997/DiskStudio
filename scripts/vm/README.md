@@ -116,6 +116,14 @@ PDF 与 TIFF 分页预览使用 `build-guest-checks.ps1 -PagedPreview` 和独立
 
 完整恢复使用已有签名媒体夹具的 `start --4kn --signature-media` 配置。构建 `build-guest-checks.ps1 -CompleteRecovery`，匹配的只读光盘包含 `Complete-Recovery-4Kn-Prepare.exe` 与 `Complete-Recovery-4Kn-Verify.exe`。Prepare 复核既有脱机 B/2 文件系统、边界及布局后，在 A/2 的 `DS-Complete-Recovery` 保存两阶段交界处的 `Resume.dsrecover`。用正式程序选择 B/2，加载并续扫。核对目录记录 `LIVE.PDF` 与四个按类型找回的媒体候选。重新选择「完整恢复」，沿用 MP4、MOV、Ogg、空闲簇和扇区对齐设置，从头扫描并确认五项结果一致。将完成进度保存为 `Complete.dsrecover`，将全部五项按平面布局导出到该目录。Verify 独立核对两阶段进度、候选身份、五份文件的字节和输出 SHA-256、源数据及两盘布局。
 
+RAR、AVI 和 AIFF 签名验收使用 `start --4kn --signature-containers` 的独立 A/B 夹具和 `build-guest-checks.ps1 -SignatureContainers`。匹配的只读光盘包含 `Signature-Containers-4Kn-Prepare.exe` 和 `Signature-Containers-4Kn-Verify.exe`。Prepare 只接受空白的 A/B 测试盘，在 A/2 准备输出目录，在脱机 B/2 的 FAT12 空闲簇中布置两个 RAR 和 AVI、AIFF、AIFF-C 各一个。只选择这四种签名，同时启用验证空闲簇和逻辑扇区对齐。保存并加载 `Scope.dsrecover`，将五个候选以平面布局导出至 A 的 `DS-SignatureContainers`。Verify 核对设置、候选范围和输出 SHA-256，并复核源分区、两侧邻区、两盘 GPT 和来宾系统盘布局。
+
+FLAC、MIDI 和 DSD 签名验收使用 `start --4kn --signature-audio` 的独立 A/B 夹具和 `build-guest-checks.ps1 -SignatureAudio`。匹配的只读光盘包含 `Signature-Audio-4Kn-Prepare.exe` 和 `Signature-Audio-4Kn-Verify.exe`。Prepare 仅接受空白 A/B，在脱机 B/2 的 FAT12 空闲簇布置 FLAC、MIDI、DSF、DFF 各一份。选择四类、验证空闲簇并按逻辑扇区对齐。核对 FLAC 播放预览，保存和加载 `Scope.dsrecover`，将四项以平面布局导出到 A 的 `DS-SignatureAudio`。Verify 复核设置、候选范围、原始字节和输出 SHA-256，以及源分区、邻区、两盘 GPT 和来宾系统盘布局。
+
+Office 和 OpenDocument 签名验收使用 `start --4kn --signature-documents` 的独立 A/B 夹具，以及 `build-guest-checks.ps1 -SignatureDocuments`。匹配的只读光盘包含 `Signature-Documents-4Kn-Prepare.exe` 和 `Signature-Documents-4Kn-Verify.exe`。预检通过后，Prepare 核对来宾 A/B 的完整序列和几何，仅在空白 A/B 上准备夹具。源选脱机 B/2，勾选 DOCM、XLSM、PPTM、ODT、ODS、ODP，同时开启空闲簇和逻辑扇区对齐。应发现六个候选。保存和加载 `Scope.dsrecover`，核对各格式的段落、单元格保存值和分页文字，按平面布局跨盘导出到 A 的 `DS-SignatureDocuments`。Verify 核对进度设置、全部导出字节和 SHA-256、源分区、邻区、两盘 GPT 和来宾系统盘布局。
+
+Ext4 删除夹具使用 Ubuntu 的 `seed-ext-journal-image` 和 `ext-journal-image`。此阶段只有隔离来宾系统镜像和只读种子盘。脚本在 tmpfs 的普通文件中建立 32 MiB Ext4，用 Linux 先同步双语文本、多段 extent 稀疏文件与改名对照，再在一次后续事务删除两个文件并改名对照。卸载后用 `e2fsck -fn` 和 `debugfs logdump -O` 核对，串口日志记录压缩夹具和删除前的摘要。Windows 验收使用 `start --4kn --ext-journal` 的独立空白 A/B 盘和 `build-guest-checks.ps1 -ExtJournal`。在 QMP 预检、来宾 A/B 完整序列、容量、扇区与正式载荷校验通过后运行一次 `Ext-Journal-4Kn-Prepare.exe`。选脱机 B/2 的「找回删除文件」，应只找到 `removed.txt` 与 `nested/fragment.bin`。预览文本，按平面布局导出到 A 上的 `DS-ExtJournal`，再运行 `Ext-Journal-4Kn-Verify.exe` 核对两项输出与 Linux 证据、源范围、邻区、两盘 GPT 和来宾系统盘布局。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。

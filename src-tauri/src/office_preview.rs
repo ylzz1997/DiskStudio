@@ -1,4 +1,4 @@
-//! Read-only, bounded content previews for Office Open XML packages.
+//! Read-only, bounded content previews for Office Open XML and OpenDocument.
 use crate::{
     signature_scan::Kind,
     signature_zip::{self, OfficePackage},
@@ -6,6 +6,9 @@ use crate::{
 use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[path = "office_preview_odf.rs"]
+mod odf;
 
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_PARAGRAPHS: usize = 192;
@@ -76,6 +79,12 @@ pub(crate) fn kind_for_extension(extension: &str) -> Option<Kind> {
         "docx" => Some(Kind::Docx),
         "xlsx" => Some(Kind::Xlsx),
         "pptx" => Some(Kind::Pptx),
+        "docm" => Some(Kind::Docm),
+        "xlsm" => Some(Kind::Xlsm),
+        "pptm" => Some(Kind::Pptm),
+        "odt" => Some(Kind::Odt),
+        "ods" => Some(Kind::Ods),
+        "odp" => Some(Kind::Odp),
         _ => None,
     }
 }
@@ -91,27 +100,28 @@ pub(crate) fn read(bytes: &[u8], expected: Kind) -> Option<Preview> {
         limited: false,
     };
     match package.kind {
-        Kind::Docx if root.is(Ns::Word, "document") => {
+        Kind::Docx | Kind::Docm if root.is(Ns::Word, "document") => {
             let paragraphs = paragraphs(root.child(Ns::Word, "body")?, Ns::Word, &mut limit);
             Some(Preview::Document {
                 paragraphs,
                 limited: limit.limited,
             })
         }
-        Kind::Xlsx if root.is(Ns::Sheet, "workbook") => {
+        Kind::Xlsx | Kind::Xlsm if root.is(Ns::Sheet, "workbook") => {
             let sheets = workbook(&package, &root, &mut limit)?;
             Some(Preview::Workbook {
                 sheets,
                 limited: limit.limited,
             })
         }
-        Kind::Pptx if root.is(Ns::Slide, "presentation") => {
+        Kind::Pptx | Kind::Pptm if root.is(Ns::Slide, "presentation") => {
             let slides = presentation(&package, &root, &mut limit)?;
             Some(Preview::Presentation {
                 slides,
                 limited: limit.limited,
             })
         }
+        Kind::Odt | Kind::Ods | Kind::Odp => odf::preview(&root, package.kind, &mut limit),
         _ => None,
     }
 }
@@ -124,6 +134,10 @@ enum Ns {
     Slide,
     Drawing,
     Rel,
+    OdfOffice,
+    OdfText,
+    OdfTable,
+    OdfDraw,
     Other,
 }
 
@@ -141,6 +155,10 @@ fn namespace(resolved: ResolveResult<'_>) -> Option<Ns> {
             "http://schemas.openxmlformats.org/drawingml/2006/main"
             | "http://purl.oclc.org/ooxml/drawingml/main" => Ns::Drawing,
             OFFICE_RELS | STRICT_RELS => Ns::Rel,
+            "urn:oasis:names:tc:opendocument:xmlns:office:1.0" => Ns::OdfOffice,
+            "urn:oasis:names:tc:opendocument:xmlns:text:1.0" => Ns::OdfText,
+            "urn:oasis:names:tc:opendocument:xmlns:table:1.0" => Ns::OdfTable,
+            "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" => Ns::OdfDraw,
             _ => Ns::Other,
         },
     })
@@ -151,6 +169,7 @@ struct Node {
     name: Box<str>,
     attrs: Vec<((Ns, Box<str>), String)>,
     text: String,
+    parent_text_offset: usize,
     children: Vec<Node>,
 }
 
@@ -174,8 +193,9 @@ fn part(package: &OfficePackage, name: &str) -> Option<Node> {
     parse_xml(std::str::from_utf8(package.xml.get(name.as_bytes())?).ok()?)
 }
 
-fn attach(node: Node, stack: &mut [Node], root: &mut Option<Node>) -> Option<()> {
+fn attach(mut node: Node, stack: &mut [Node], root: &mut Option<Node>) -> Option<()> {
     if let Some(parent) = stack.last_mut() {
+        node.parent_text_offset = parent.text.len();
         parent.children.push(node);
     } else if root.is_none() {
         *root = Some(node);
@@ -207,13 +227,17 @@ fn parse_xml(xml: &str) -> Option<Node> {
                     name: local.into_inner().into(),
                     attrs: Vec::new(),
                     text: String::new(),
+                    parent_text_offset: 0,
                     children: Vec::new(),
                 };
                 for attribute in e.attributes() {
                     let attribute = attribute.ok()?;
                     let (resolved, local) = resolver.resolve_attribute(attribute.key);
                     let ns = namespace(resolved)?;
-                    if matches!(ns, Ns::None | Ns::Rel) {
+                    if matches!(
+                        ns,
+                        Ns::None | Ns::Rel | Ns::OdfOffice | Ns::OdfText | Ns::OdfTable
+                    ) {
                         let key = (ns, local.into_inner().into());
                         if node.attrs.len() >= 32 || node.attrs.iter().any(|(name, _)| name == &key)
                         {

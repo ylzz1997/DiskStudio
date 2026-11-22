@@ -26,6 +26,12 @@ export const signatureTypes = [
     label: "PPTX",
     detail: "PowerPoint Open XML 包；不含旧版 PPT、加密或宏类型",
   },
+  { id: "docm", label: "DOCM", detail: "按 Open XML 主部件识别启用宏的文档。预览仅显示内容。" },
+  { id: "xlsm", label: "XLSM", detail: "按 Open XML 主部件识别启用宏的文档。预览仅显示内容。" },
+  { id: "pptm", label: "PPTM", detail: "按 Open XML 主部件识别启用宏的文档。预览仅显示内容。" },
+  { id: "odt", label: "ODT", detail: "按媒体类型和清单识别未加密的 OpenDocument 包。" },
+  { id: "ods", label: "ODS", detail: "按媒体类型和清单识别未加密的 OpenDocument 包。" },
+  { id: "odp", label: "ODP", detail: "按媒体类型和清单识别未加密的 OpenDocument 包。" },
   {
     id: "sevenZip",
     label: "7z",
@@ -42,6 +48,14 @@ export const signatureTypes = [
   { id: "tiff", label: "TIFF", detail: "核对 TIFF 和 BigTIFF 的图像目录及条带或分块范围。" },
   { id: "ico", label: "ICO", detail: "核对图标目录及内嵌 PNG 或位图。" },
   { id: "cur", label: "CUR", detail: "核对光标目录、热点及内嵌 PNG 或位图。" },
+  { id: "rar", label: "RAR", detail: "核对单卷 RAR4/5 的块头 CRC 和结束块。不含加密存档。" },
+  { id: "avi", label: "AVI", detail: "核对单段 AVI 的媒体块和已有索引。" },
+  { id: "aiff", label: "AIFF", detail: "核对 AIFF 音频的采样帧数和声音范围。" },
+  { id: "aifc", label: "AIFF-C", detail: "核对 PCM、浮点及 A-law/μ-law AIFF-C 的声音范围。" },
+  { id: "flac", label: "FLAC", detail: "按采样总数、帧顺序和帧 CRC 定位原生 FLAC 文件。" },
+  { id: "midi", label: "MIDI", detail: "核对标准 MIDI 文件的音轨及结束事件。" },
+  { id: "dsf", label: "DSF", detail: "核对 DSF 声道块、填充和可选 ID3 标签边界。" },
+  { id: "dff", label: "DFF", detail: "核对未压缩 DSDIFF 的声音属性和数据范围。" },
 ] as const;
 export type SignatureKind = (typeof signatureTypes)[number]["id"];
 export type SignatureSettings = {
@@ -120,5 +134,6 @@ export function previewMediaMime(name: string): string | null {
     mov: "video/quicktime",
     ogg: "application/ogg",
     wav: "audio/wav",
+    flac: "audio/flac",
   } as Record<string, string>)[extension] ?? null;
 }

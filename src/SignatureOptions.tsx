@@ -1,6 +1,11 @@
 import { signatureTypes } from "./signatureModel";
 import type { SignatureSettings } from "./signatureModel";
 import { useLocale } from "./i18n/LanguageProvider";
+
+const packageKinds = [
+  "zip", "docx", "xlsx", "pptx", "docm", "xlsm", "pptm", "odt", "ods", "odp",
+];
+
 export function SignatureOptions({
   value,
   onChange,
@@ -115,10 +120,10 @@ export function SignatureOptions({
       {value.customRange && (
         <p>{t("位置相对于上方所选磁盘或分区，结束位置不包含在扫描范围内。")}</p>
       )}
-      {value.kinds.some((k) => ["zip", "docx", "xlsx", "pptx"].includes(k)) && (
+      {value.kinds.some((kind) => packageKinds.includes(kind)) && (
         <p>
           {t(
-            "ZIP / Office：最多 16384 个条目、8 MiB 目录、512 MiB 解压内容；每次扫描的归档检查工作量上限 64 GiB。 识别为 DOCX、XLSX、PPTX 的包只在勾选对应类型时列出；其他受支持的 ZIP 容器归入 ZIP。 不解包到磁盘、不运行文档内容，CRC 通过不代表 Office 文档语义完整。",
+            "ZIP、Office Open XML 和 OpenDocument 的单卷扫描支持未加密 Stored/Deflate 条目，逐项验证 CRC。扫描限每包 16,384 个条目、8 MiB 目录和 512 MiB 解压内容，每次累计归档检查最多 64 GiB。识别到的文档包只在勾选对应类型时列出。",
           )}
         </p>
       )}

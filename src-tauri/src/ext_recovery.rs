@@ -83,6 +83,10 @@ struct Geometry {
     block: u64,
     size: u64,
     inodes: u32,
+    inode_size: usize,
+    first_normal_inode: u32,
+    journal_inode: u32,
+    uuid: [u8; 16],
     per_group: u32,
     descriptors: Vec<u8>,
     descriptor_size: usize,
@@ -206,6 +210,10 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
         block: layout.block,
         size: layout.size,
         inodes: layout.inodes,
+        inode_size: usize::from(u16le(&s, 0x58)),
+        first_normal_inode: u32le(&s, 0x54),
+        journal_inode: if u32le(&s, 0x5c) & 4 != 0 { u32le(&s, 0xe0) } else { 0 },
+        uuid: s[0x68..0x78].try_into().unwrap(),
         per_group: layout.per_group,
         descriptors,
         descriptor_size: layout.descriptor_size,
@@ -216,6 +224,10 @@ fn geometry<R: Read + Seek>(source: &mut Source<R>) -> Result<Geometry, String> 
 
 #[path = "ext_reconstruct.rs"]
 pub(crate) mod reconstruct;
+#[path = "ext_journal.rs"]
+mod journal;
+#[path = "ext_deleted.rs"]
+pub(crate) mod deleted;
 struct Session<R> {
     fs: Ext4,
     source: Rc<RefCell<Source<R>>>,
@@ -242,8 +254,7 @@ impl<R: Read + Seek + 'static> Session<R> {
             bitmaps: HashMap::new(),
         })
     }
-    fn allocated(&mut self, metadata: &Metadata) -> Result<(), String> {
-        let inode = metadata.inode_number();
+    fn inode_allocated(&mut self, inode: u32) -> Result<bool, String> {
         if inode == 0 || inode > self.geometry.inodes {
             return Err("Ext inode 超出范围。".into());
         }
@@ -297,7 +308,11 @@ impl<R: Read + Seek + 'static> Session<R> {
             }
             self.bitmaps.insert(group, bitmap);
         }
-        if self.bitmaps[&group][within as usize / 8] & (1 << (within % 8)) == 0 {
+        Ok(self.bitmaps[&group][within as usize / 8] & (1 << (within % 8)) != 0)
+    }
+
+    fn allocated(&mut self, metadata: &Metadata) -> Result<(), String> {
+        if !self.inode_allocated(metadata.inode_number())? {
             return Err("Ext 目录引用已释放的 inode。".into());
         }
         let record = metadata.inode_record();
@@ -395,6 +410,9 @@ pub fn scan<R: Read + Seek + 'static>(
     found: impl FnMut(Candidate),
     directory: impl FnMut(Directory) -> Result<(), String>,
 ) -> Result<String, String> {
+    if mode == ScanMode::Deleted {
+        return deleted::scan(reader, cancel, tick, found, directory);
+    }
     scan_progress::continue_scan(
         reader,
         mode,
@@ -870,7 +888,7 @@ mod tests {
             |_| panic!("deleted Ext candidate"),
             |_| Ok(()),
         );
-        assert!(result.unwrap_err().contains("尚未实现"));
+        assert!(result.unwrap_err().contains("内部日志"));
         let mut corrupt = fixture(2).to_vec();
         corrupt[1024 + 0x78] ^= 1;
         assert!(Session::new(Cursor::new(corrupt), Arc::new(AtomicBool::new(false))).is_err());
