@@ -6,6 +6,7 @@ use crate::{
     signature_scan::Options,
 };
 use serde::Serialize;
+const JOURNAL_PHASE: &str = "Ext4 日志扫描";
 #[derive(Clone)]
 pub(super) struct Saved {
     pub id: String,
@@ -50,17 +51,23 @@ fn identify_metadata(
         let mut magic = [0; 2];
         reader.read_exact(&mut magic).map_err(err)?;
         reader.seek(SeekFrom::Start(0)).map_err(err)?;
-        if magic == [0x53, 0xef] && mode != ScanMode::Deleted {
-            return Ok(Some(Cursor::Ext {
-                mode,
-                cursor: Default::default(),
+        if magic == [0x53, 0xef] {
+            return Ok(Some(if mode == ScanMode::Deleted {
+                Cursor::ExtJournal {
+                    cursor: Default::default(),
+                }
+            } else {
+                Cursor::Ext {
+                    mode,
+                    cursor: Default::default(),
+                }
             }));
         }
     }
     Ok(None)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn scan_metadata<R: std::io::Read + std::io::Seek + 'static>(
     reader: &mut crate::ext_recovery::scan_progress::SharedReader<R>,
     cursor: &mut Cursor,
@@ -85,8 +92,60 @@ fn scan_metadata<R: std::io::Read + std::io::Seek + 'static>(
             found,
             directory,
         ),
+        Cursor::ExtJournal { cursor } => crate::ext_recovery::deleted::continue_scan(
+            reader.clone(),
+            cursor,
+            cancel.clone(),
+            tick,
+            found,
+            directory,
+        ),
         _ => Err("目录阶段使用了无效的扫描引擎。".into()),
     }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn scan_combined_metadata<R: std::io::Read + std::io::Seek + 'static>(
+    reader: &mut crate::ext_recovery::scan_progress::SharedReader<R>,
+    size: u64,
+    metadata: &mut Cursor,
+    journal: Option<&mut crate::ext_recovery::deleted::Checkpoint>,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mut tick: impl FnMut(&'static str, u64, u64) -> Result<(), String>,
+    mut found: impl FnMut(crate::recovery::Candidate),
+    mut directory: impl FnMut(crate::recovery_tree::Directory, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if !metadata.sealed() {
+        scan_metadata(
+            reader,
+            metadata,
+            cancel,
+            |done, total| tick("文件系统扫描", done, total),
+            &mut found,
+            |node| directory(node, false),
+        )?;
+    }
+    if !metadata.sealed() {
+        return Err("完整恢复的目录阶段未结束。".into());
+    }
+    metadata.verify_owned(reader.clone(), size)?;
+    if let Some(journal) = journal.filter(|journal| !journal.sealed) {
+        let first = metadata.count() as u32;
+        crate::ext_recovery::deleted::continue_scan(
+            reader.clone(),
+            journal,
+            cancel.clone(),
+            |done, total| tick(JOURNAL_PHASE, done, total),
+            |mut file| {
+                // The standalone journal uses one-based IDs. Index into
+                // this combined result set immediately after the directory.
+                file.id = first + (file.id - 1);
+                found(file);
+            },
+            |node| directory(node, true),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -161,11 +220,12 @@ pub fn status() -> Option<Info> {
         source: p.source.clone(),
         mode: p.mode,
         combined,
-        engine: if combined
-            && running
-            && job.is_some_and(|j| matches!(j.phase.as_str(), "签名扫描" | "核对空闲簇"))
-        {
-            "signatures"
+        engine: if combined && running {
+            match job.map(|j| j.phase.as_str()) {
+                Some("签名扫描" | "核对空闲簇") => "signatures",
+                Some(JOURNAL_PHASE) => "extJournal",
+                _ => cursor.kind(),
+            }
         } else {
             cursor.kind()
         },
@@ -353,11 +413,10 @@ fn launch(
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                         return Err("扫描已停止，尚未打开设备".into());
                     }
-                    let locked = options
-                        .as_ref()
-                        .is_some_and(|options| options.free_only)
-                        .then(|| platform::StableRead::lock(&source))
-                        .transpose()?;
+                    let mut locked = (options.as_ref().is_some_and(|options| options.free_only)
+                        || cursor.as_ref().is_some_and(Cursor::requires_journal_lock))
+                    .then(|| platform::StableRead::lock(&source))
+                    .transpose()?;
                     let r = if let Some(lock) = &locked {
                         lock.resolved()?
                     } else {
@@ -375,6 +434,20 @@ fn launch(
                             .verify_owned(reader.clone(), r.size)?;
                     } else if mode != ScanMode::Signatures {
                         let metadata = identify_metadata(&mut reader, r.size, mode)?;
+                        let probe_journal = options.is_some()
+                            && matches!(metadata, Some(Cursor::Ext { .. }))
+                            && crate::ext_recovery::deleted::may_probe(&mut reader)?;
+                        if locked.is_none()
+                            && (probe_journal
+                                || matches!(metadata, Some(Cursor::ExtJournal { .. })))
+                        {
+                            drop(reader);
+                            let lock = platform::StableRead::lock(&source)?;
+                            reader = crate::ext_recovery::scan_progress::SharedReader::new(
+                                lock.reader()?,
+                            );
+                            locked = Some(lock);
+                        }
                         cursor = if let Some(options) = &options {
                             if metadata.is_none() && options.free_only {
                                 return Err("无法确认文件系统，完整恢复的空闲簇范围不可用。".into());
@@ -382,6 +455,15 @@ fn launch(
                             Some(Cursor::Combined {
                                 signature_phase: metadata.is_none(),
                                 metadata: metadata.map(Box::new),
+                                journal: if probe_journal
+                                    && crate::ext_recovery::deleted::supports(
+                                        reader.clone(),
+                                        cancel.clone(),
+                                    )? {
+                                    Some(Default::default())
+                                } else {
+                                    None
+                                },
                                 options: options.clone(),
                                 signature_cursor: Default::default(),
                             })
@@ -427,6 +509,7 @@ fn launch(
                         )?,
                         Some(Cursor::Combined {
                             metadata,
+                            journal,
                             signature_phase,
                             options,
                             signature_cursor,
@@ -434,20 +517,24 @@ fn launch(
                             if !*signature_phase {
                                 let files =
                                     metadata.as_deref_mut().ok_or("完整恢复缺少目录阶段。")?;
-                                if !files.sealed() {
-                                    scan_metadata(
-                                        &mut reader,
-                                        files,
-                                        &cancel,
-                                        tick,
-                                        found,
-                                        directory,
-                                    )?;
-                                }
-                                if !files.sealed() {
-                                    return Err("完整恢复的目录阶段未结束。".into());
-                                }
-                                files.verify_owned(reader.clone(), r.size)?;
+                                scan_combined_metadata(
+                                    &mut reader,
+                                    r.size,
+                                    files,
+                                    journal.as_mut(),
+                                    &cancel,
+                                    |phase, done, total| {
+                                        super::progress(&work_id, &cancel, phase, done, total)
+                                    },
+                                    found,
+                                    |node, from_journal| {
+                                        if from_journal {
+                                            state().directories.insert_ext_journal(node)
+                                        } else {
+                                            directory(node)
+                                        }
+                                    },
+                                )?;
                                 binding.as_ref().ok_or("恢复源特征缺失")?.verify(
                                     &mut reader,
                                     r.size,
@@ -456,7 +543,9 @@ fn launch(
                                 )?;
                                 *signature_phase = true;
                             }
-                            let count = metadata.as_deref().map_or(0, Cursor::count);
+                            let directory_count = metadata.as_deref().map_or(0, Cursor::count);
+                            let count = directory_count
+                                + journal.as_ref().map_or(0, |cursor| cursor.count());
                             let scanned = scan_signatures(
                                 &mut reader,
                                 r.size,
@@ -471,40 +560,26 @@ fn launch(
                                 },
                             )?;
                             let locale = crate::native_locale::current();
-                            let directory_summary = if metadata.is_none() {
+                            let mut directory_summary = if metadata.is_none() {
                                 locale
                                     .text("此分区未识别到完整恢复支持的文件记录。")
                                     .to_owned()
                             } else {
                                 locale.format(
                                     "文件记录扫描找到 {count} 个候选。",
-                                    &[("count", &count.to_string())],
+                                    &[("count", &directory_count.to_string())],
                                 )
                             };
+                            if let Some(journal) = journal {
+                                directory_summary.push(' ');
+                                directory_summary.push_str(&journal.summary());
+                            }
                             format!("{directory_summary} {scanned}")
                         }
                         Some(cursor) => {
                             scan_metadata(&mut reader, cursor, &cancel, tick, found, directory)?
                         }
                         None => {
-                            if mode == ScanMode::Deleted
-                                && crate::ext_allocation::has_magic(&mut reader, r.size)?
-                            {
-                                if source.partition.is_none() {
-                                    return Err("Ext4 日志删除恢复需要选择分区。".into());
-                                }
-                                drop(reader);
-                                let locked = platform::StableRead::lock(&source)?;
-                                let message = crate::ext_recovery::deleted::scan(
-                                    locked.reader()?,
-                                    cancel.clone(),
-                                    tick,
-                                    found,
-                                    directory,
-                                )?;
-                                locked.verify()?;
-                                return Ok((message, None));
-                            }
                             if disk_core::btrfs::has_magic(&mut reader, r.size)? {
                                 drop(reader);
                                 let locked = platform::StableRead::lock(&source)?;
@@ -586,6 +661,7 @@ pub fn save(id: String) -> Result<Option<String>, String> {
                 "fat" => "DiskStudio-FAT-progress.dsrecover",
                 "exfat" => "DiskStudio-exFAT-progress.dsrecover",
                 "ext" => "DiskStudio-Ext-progress.dsrecover",
+                "extJournal" => "DiskStudio-Ext4-deleted-progress.dsrecover",
                 _ => "DiskStudio-recovery.dsrecover",
             }
         };
@@ -622,8 +698,7 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             .cursor
             .signature_progress()
             .filter(|(options, cursor)| options.free_only && cursor.allocation_digest().is_some());
-        let locked = scoped
-            .is_some()
+        let locked = (scoped.is_some() || progress.cursor.requires_journal_lock())
             .then(|| platform::StableRead::lock(&source))
             .transpose()?;
         let r = if let Some(lock) = &locked {
@@ -638,11 +713,13 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             .binding
             .verify(&mut reader, r.size, r.offset, sector)?;
         progress.verify_owned(reader.clone(), r.size)?;
-        if let (Some((options, cursor)), Some(lock)) = (scoped, &locked) {
+        if let Some((options, cursor)) = scoped {
             let cancel = std::sync::atomic::AtomicBool::new(false);
             let plan = crate::used_space::inspect(&mut reader, r.size, sector, None, &cancel)?;
             cursor.verify_scope(options, &plan)?;
             crate::signature_scan::verify_free_candidates(&plan, &files)?;
+        }
+        if let Some(lock) = &locked {
             lock.verify()?;
         } else {
             platform::resolve(&source, false, false)?;

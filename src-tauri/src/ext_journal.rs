@@ -57,46 +57,59 @@ pub(super) struct Journal {
 }
 
 impl Journal {
+    pub(super) fn supports(
+        superblock: &[u8],
+        bytes: usize,
+        block_size: usize,
+        uuid: [u8; 16],
+    ) -> bool {
+        if !matches!(block_size, 1024 | 2048 | 4096)
+            || superblock.len() != 1024
+            || bytes < block_size
+            || bytes as u64 > MAX_JOURNAL_BYTES
+            || bytes % block_size != 0
+        {
+            return false;
+        }
+        let limit = be32(superblock, 0x10);
+        let first = be32(superblock, 0x14);
+        let head = be32(superblock, 0x58);
+        let incompatible = be32(superblock, 0x28);
+        be32(superblock, 0) == MAGIC
+            && be32(superblock, 4) == SUPERBLOCK_V2
+            && be32(superblock, 0xc) as usize == block_size
+            && limit as usize == bytes / block_size
+            && first != 0
+            && limit.checked_sub(first).is_some_and(|size| size >= 3)
+            && be32(superblock, 0x1c) == 0
+            && be32(superblock, 0x20) == 0
+            && be32(superblock, 0x24) == 0
+            && incompatible & !0x13 == 0
+            && incompatible & FEATURE_CSUM_V3 != 0
+            && be32(superblock, 0x2c) == 0
+            && superblock[0x30..0x40] == uuid
+            && be32(superblock, 0x40) == 1
+            && be32(superblock, 0x44) == 0
+            && superblock[0x50] == 4
+            && be32(superblock, 0x54) == 0
+            && (head == 0 || (first..limit).contains(&head))
+            && checksum(!0, superblock, 0xfc)
+    }
+
     pub(super) fn new(
         bytes: Vec<u8>,
         block_size: usize,
         filesystem_blocks: u64,
         uuid: [u8; 16],
     ) -> Result<Self, String> {
-        if !matches!(block_size, 1024 | 2048 | 4096)
-            || bytes.len() < block_size
-            || bytes.len() as u64 > MAX_JOURNAL_BYTES
-            || bytes.len() % block_size != 0
-        {
-            return Err("Ext4 内部日志大小或块大小不支持。".into());
+        let superblock = bytes.get(..1024).unwrap_or_default();
+        if !Self::supports(superblock, bytes.len(), block_size, uuid) {
+            return Err("Ext4 删除恢复需要干净且校验通过的内部 JBD2 v3 日志。".into());
         }
-        let superblock = &bytes[..1024];
         let limit = be32(superblock, 0x10);
         let first = be32(superblock, 0x14);
         let head = be32(superblock, 0x58);
         let incompatible = be32(superblock, 0x28);
-        if be32(superblock, 0) != MAGIC
-            || be32(superblock, 4) != SUPERBLOCK_V2
-            || be32(superblock, 0xc) as usize != block_size
-            || limit as usize != bytes.len() / block_size
-            || first == 0
-            || limit.checked_sub(first).is_none_or(|size| size < 3)
-            || be32(superblock, 0x1c) != 0
-            || be32(superblock, 0x20) != 0
-            || be32(superblock, 0x24) != 0
-            || incompatible & !0x13 != 0
-            || incompatible & FEATURE_CSUM_V3 == 0
-            || be32(superblock, 0x2c) != 0
-            || superblock[0x30..0x40] != uuid
-            || be32(superblock, 0x40) != 1
-            || be32(superblock, 0x44) != 0
-            || superblock[0x50] != 4
-            || be32(superblock, 0x54) != 0
-            || (head != 0 && !(first..limit).contains(&head))
-            || !checksum(!0, superblock, 0xfc)
-        {
-            return Err("Ext4 删除恢复需要干净且校验通过的内部 JBD2 v3 日志。".into());
-        }
         Ok(Self {
             block_size,
             first,
@@ -109,10 +122,6 @@ impl Journal {
             filesystem_blocks,
             bytes,
         })
-    }
-
-    pub(super) fn bytes(&self) -> u64 {
-        self.bytes.len() as u64
     }
 
     pub(super) fn digest(&self) -> [u8; 32] {

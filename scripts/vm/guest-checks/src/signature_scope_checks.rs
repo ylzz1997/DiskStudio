@@ -14,6 +14,8 @@ const SIZE: u64 = 8 * MIB;
 const EXT_JOURNAL_SIZE: u64 = 32 * MIB;
 const EXT_JOURNAL_PROFILE: &str = "ext-journal-4kn";
 const EXT_JOURNAL_FOLDER: &str = "DS-ExtJournal";
+const EXT_JOURNAL_TREE_PROFILE: &str = "ext-journal-tree-4kn";
+const EXT_JOURNAL_TREE_FOLDER: &str = "DS-ExtJournalTree";
 const FOLDER: &str = "DS-SignatureScope";
 const FREE_PDF: &[u8] = b"%PDF-1.4\nDiskStudio aligned free fixture\n%%EOF";
 const LIVE_PDF: &[u8] = b"%PDF-1.4\nDiskStudio allocated control\n%%EOF";
@@ -462,46 +464,183 @@ pub(super) fn verify(sample: Sample) -> Result<String, String> {
     Ok(format!("PASS: Saved settings, {} candidates, original B extent, both GPTs, adjacent sectors, guest OS layout and exported SHA-256 verified. B remains offline.", expected.len()))
 }
 
-pub(super) fn prepare_ext_journal() -> Result<String, String> {
-    let compressed = include_bytes!("../../../../tests/fixtures/ext-journal-linux.raw.gz");
+struct ExtJournalFixture {
+    profile: &'static str,
+    folder: &'static str,
+    compressed: &'static [u8],
+    sha256: &'static str,
+    expected: &'static [(&'static str, usize, &'static str)],
+    first_file_id: usize,
+}
+
+const EXT_JOURNAL_DIGESTS: [(&str, usize, &str); 2] = [
+    ("removed.txt", 39, "e3db9e1888e849f3d5b3d5347ecbb7b2ce0bd2dd93f7f73dd117d2d93c53b48e"),
+    ("fragment.bin", 15668, "e66791aecd54ff8a0d6cafdab9cf46d98c22a965211b615831c8065806ee2069"),
+];
+const EXT_TREE_FILE: (&str, usize, &str) = (
+    "extent-tree.bin", 12_583_631, "a9f32b65f4b5eb0ffe4fcef16546926f76b7cc384e667e09f5846708102ab497",
+);
+const EXT_COMPLETE_PDF: &[u8] = include_bytes!("../../../../tests/fixtures/ext-complete-sample.pdf");
+
+fn ext_journal_fixture(tree: bool) -> ExtJournalFixture {
+    if tree {
+        ExtJournalFixture {
+            profile: EXT_JOURNAL_TREE_PROFILE,
+            folder: EXT_JOURNAL_TREE_FOLDER,
+            compressed: include_bytes!("../../../../tests/fixtures/ext-journal-tree-linux.raw.gz"),
+            sha256: "8592d8add23c97ef7954970accff024e7cb61c14682a2872b282d8179a26d599",
+            expected: &[
+                EXT_JOURNAL_DIGESTS[0], EXT_JOURNAL_DIGESTS[1],
+                EXT_TREE_FILE,
+            ],
+            first_file_id: 1,
+        }
+    } else {
+        ExtJournalFixture {
+            profile: EXT_JOURNAL_PROFILE,
+            folder: EXT_JOURNAL_FOLDER,
+            compressed: include_bytes!("../../../../tests/fixtures/ext-journal-linux.raw.gz"),
+            sha256: "fd44edb0ba66cad04f8e442b568755c5fffc75e210aea796af66e7b73291fe5d",
+            expected: &EXT_JOURNAL_DIGESTS,
+            first_file_id: 1,
+        }
+    }
+}
+
+fn decompress_ext_journal(fixture: &ExtJournalFixture) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    flate2::read::GzDecoder::new(compressed.as_slice())
+    flate2::read::GzDecoder::new(fixture.compressed)
         .take(EXT_JOURNAL_SIZE + 1)
         .read_to_end(&mut bytes)
         .map_err(err)?;
     if bytes.len() as u64 != EXT_JOURNAL_SIZE
-        || format!("{:x}", Sha256::digest(&bytes))
-            != "fd44edb0ba66cad04f8e442b568755c5fffc75e210aea796af66e7b73291fe5d"
+        || format!("{:x}", Sha256::digest(&bytes)) != fixture.sha256
     {
         return Err("Ext4 Linux journal fixture does not match the independently verified image".into());
     }
-    let (partition, output) = prepare_source(&bytes, EXT_JOURNAL_PROFILE, EXT_JOURNAL_FOLDER)?;
+    Ok(bytes)
+}
+
+pub(super) fn prepare_ext_journal(tree: bool) -> Result<String, String> {
+    let fixture = ext_journal_fixture(tree);
+    let bytes = decompress_ext_journal(&fixture)?;
+    let (partition, output) = prepare_source(&bytes, fixture.profile, fixture.folder)?;
     Ok(format!(
-        "PASS: B/{partition} 32 MiB Ext4 is offline. Recover Deleted Files should show removed.txt and nested/fragment.bin. Preview the text and export both files to {} with Save in one folder.",
+        "PASS: B/{partition} 32 MiB Ext4 is offline. Expect {} deleted files. Preview removed.txt and export all matches to {} with Save in one folder.",
+        fixture.expected.len(), output.display()
+    ))
+}
+
+fn ext_complete_fixture() -> ExtJournalFixture {
+    ExtJournalFixture {
+        profile: "ext-complete-4kn",
+        folder: "DS-ExtComplete",
+        sha256: "2e86ff75b0a7fcb3fb7d292d8043a710be39ab522d1cd973fc05141f7beecd80",
+        expected: &[
+            ("retained.txt", 43, "0c53dd40af040f36d4bc138dfda8efbe1cef4f5311bfc96bf41bba8e9b77866c"),
+            EXT_JOURNAL_DIGESTS[0],
+            EXT_JOURNAL_DIGESTS[1],
+            EXT_TREE_FILE,
+            ("recovered_0000000001fff000.pdf", 605, "3c996da0648ac11b752976a80dd58d20fa1ef6ea760b3150417d4111eacfffca"),
+        ],
+        first_file_id: 0,
+        ..ext_journal_fixture(true)
+    }
+}
+
+pub(super) fn prepare_ext_complete() -> Result<String, String> {
+    let fixture = ext_complete_fixture();
+    let mut bytes = decompress_ext_journal(&ext_journal_fixture(true))?;
+    let offset = EXT_JOURNAL_SIZE - SECTOR;
+    let block = &mut bytes[offset as usize..];
+    if block.iter().any(|&byte| byte != 0) || EXT_COMPLETE_PDF.len() > block.len() {
+        return Err("The Ext4 signature fixture must start in a blank final block".into());
+    }
+    block[..EXT_COMPLETE_PDF.len()].copy_from_slice(EXT_COMPLETE_PDF);
+    if format!("{:x}", Sha256::digest(&bytes)) != fixture.sha256 {
+        return Err("The combined Ext4 fixture digest differs".into());
+    }
+    let (partition, output) = prepare_source(&bytes, fixture.profile, fixture.folder)?;
+    Ok(format!(
+        "PASS: B/{partition} is offline. Choose Complete Recovery, PDF only, free clusters, sector aligned. Save a paused journal checkpoint to the root of Disk A. Export five results to {} in one folder.",
         output.display()
     ))
 }
 
-pub(super) fn verify_ext_journal() -> Result<String, String> {
+pub(super) fn verify_ext_complete() -> Result<String, String> {
     let desktop = btrfs_checks::desktop()?;
+    let summary = verify_ext_journal_output(ext_complete_fixture(), &desktop, false)?;
+    let (root, _) = ntfs_reconstruction_checks::verified_a_root()?;
+    let mut progress = None;
+    for entry in root.entries().map_err(err)? {
+        let entry = entry.map_err(err)?;
+        let name = entry.file_name();
+        if !name.to_string_lossy().ends_with(".dsrecover") {
+            continue;
+        }
+        if progress.is_some() {
+            return Err("Expected exactly one native combined Ext4 progress file".into());
+        }
+        let mut bytes = Vec::new();
+        root.open(&name).map_err(err)?.take(1024 * 1024).read_to_end(&mut bytes).map_err(err)?;
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes).map_err(err)?;
+        if envelope["version"] != 5 {
+            return Err("Ext4 Complete Recovery did not save a version 5 checkpoint".into());
+        }
+        let selected: data_tasks::Selection =
+            serde_json::from_value(envelope["progress"]["source"].clone()).map_err(err)?;
+        let saved = recovery_checkpoint::decode(&bytes, &selected)?;
+        let options = saved.cursor.options().ok_or("Combined signature options are missing")?;
+        if selected.partition != Some(2) || saved.binding.size != EXT_JOURNAL_SIZE
+            || saved.binding.offset != START || saved.binding.sector != SECTOR
+            || saved.cursor.kind() != "extJournal" || saved.cursor.sealed()
+            || saved.cursor.done() != 2 || saved.cursor.count() != 3
+            || options.kinds != [signature_scan::Kind::Pdf] || !options.free_only || !options.sector_aligned
+            || options.start != 0 || options.length.is_some()
+        {
+            return Err("Saved Ext4 journal position, directory count, source or signature scope differs".into());
+        }
+        progress = Some(());
+    }
+    progress.ok_or("The native combined checkpoint is missing")?;
+    Ok(format!("Version 5 journal checkpoint and signature scope verified. {summary}"))
+}
+
+pub(super) fn verify_ext_journal(tree: bool) -> Result<String, String> {
+    let desktop = btrfs_checks::desktop()?;
+    verify_ext_journal_output(ext_journal_fixture(tree), &desktop, false)
+}
+
+pub(super) fn verify_ext_journal_resume() -> Result<String, String> {
+    // Use the retained baseline from the original preparation of this A/B
+    // pair. The current optical desktop and this verifier are checked above it.
+    const PREPARED_DESKTOP: &str =
+        "c3bb0e4c318dba0211f21cccf6da0df2ca30416d27c48e21547c101960e9d726";
+    btrfs_checks::desktop()?;
+    verify_ext_journal_output(ext_journal_fixture(true), PREPARED_DESKTOP, true)
+}
+
+fn verify_ext_journal_output(fixture: ExtJournalFixture, baseline_desktop: &str, at_root: bool) -> Result<String, String> {
     let baseline: Baseline = serde_json::from_reader(
-        File::open(receipt(&desktop, EXT_JOURNAL_PROFILE)).map_err(err)?.take(4096),
+        File::open(receipt(baseline_desktop, fixture.profile)).map_err(err)?.take(4096),
     ).map_err(err)?;
     let b = b_device(true)?;
     if part(EXT_JOURNAL_SIZE)? != baseline.partition
         || ntfs_reconstruction_checks::table_hashes()? != baseline.tables
         || edges(&b, EXT_JOURNAL_SIZE)? != baseline.edges
-        || hash(&b, START, EXT_JOURNAL_SIZE)?
-            != "fd44edb0ba66cad04f8e442b568755c5fffc75e210aea796af66e7b73291fe5d"
+        || hash(&b, START, EXT_JOURNAL_SIZE)? != fixture.sha256
     {
         return Err("The Ext4 source, neighboring sectors or a disk layout changed".into());
     }
     let (root, _) = ntfs_reconstruction_checks::verified_a_root()?;
-    let folder = root.open_dir(EXT_JOURNAL_FOLDER).map_err(err)?;
+    let folder = if at_root { root } else { root.open_dir(fixture.folder).map_err(err)? };
     let mut exports = 0;
     for entry in folder.entries().map_err(err)? {
         let entry = entry.map_err(err)?;
         if !entry.file_name().to_string_lossy().starts_with("DiskStudio-recovered-") {
+            if at_root {
+                continue;
+            }
             return Err("Unexpected item in Ext4 output directory".into());
         }
         exports += 1;
@@ -510,16 +649,15 @@ pub(super) fn verify_ext_journal() -> Result<String, String> {
             output.open(recovery_export::REPORT).map_err(err)?.take(128 * 1024),
         ).map_err(err)?;
         if report["completed"] != true || report["layout"] != "flat"
-            || report["savedFiles"] != 2 || report["failedFiles"] != 0
+            || report["savedFiles"] != fixture.expected.len() || report["failedFiles"] != 0
         {
             return Err("Ext4 native export is incomplete".into());
         }
-        for (i, (name, count, sha256)) in [
-            ("removed.txt", 39, "e3db9e1888e849f3d5b3d5347ecbb7b2ce0bd2dd93f7f73dd117d2d93c53b48e"),
-            ("fragment.bin", 15668, "e66791aecd54ff8a0d6cafdab9cf46d98c22a965211b615831c8065806ee2069"),
-        ].into_iter().enumerate() {
-            let leaf = format!("{:06}_{name}", i + 1);
-            let bytes = output.read(&leaf).map_err(err)?;
+        for (i, &(name, count, sha256)) in fixture.expected.iter().enumerate() {
+            let leaf = format!("{:06}_{name}", i + fixture.first_file_id);
+            let mut bytes = Vec::with_capacity(count);
+            output.open(&leaf).map_err(err)?.take(count as u64 + 1)
+                .read_to_end(&mut bytes).map_err(err)?;
             if report["entries"][i]["originalName"] != name
                 || report["entries"][i]["name"] != leaf
                 || report["entries"][i]["folder"] != 0
@@ -534,7 +672,7 @@ pub(super) fn verify_ext_journal() -> Result<String, String> {
     if exports != 1 {
         return Err("Expected exactly one native Ext4 export".into());
     }
-    Ok("PASS: Both SHA-256 values match Linux originals. B remains offline. Complete B source extent, neighbors, both GPTs and guest OS layout match.".into())
+    Ok(format!("PASS: All {} SHA-256 values match the original fixtures. B remains offline. Complete B source extent, neighbors, both GPTs and guest OS layout match.", fixture.expected.len()))
 }
 
 const COMPLETE_FOLDER: &str = "DS-Complete-Recovery";
@@ -589,6 +727,7 @@ pub(super) fn prepare_complete() -> Result<String, String> {
             mode: recovery::ScanMode::AllFiles,
             cursor: metadata,
         })),
+        journal: None,
         signature_phase: false,
         options: signature_scan::Options {
             kinds: Sample::Media.kinds().to_vec(),
@@ -631,6 +770,7 @@ pub(super) fn verify_complete() -> Result<String, String> {
     let (files, catalog) = progress.validate(&selected)?;
     let ScanCursor::Combined {
         metadata: Some(metadata),
+        journal: None,
         signature_phase: true,
         options,
         signature_cursor,

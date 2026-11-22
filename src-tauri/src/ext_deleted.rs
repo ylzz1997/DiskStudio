@@ -3,7 +3,11 @@
 
 use super::{journal::Journal, *};
 use crate::used_space::Allocation;
-use std::{collections::BTreeMap, ops::Range};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 const MAX_RESULTS: usize = 4096;
 const MAX_FILE: u64 = 256 * 1024 * 1024;
@@ -12,8 +16,16 @@ const MAX_DIR_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_DIRECTORIES: usize = 8192;
 const MAX_DIRECTORY_ENTRIES: usize = 250_000;
 const MAX_DIRECTORY_BLOCKS: usize = 65_536;
+const MAX_EXTENT_DEPTH: u16 = 5;
+const MAX_EXTENT_NODES: usize = 4096;
+const MAX_EXTENT_RUNS: usize = 1_048_576;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[path = "ext_deleted_progress.rs"]
+mod progress;
+pub(crate) use progress::{continue_scan, same_results, Checkpoint};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Location {
     inode: u32,
     filesystem: [u8; 32],
@@ -40,6 +52,49 @@ struct Run {
     physical: u64,
 }
 
+struct BlockVersion {
+    transaction: usize,
+    snapshot: journal::Snapshot,
+    revoked_at: Option<usize>,
+}
+
+struct BlockVersions(BTreeMap<u64, Vec<BlockVersion>>);
+
+impl BlockVersions {
+    fn new(transactions: &[journal::Transaction], cancel: &AtomicBool) -> Result<Self, String> {
+        let mut blocks = BTreeMap::<_, Vec<BlockVersion>>::new();
+        for (index, transaction) in transactions.iter().enumerate() {
+            crate::used_space::stop(cancel)?;
+            for address in &transaction.revoked {
+                if let Some(last) = blocks
+                    .get_mut(address)
+                    .and_then(|versions| versions.last_mut())
+                {
+                    last.revoked_at.get_or_insert(index);
+                }
+            }
+            for (&address, &snapshot) in &transaction.snapshots {
+                blocks.entry(address).or_default().push(BlockVersion {
+                    transaction: index,
+                    snapshot,
+                    revoked_at: None,
+                });
+            }
+        }
+        Ok(Self(blocks))
+    }
+
+    fn before(&self, address: u64, boundary: usize) -> Option<journal::Snapshot> {
+        let versions = self.0.get(&address)?;
+        let end = versions.partition_point(|entry| entry.transaction < boundary);
+        let version = versions.get(end.checked_sub(1)?)?;
+        version
+            .revoked_at
+            .is_none_or(|index| index >= boundary)
+            .then_some(version.snapshot)
+    }
+}
+
 struct Named {
     bytes: Vec<u8>,
     parent: Arc<Ancestor>,
@@ -64,6 +119,67 @@ struct History<R> {
     allocation: Allocation,
 }
 
+fn has_internal_journal(geometry: &Geometry) -> bool {
+    geometry.journal_inode != 0
+        && geometry.metadata_csum
+        && geometry.creator_os == 0
+        && geometry.first_normal_inode >= 11
+}
+
+/// A bounded preflight for acquiring a stable source lock. It does not
+/// authorize a journal scan or inspect journal blocks.
+pub(crate) fn may_probe(reader: &mut (impl Read + Seek)) -> Result<bool, String> {
+    let mut superblock = [0; 1024];
+    reader.seek(std::io::SeekFrom::Start(1024)).map_err(err)?;
+    reader.read_exact(&mut superblock).map_err(err)?;
+    reader.seek(std::io::SeekFrom::Start(0)).map_err(err)?;
+    Ok(u16le(&superblock, 0x38) == 0xef53
+        && u32le(&superblock, 0x5c) & 4 != 0
+        && u32le(&superblock, 0x64) & 0x400 != 0
+        && u32le(&superblock, 0x48) == 0
+        && u32le(&superblock, 0xe0) != 0)
+}
+
+pub(crate) fn supports<R: Read + Seek + 'static>(
+    reader: R,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, String> {
+    let mut session = Session::new(reader, cancel)?;
+    if !has_internal_journal(&session.geometry) {
+        return Ok(false);
+    }
+    let mut file = match session
+        .fs
+        .open_internal_journal(session.geometry.journal_inode)
+    {
+        Ok(file) => file,
+        Err(ext4_view::Ext4Error::Incompatible(_) | ext4_view::Ext4Error::Corrupt(_)) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(err(error)),
+    };
+    session.allocated(file.metadata())?;
+    let bytes = file.metadata().len();
+    if !(1024..=journal::MAX_JOURNAL_BYTES).contains(&bytes) {
+        return Ok(false);
+    }
+    let mut header = [0; 1024];
+    let mut remainder = &mut header[..];
+    while !remainder.is_empty() {
+        let read = file.read_bytes(remainder).map_err(err)?;
+        if read == 0 {
+            return Ok(false);
+        }
+        remainder = &mut remainder[read..];
+    }
+    Ok(Journal::supports(
+        &header,
+        bytes as usize,
+        session.geometry.block as usize,
+        session.geometry.uuid,
+    ))
+}
+
 impl<R: Read + Seek + 'static> History<R> {
     fn read(
         reader: R,
@@ -71,11 +187,7 @@ impl<R: Read + Seek + 'static> History<R> {
         tick: &mut impl FnMut(u64, u64) -> Result<(), String>,
     ) -> Result<Self, String> {
         let mut session = Session::new(reader, cancel.clone())?;
-        if session.geometry.journal_inode == 0
-            || !session.geometry.metadata_csum
-            || session.geometry.creator_os != 0
-            || session.geometry.first_normal_inode < 11
-        {
+        if !has_internal_journal(&session.geometry) {
             return Err("Ext 删除恢复需要带内部日志和元数据校验的 Linux Ext4。".into());
         }
         let mut file = session
@@ -155,7 +267,9 @@ impl<R: Read + Seek + 'static> History<R> {
     fn witnesses(&mut self) -> Result<Vec<Witness>, String> {
         let tables = self.inode_tables()?;
         let geometry = self.session.geometry.clone();
+        let cancel = self.session.source.borrow().cancel.clone();
         let per_block = geometry.block as usize / geometry.inode_size;
+        let versions = BlockVersions::new(&self.transactions, &cancel)?;
         let mut targets = BTreeMap::new();
         for (transaction, log) in self.transactions.iter().enumerate() {
             for &address in log.snapshots.keys() {
@@ -172,6 +286,7 @@ impl<R: Read + Seek + 'static> History<R> {
             }
         }
         let mut results = Vec::new();
+        let mut run_count = 0;
         let mut current = vec![0; geometry.block as usize];
         for ((table, address), ids) in targets {
             if ids.len() < 2 {
@@ -235,7 +350,7 @@ impl<R: Read + Seek + 'static> History<R> {
                     continue;
                 }
                 let size = u64::from(u32le(old, 4)) | (u64::from(u32le(old, 0x6c)) << 32);
-                let Some(runs) = extents(old, size, &geometry, &self.allocation) else {
+                let Some(runs) = self.deleted_extents(&versions, inode, old, size, deleted) else {
                     continue;
                 };
                 let mut incarnation = before;
@@ -256,6 +371,10 @@ impl<R: Read + Seek + 'static> History<R> {
                 if results.len() == MAX_RESULTS {
                     return Err("Ext4 删除候选超过 4096 项检查上限。".into());
                 }
+                run_count += runs.len();
+                if run_count > MAX_EXTENT_RUNS {
+                    return Err("Ext4 删除候选的 extent 范围超过检查上限。".into());
+                }
                 results.push(Witness {
                     inode,
                     generation,
@@ -270,6 +389,48 @@ impl<R: Read + Seek + 'static> History<R> {
         }
         results.sort_unstable_by_key(|proof| proof.inode);
         Ok(results)
+    }
+
+    fn deleted_extents(
+        &self,
+        versions: &BlockVersions,
+        inode: u32,
+        raw: &[u8],
+        size: u64,
+        deleted: usize,
+    ) -> Option<Vec<Run>> {
+        let geometry = &self.session.geometry;
+        let root = &raw[0x28..0x64];
+        let depth = u16le(root, 6);
+        if size > MAX_FILE || u32le(raw, 0x20) != 0x80000 || depth > MAX_EXTENT_DEPTH {
+            return None;
+        }
+        let mut tree = ExtentTree {
+            block: geometry.block,
+            size,
+            seed: inode_seed(geometry, inode, raw),
+            allocation: &self.allocation,
+            nodes: BTreeSet::new(),
+            runs: Vec::new(),
+            physical: Vec::new(),
+        };
+        tree.walk(
+            root,
+            depth,
+            0..size.div_ceil(tree.block),
+            true,
+            &mut |address| {
+                // A node can be revoked as part of deletion. Use its newest
+                // committed version strictly before that transaction.
+                if self.transactions[deleted].snapshots.contains_key(&address) {
+                    return None;
+                }
+                versions
+                    .before(address, deleted)
+                    .map(|entry| self.journal.snapshot(entry))
+            },
+        )?;
+        tree.finish()
     }
 
     fn names(&mut self, proofs: &[Witness]) -> Result<BTreeMap<u32, Named>, String> {
@@ -517,58 +678,117 @@ fn checked_inode(geometry: &Geometry, inode: u32, raw: &[u8]) -> bool {
         ) == (u32::from(u16le(raw, 0x7c)) | u32::from(u16le(raw, 0x82)) << 16)
 }
 
-fn extents(
-    raw: &[u8],
+struct ExtentTree<'a> {
+    block: u64,
     size: u64,
-    geometry: &Geometry,
-    allocation: &Allocation,
-) -> Option<Vec<Run>> {
-    let tree = &raw[0x28..0x64];
-    let count = usize::from(u16le(tree, 2));
-    let flags = u32le(raw, 0x20);
-    if size > MAX_FILE
-        || flags & !0x80000 != 0
-        || flags & 0x80000 == 0
-        || u16le(tree, 0) != 0xf30a
-        || count > 4
-        || u16le(tree, 4) != 4
-        || u16le(tree, 6) != 0
-    {
-        return None;
+    seed: u32,
+    allocation: &'a Allocation,
+    nodes: BTreeSet<u64>,
+    runs: Vec<Run>,
+    physical: Vec<Range<u64>>,
+}
+
+impl ExtentTree<'_> {
+    fn walk(
+        &mut self,
+        node: &[u8],
+        depth: u16,
+        span: Range<u64>,
+        root: bool,
+        load: &mut impl FnMut(u64) -> Option<Vec<u8>>,
+    ) -> Option<()> {
+        let entry_count = usize::from(u16le(node, 2));
+        let capacity = usize::from(u16le(node, 4));
+        let tail = 12 + 12 * capacity;
+        if u16le(node, 0) != 0xf30a || u16le(node, 6) != depth || entry_count > capacity {
+            return None;
+        }
+        if root {
+            if capacity != 4 || (depth > 0 && entry_count == 0) {
+                return None;
+            }
+        } else if node.len() != self.block as usize
+            || entry_count == 0
+            || tail + 4 > node.len()
+            || crc(self.seed, &node[..tail]) != u32le(node, tail)
+        {
+            return None;
+        }
+        let mut entries = node[12..12 + 12 * entry_count].chunks_exact(12).peekable();
+        let mut next = span.start;
+        while let Some(entry) = entries.next() {
+            let first = u64::from(u32le(entry, 0));
+            if first < next || first >= span.end {
+                return None;
+            }
+            if depth == 0 {
+                next = self.add_extent(entry, first, span.end)?;
+                continue;
+            }
+            let end = entries
+                .peek()
+                .map_or(span.end, |entry| u64::from(u32le(entry, 0)));
+            let address = u64::from(u32le(entry, 4)) | (u64::from(u16le(entry, 8)) << 32);
+            if end <= first
+                || end > span.end
+                || address == 0
+                || self.nodes.len() == MAX_EXTENT_NODES
+                || !self.nodes.insert(address)
+            {
+                return None;
+            }
+            self.walk(&load(address)?, depth - 1, first..end, false, load)?;
+            next = end;
+        }
+        Some(())
     }
-    let block = geometry.block;
-    let mut runs = Vec::new();
-    let mut physical = Vec::new();
-    let mut last = 0;
-    for extent in tree[12..12 + count * 12].chunks_exact(12) {
-        let start = u64::from(u32le(extent, 0)) * block;
-        let length = u64::from(u16le(extent, 4)) * block;
-        let disk =
-            (u64::from(u32le(extent, 8)) | u64::from(u16le(extent, 6)) << 32).checked_mul(block)?;
-        let end = disk.checked_add(length)?;
-        let range = allocation.free.partition_point(|range| range.end <= disk);
-        if length == 0
-            || u16le(extent, 4) > 32768
-            || start < last
-            || start >= size
-            || start + length > size.div_ceil(block) * block
-            || end > geometry.size
-            || allocation
+
+    fn add_extent(&mut self, entry: &[u8], first: u64, limit: u64) -> Option<u64> {
+        let blocks = u64::from(u16le(entry, 4));
+        let last = first + blocks;
+        let address = u64::from(u32le(entry, 8)) | (u64::from(u16le(entry, 6)) << 32);
+        let disk = address.checked_mul(self.block)?;
+        let end = disk.checked_add(blocks * self.block)?;
+        let range = self
+            .allocation
+            .free
+            .partition_point(|range| range.end <= disk);
+        if !(1..=32768).contains(&blocks)
+            || last > limit
+            || address == 0
+            || self
+                .allocation
                 .free
                 .get(range)
                 .is_none_or(|range| disk < range.start || end > range.end)
         {
             return None;
         }
-        physical.push(disk..end);
-        last = start + length;
-        runs.push(Run {
-            logical: start..last.min(size),
+        self.physical.push(disk..end);
+        self.runs.push(Run {
+            logical: first * self.block..(last * self.block).min(self.size),
             physical: disk,
         });
+        Some(last)
     }
-    physical.sort_unstable_by_key(|range| range.start);
-    (!physical.windows(2).any(|pair| pair[0].end > pair[1].start)).then_some(runs)
+
+    fn finish(mut self) -> Option<Vec<Run>> {
+        self.physical.sort_unstable_by_key(|range| range.start);
+        if self
+            .physical
+            .windows(2)
+            .any(|pair| pair[0].end > pair[1].start)
+            || self.physical.iter().any(|range| {
+                self.nodes
+                    .range(range.start / self.block..range.end / self.block)
+                    .next()
+                    .is_some()
+            })
+        {
+            return None;
+        }
+        Some(self.runs)
+    }
 }
 
 fn names_in_block(seed: u32, bytes: &[u8]) -> Option<Vec<(u32, Vec<u8>)>> {
@@ -618,13 +838,13 @@ fn directory_id(node: &Ancestor) -> String {
     if node.proof.inode == 2 {
         ROOT.to_owned()
     } else {
-        format!("ext-journal-{}", node.proof.inode)
+        format!("ext:{}", node.proof.inode)
     }
 }
 
-fn witness_name(proof: &Witness, name: Option<&Named>) -> String {
+fn witness_name(inode: u32, generation: u32, name: Option<&Named>) -> String {
     name.map_or_else(
-        || format!("ext4-inode-{}-{:08x}", proof.inode, proof.generation),
+        || format!("ext4-inode-{inode}-{generation:08x}"),
         |name| String::from_utf8_lossy(&name.bytes).into_owned(),
     )
 }
@@ -661,74 +881,18 @@ fn reject_overlaps(proofs: &mut Vec<Witness>) {
 pub(crate) fn scan<R: Read + Seek + 'static>(
     reader: R,
     cancel: Arc<AtomicBool>,
-    mut tick: impl FnMut(u64, u64) -> Result<(), String>,
-    mut found: impl FnMut(Candidate),
-    mut directory: impl FnMut(Directory) -> Result<(), String>,
+    tick: impl FnMut(u64, u64) -> Result<(), String>,
+    found: impl FnMut(Candidate),
+    directory: impl FnMut(Directory) -> Result<(), String>,
 ) -> Result<String, String> {
-    let mut history = History::read(reader, cancel.clone(), &mut tick)?;
-    let journal = history.journal.digest();
-    let mut proofs = history.witnesses()?;
-    reject_overlaps(&mut proofs);
-    let mut names = history.names(&proofs)?;
-    let mut emitted = HashSet::new();
-    let mut budget = MAX_CONTENT;
-    let mut count = 0;
-    for proof in proofs {
-        crate::used_space::stop(&cancel)?;
-        budget = budget
-            .checked_sub(proof.size)
-            .ok_or("Ext4 候选内容达到 1 GiB 摘要检查上限。")?;
-        let (content, _) = history.content(&proof, std::io::sink(), 0, &mut |_| {
-            crate::used_space::stop(&cancel)
-        })?;
-        let named = names.remove(&proof.inode);
-        let parent = named.as_ref().map(|witness| directory_id(&witness.parent));
-        if let Some(witness) = &named {
-            let mut chain = Vec::new();
-            let mut next = Some(witness.parent.as_ref());
-            while let Some(ancestor) = next {
-                if ancestor.proof.inode == 2 || !emitted.insert(ancestor.proof.inode) {
-                    break;
-                }
-                chain.push(ancestor);
-                next = ancestor.parent.as_deref();
-            }
-            for node in chain.into_iter().rev() {
-                let mut metadata = crate::file_metadata::Metadata::default();
-                metadata.directory_proof =
-                    Some(crate::directory_metadata::Proof::Ext(DirectoryLocation {
-                        filesystem: history.session.geometry.fingerprint,
-                        node: Arc::new(node.clone()),
-                    }));
-                directory(Directory {
-                    id: directory_id(node),
-                    parent: node.parent.as_ref().map(|parent| directory_id(parent)),
-                    name: String::from_utf8_lossy(
-                        node.proof.path.rsplit(|b| *b == b'/').next().unwrap(),
-                    )
-                    .into_owned(),
-                    deleted: false,
-                    metadata,
-                })?;
-            }
-        }
-        count += 1;
-        found(Candidate {
-            id: count,
-            name: witness_name(&proof, named.as_ref()),
-            size: proof.size,
-            deleted: true,
-            method: "Ext4 日志".into(),
-            note: "已核对删除前的 inode、删除记录和当前空闲块。当前读取的字节仍可能受覆盖或 TRIM 影响。".into(),
-            supported: true,
-            directory: parent.clone(),
-            directory_note: if parent.is_some() { "目录由已提交的日志记录确认" } else { "日志中缺少可核对的原始文件名" }.into(),
-            metadata: crate::file_metadata::ext(&proof.old, true),
-            locator: Locator::ExtDeleted(history.location(&proof, journal, named.as_ref(), content)),
-        });
-    }
-    tick(history.journal.bytes(), history.journal.bytes())?;
-    Ok(format!("Ext4 日志删除候选（{count}）。"))
+    continue_scan(
+        reader,
+        &mut Checkpoint::default(),
+        cancel,
+        tick,
+        found,
+        directory,
+    )
 }
 
 pub(crate) fn extract<R: Read + Seek + 'static, W: Write>(
@@ -764,7 +928,7 @@ pub(crate) fn extract<R: Read + Seek + 'static, W: Write>(
         crate::used_space::stop(&cancel)
     })?;
     if candidate.size != proof.size
-        || candidate.name != witness_name(&proof, named.as_ref())
+        || candidate.name != witness_name(proof.inode, proof.generation, named.as_ref())
         || candidate.directory != named.as_ref().map(|name| directory_id(&name.parent))
         || history.location(&proof, digest, named.as_ref(), content) != *location
     {
@@ -787,13 +951,24 @@ mod tests {
     use std::io::Cursor;
 
     fn fixture() -> Vec<u8> {
+        decode_fixture(include_bytes!(
+            "../../tests/fixtures/ext-journal-linux.raw.gz"
+        ))
+    }
+
+    fn tree_fixture() -> Arc<[u8]> {
+        decode_fixture(include_bytes!(
+            "../../tests/fixtures/ext-journal-tree-linux.raw.gz"
+        ))
+        .into()
+    }
+
+    fn decode_fixture(compressed: &[u8]) -> Vec<u8> {
         let mut raw = Vec::new();
-        flate2::read::GzDecoder::new(
-            include_bytes!("../../tests/fixtures/ext-journal-linux.raw.gz").as_slice(),
-        )
-        .take(32 * 1024 * 1024 + 1)
-        .read_to_end(&mut raw)
-        .unwrap();
+        flate2::read::GzDecoder::new(compressed)
+            .take(32 * 1024 * 1024 + 1)
+            .read_to_end(&mut raw)
+            .unwrap();
         assert_eq!(raw.len(), 32 * 1024 * 1024);
         raw
     }
@@ -925,5 +1100,81 @@ mod tests {
             assert_eq!(output.len() as u64, size);
             assert_eq!(format!("{:x}", Sha256::digest(output)), digest);
         }
+    }
+
+    #[test]
+    fn linux_ext4_journal_recovers_two_level_extent_tree_and_sparse_content() {
+        let raw = tree_fixture();
+        let (files, tree) = scan_fixture(raw.clone());
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["removed.txt", "fragment.bin", "extent-tree.bin"]
+        );
+        let candidate = &files[2];
+        assert_eq!(candidate.size, 12_583_631);
+        assert_eq!(candidate.directory, files[1].directory);
+        assert!(tree.snapshot().iter().any(|node| node.name == "nested"));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut output = Vec::new();
+        crate::recovery::extract_owned(
+            Cursor::new(raw),
+            candidate,
+            &mut output,
+            candidate.size,
+            cancel,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(output.len() as u64, candidate.size);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(output)),
+            "a9f32b65f4b5eb0ffe4fcef16546926f76b7cc384e667e09f5846708102ab497"
+        );
+    }
+
+    #[test]
+    fn linux_ext4_journal_rejects_missing_and_revoked_extent_nodes() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut history =
+            History::read(Cursor::new(tree_fixture()), cancel.clone(), &mut |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        let proof = history
+            .witnesses()
+            .unwrap()
+            .into_iter()
+            .find(|proof| proof.runs.len() == 1537)
+            .unwrap();
+        let root = &proof.old[0x28..0x64];
+        assert_eq!(u16le(root, 6), 2);
+        let child = u64::from(u32le(root, 16)) | (u64::from(u16le(root, 20)) << 32);
+        let mut versions = BlockVersions::new(&history.transactions, &cancel).unwrap();
+        assert!(versions.before(child, proof.deleted).is_some());
+        let old = &mut versions.0.get_mut(&child).unwrap();
+        let end = old.partition_point(|version| version.transaction < proof.deleted);
+        old[end - 1].revoked_at = Some(proof.deleted - 1);
+        assert!(history
+            .deleted_extents(
+                &versions,
+                proof.inode,
+                &proof.old,
+                proof.size,
+                proof.deleted
+            )
+            .is_none());
+        versions.0.remove(&child);
+        assert!(history
+            .deleted_extents(
+                &versions,
+                proof.inode,
+                &proof.old,
+                proof.size,
+                proof.deleted
+            )
+            .is_none());
     }
 }

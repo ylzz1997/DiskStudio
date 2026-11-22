@@ -77,7 +77,7 @@ test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () 
 });
 test('clone and restore fixtures use independent NVMe images and start paused', () => {
   assert.throws(() => buildArgs({ fourKn: true, fixture: '../other' }), /separate 4Kn/);
-  for (const fixture of ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'table-mbr', 'storage-spaces']) {
+  for (const fixture of ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'table-mbr', 'storage-spaces']) {
     assert.throws(() => buildArgs({ fixture }), /separate 4Kn/);
     assert.throws(() => buildArgs({ fourKn: true, fixture, sectorFault: true }), /separate 4Kn/);
     const args = buildArgs({ fourKn: true, fixture });

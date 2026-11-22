@@ -165,7 +165,7 @@ impl Checkpoint {
         }
         Ok(result)
     }
-    fn tree(&self) -> Result<Catalog, String> {
+    pub(crate) fn tree(&self) -> Result<Catalog, String> {
         let mut tree = Catalog::default();
         let parents = self.ancestors()?;
         for (i, node) in self.nodes.iter().enumerate().skip(1) {

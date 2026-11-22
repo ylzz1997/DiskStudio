@@ -5,7 +5,7 @@ import { formatSize } from "./types";
 export type RecoveryProgress = {
   id: string;
   source: { target: string; layoutKey: string; partition: number | null };
-  engine: "signatures" | "ntfs" | "fat" | "exfat" | "ext";
+  engine: "signatures" | "ntfs" | "fat" | "exfat" | "ext" | "extJournal";
   mode: "deleted" | "allFiles" | "existing" | "signatures";
   combined?: boolean;
   options: {
@@ -59,6 +59,11 @@ export function progressAmount(
     return `${formatSize(p.done)} / ${formatSize(p.total)}`;
   const done = p.done.toLocaleString(language);
   const total = p.total.toLocaleString(language);
+  if (p.engine === "extJournal") {
+    return translate(language, "{count} 个候选", {
+      count: p.total === 0 ? done : `${done} / ${total}`,
+    });
+  }
   if (p.engine === "fat" || p.engine === "exfat" || p.engine === "ext") {
     return p.total === 0
       ? translate(language, "已检查 {count} 条目录记录", { count: done })

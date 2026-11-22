@@ -471,5 +471,22 @@
   "完整恢复的目录进度无效。": "The saved filesystem stage is invalid.",
   "目录阶段使用了无效的扫描引擎。": "The filesystem stage uses an invalid scan engine.",
   "无法确认文件系统，完整恢复的空闲簇范围不可用。": "The filesystem could not be verified, so a free-cluster scan is unavailable.",
-  "完整恢复的目录阶段未结束。": "The filesystem stage has not finished."
+  "完整恢复的目录阶段未结束。": "The filesystem stage has not finished.",
+  "Ext4 日志删除候选（{count}）。": "Ext4 journal scan found {count} deleted candidates.",
+  "Ext4 日志进度必须绑定分区。": "Ext4 journal progress must refer to a partition.",
+  "Ext4 日志进度的原始名称或目录无效。": "The saved Ext4 journal name or directory is invalid.",
+  "Ext4 日志进度的候选记录无效。": "The saved Ext4 journal candidate is invalid.",
+  "Ext4 日志进度的名称摘要不一致。": "The saved Ext4 journal name digest does not match.",
+  "Ext4 日志空进度包含候选或结束标记。": "Empty Ext4 journal progress contains candidates or a completion marker.",
+  "Ext4 日志进度计数或结束标记无效。": "The Ext4 journal progress count or completion marker is invalid.",
+  "Ext4 日志进度包含重复 inode 或数据范围过大。": "Ext4 journal progress contains repeated inodes or exceeds the data limit.",
+  "Ext4 日志进度与候选或目录不一致。": "The saved Ext4 journal progress does not match the candidates or directories.",
+  "Ext4 日志、分配或已扫描的删除凭据已改变，请重新扫描。": "Ext4 journal, allocation, or previously scanned deletion evidence changed. Start a new scan.",
+  "Ext4 日志扫描已结束。": "The Ext4 journal scan is already complete.",
+  "Ext4 日志扫描": "Ext4 journal scan",
+  "文件系统扫描": "Filesystem scan",
+  "恢复扫描已暂停，可保存进度或继续。未完成的数据块或文件记录将在续扫时重新检查。": "The recovery scan is paused. Save the progress or resume. The scan checks any unfinished data block or file record again.",
+  "完整恢复的 Ext4 日志阶段无效。": "The Ext4 journal stage of this complete recovery is invalid.",
+  "完整恢复的 Ext4 日志进度与候选或目录不一致。": "The complete recovery's Ext4 journal progress does not match the candidates or directories.",
+  "Ext4 的内部 JBD2 v3 日志通过核对时，也查找删除记录。": "When an internal Ext4 JBD2 v3 journal passes validation, the scan also checks deleted file records."
 }

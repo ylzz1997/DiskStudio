@@ -111,6 +111,16 @@ impl Catalog {
         self.nodes.insert(node.id.clone(), node);
         Ok(())
     }
+    pub(crate) fn insert_ext_journal(&mut self, node: Directory) -> Result<(), String> {
+        // The directory scan may already have proved this same Ext inode and
+        // captured its timestamps. The journal adds file evidence to it.
+        if self.nodes.get(&node.id).is_some_and(|existing| {
+            existing == &node && existing.metadata.directory_proof.is_some()
+        }) {
+            return Ok(());
+        }
+        self.insert(node)
+    }
     pub fn path(&self, id: &str) -> Result<Vec<Directory>, String> {
         let mut at = Some(id);
         let mut path = Vec::new();

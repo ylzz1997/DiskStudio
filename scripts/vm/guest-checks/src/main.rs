@@ -695,6 +695,11 @@ fn main() {
                 | "Signature-Documents-4Kn-Verify"
                 | "Ext-Journal-4Kn-Prepare"
                 | "Ext-Journal-4Kn-Verify"
+                | "Ext-Journal-Tree-4Kn-Prepare"
+                | "Ext-Journal-Tree-4Kn-Verify"
+                | "Ext-Journal-Resume-4Kn-Verify"
+                | "Ext-Complete-4Kn-Prepare"
+                | "Ext-Complete-4Kn-Verify"
                 | "Table-MBR-4Kn-Prepare"
                 | "Table-MBR-4Kn-Verify"
                 | "Table-MBR-4Kn-Record"
@@ -886,8 +891,13 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Signature-Audio-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Audio),
         Some("Signature-Documents-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Documents),
         Some("Signature-Documents-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Documents),
-        Some("Ext-Journal-4Kn-Prepare") => signature_scope_checks::prepare_ext_journal(),
-        Some("Ext-Journal-4Kn-Verify") => signature_scope_checks::verify_ext_journal(),
+        Some("Ext-Journal-4Kn-Prepare") => signature_scope_checks::prepare_ext_journal(false),
+        Some("Ext-Journal-4Kn-Verify") => signature_scope_checks::verify_ext_journal(false),
+        Some("Ext-Journal-Tree-4Kn-Prepare") => signature_scope_checks::prepare_ext_journal(true),
+        Some("Ext-Journal-Tree-4Kn-Verify") => signature_scope_checks::verify_ext_journal(true),
+        Some("Ext-Journal-Resume-4Kn-Verify") => signature_scope_checks::verify_ext_journal_resume(),
+        Some("Ext-Complete-4Kn-Prepare") => signature_scope_checks::prepare_ext_complete(),
+        Some("Ext-Complete-4Kn-Verify") => signature_scope_checks::verify_ext_complete(),
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
         Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
         Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),

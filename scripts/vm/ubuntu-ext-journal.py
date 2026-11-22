@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import tempfile
 MIB = 1024 * 1024
 SECTOR = 4096
 VM_UUID = '25c39913-ac45-4445-aa54-bdd0dbca7001'
+TREE_FIXTURE = sys.argv[1:] == ['ext-journal-tree-image']
 
 
 def output(*args):
@@ -22,7 +24,7 @@ def output(*args):
 
 
 def check_vm():
-    assert sys.argv[1:] == ['ext-journal-image']
+    assert TREE_FIXTURE or sys.argv[1:] == ['ext-journal-image']
     assert pathlib.Path('/sys/class/dmi/id/product_uuid').read_text().strip().lower() == VM_UUID
     tree = json.loads(output('lsblk', '-J', '-b', '-o', 'NAME,TYPE,PATH,SIZE,SERIAL'))['blockdevices']
     disks = [entry for entry in tree if entry['type'] == 'disk']
@@ -81,14 +83,42 @@ def fixture(temp):
                 os.fsync(stream.fileno())
             sync()
             print(output('filefrag', '-v', str(sparse)), flush=True)
-            removed = {str(file.relative_to(mount)): witness(file) for file in (text, sparse)}
+            files = [text, sparse]
+            tree = None
+            if TREE_FIXTURE:
+                deep = nested / 'extent-tree.bin'
+                extent_count = 1537
+                with deep.open('xb', buffering=0) as stream:
+                    for index in range(extent_count):
+                        stream.seek(2 * index * SECTOR)
+                        marker = index.to_bytes(4, 'little')
+                        chunk = marker * (SECTOR // len(marker))
+                        stream.write(chunk if index + 1 < extent_count else chunk[:719])
+                    os.fsync(stream.fileno())
+                sync()
+                ref = f'<{deep.stat().st_ino}>'
+                dump = output('debugfs', '-R', f'dump_extents {ref}', loop)
+                structure = dump.splitlines()[:8]
+                print('\n'.join(structure), flush=True)
+                depth = re.search(r'^\s*0/\s*(\d+)', dump, re.MULTILINE)
+                assert depth and int(depth[1]) >= 2
+                leaves = re.findall(
+                    rf'^ *{depth[1]}/ *{depth[1]} +\d+/ *\d+ +(\d+) +- *(\d+) +\d+ +- *\d+ +(\d+) *$',
+                    dump, re.MULTILINE,
+                )
+                expected = [(str(2 * i), str(2 * i), '1') for i in range(extent_count)]
+                assert leaves == expected, f'Unexpected initialized extent layout ({len(leaves)} leaf records)'
+                print(f'{len(leaves)} initialized extents at depth {depth[1]}', flush=True)
+                tree = {'depth': int(depth[1]), 'extentCount': len(leaves)}
+                files.append(deep)
+            removed = {str(file.relative_to(mount)): witness(file) for file in files}
             sync()
-            text.unlink()
-            sparse.unlink()
+            for file in files:
+                file.unlink()
             live = mount / 'retained.txt'
             kept.rename(live)
             sync()
-            assert not text.exists() and not sparse.exists()
+            assert all(not file.exists() for file in files)
             retained = witness(live)
         finally:
             subprocess.run(['umount', str(mount)], check=True)
@@ -107,7 +137,7 @@ def fixture(temp):
     print('DS_EXT_JOURNAL_MANIFEST ' + json.dumps({
         'imageBytes': image.stat().st_size, 'imageSha256': image_hash,
         'gzipBytes': len(archive), 'gzipSha256': hashlib.sha256(archive).hexdigest(),
-        'removed': removed, 'retained': retained,
+        'removed': removed, 'retained': retained, **({'extentTree': tree} if tree else {}),
     }, separators=(',', ':')), flush=True)
     for index, offset in enumerate(range(0, len(archive), 576)):
         block = base64.b64encode(archive[offset:offset + 576]).decode('ascii')

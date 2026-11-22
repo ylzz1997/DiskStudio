@@ -1042,7 +1042,8 @@ export function DataTools({
                   <div className="data-action-row">
                     {mode !== "reconstruct" && <span>
                       {mode === "complete"
-                        ? t("完整恢复适用于未加密分区。目录阶段支持 NTFS、FAT、exFAT 和干净卸载的 Ext2/3/4。类型和范围设置用于签名阶段。")
+                        ? t("完整恢复适用于未加密分区。目录阶段支持 NTFS、FAT、exFAT 和干净卸载的 Ext2/3/4。类型和范围设置用于签名阶段。") +
+                          " " + catalogText("Ext4 的内部 JBD2 v3 日志通过核对时，也查找删除记录。")
                         : mode === "signatures"
                         ? t(
                             "BMP 限未压缩格式，WAV 限 RIFF/WAVE。每个连续候选最多 256 MiB。",
@@ -1625,10 +1626,15 @@ export function DataTools({
               · {progressMode(recoveryProgress, language)}
             </strong>
             <p>
-              {progressAmount(recoveryProgress, language)} ·{" "}
-              {t("{count} 个候选", {
-                count: recoveryProgress.found.toLocaleString(language),
-              })}
+              {progressAmount(recoveryProgress, language)}
+              {recoveryProgress.engine !== "extJournal" && (
+                <>
+                  {" · "}
+                  {t("{count} 个候选", {
+                    count: recoveryProgress.found.toLocaleString(language),
+                  })}
+                </>
+              )}
             </p>
             <small>
               {t(

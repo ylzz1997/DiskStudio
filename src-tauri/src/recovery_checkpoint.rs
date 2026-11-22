@@ -1,7 +1,7 @@
 //! Versioned recovery progress; v1 signature files remain readable.
 use crate::{
     data_tasks::Selection,
-    ext_recovery::scan_progress as ext_scan,
+    ext_recovery::{deleted as ext_deleted, scan_progress as ext_scan},
     fat_recovery::scan_progress as fat_scan,
     ntfs_checkpoint, ntfs_scan,
     recovery::{Candidate, ScanMode},
@@ -31,8 +31,13 @@ pub enum Cursor {
         mode: ScanMode,
         cursor: ext_scan::Checkpoint,
     },
+    ExtJournal {
+        cursor: ext_deleted::Checkpoint,
+    },
     Combined {
         metadata: Option<Box<Cursor>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        journal: Option<ext_deleted::Checkpoint>,
         #[serde(rename = "signaturePhase")]
         signature_phase: bool,
         options: signature_scan::Options,
@@ -41,6 +46,29 @@ pub enum Cursor {
     },
 }
 impl Cursor {
+    pub fn requires_journal_lock(&self) -> bool {
+        matches!(
+            self,
+            Self::ExtJournal { .. }
+                | Self::Combined {
+                    journal: Some(_),
+                    ..
+                }
+        )
+    }
+
+    fn active_journal(&self) -> Option<&ext_deleted::Checkpoint> {
+        match self {
+            Self::Combined {
+                metadata: Some(metadata),
+                journal: Some(journal),
+                signature_phase: false,
+                ..
+            } if metadata.sealed() => Some(journal),
+            _ => None,
+        }
+    }
+
     pub fn validate(&self, size: u64) -> Result<(), String> {
         match self {
             Self::Signatures { options, cursor } => {
@@ -50,8 +78,10 @@ impl Cursor {
             Self::Ntfs { mode, cursor } => cursor.validate(*mode),
             Self::Fat { mode, cursor } => cursor.validate(*mode, size),
             Self::Ext { mode, cursor } => cursor.validate(*mode, size),
+            Self::ExtJournal { cursor } => cursor.validate(),
             Self::Combined {
                 metadata,
+                journal,
                 signature_phase,
                 options,
                 signature_cursor,
@@ -79,6 +109,15 @@ impl Cursor {
                 } else if options.free_only {
                     return Err("无法确认文件系统，完整恢复的空闲簇范围不可用。".into());
                 }
+                if let Some(journal) = journal {
+                    if !matches!(metadata.as_deref(), Some(Self::Ext { .. }))
+                        || (journal.started() && !metadata.as_deref().is_some_and(Self::sealed))
+                        || (*signature_phase && !journal.sealed)
+                    {
+                        return Err("完整恢复的 Ext4 日志阶段无效。".into());
+                    }
+                    journal.validate()?;
+                }
                 if !signature_phase && *signature_cursor != signature_scan::Checkpoint::default() {
                     return Err("签名阶段在目录阶段结束前已有进度。".into());
                 }
@@ -93,15 +132,20 @@ impl Cursor {
             Self::Ntfs { mode, .. } => *mode,
             Self::Fat { mode, .. } => *mode,
             Self::Ext { mode, .. } => *mode,
+            Self::ExtJournal { .. } => ScanMode::Deleted,
             Self::Combined { .. } => ScanMode::AllFiles,
         }
     }
     pub fn kind(&self) -> &'static str {
+        if self.active_journal().is_some() {
+            return "extJournal";
+        }
         match self {
             Self::Signatures { .. } => "signatures",
             Self::Ntfs { .. } => "ntfs",
             Self::Fat { cursor, .. } => cursor.kind(),
             Self::Ext { .. } => "ext",
+            Self::ExtJournal { .. } => "extJournal",
             Self::Combined {
                 metadata: Some(metadata),
                 signature_phase: false,
@@ -119,11 +163,15 @@ impl Cursor {
         }
     }
     pub fn done(&self) -> u64 {
+        if let Some(journal) = self.active_journal() {
+            return journal.count() as u64;
+        }
         match self {
             Self::Signatures { cursor, .. } => cursor.consumed,
             Self::Ntfs { cursor, .. } => cursor.next,
             Self::Fat { cursor, .. } => cursor.records,
             Self::Ext { cursor, .. } => cursor.entries,
+            Self::ExtJournal { cursor } => cursor.count() as u64,
             Self::Combined {
                 metadata: Some(metadata),
                 signature_phase: false,
@@ -135,6 +183,9 @@ impl Cursor {
         }
     }
     pub fn total(&self, size: u64) -> Result<u64, String> {
+        if let Some(journal) = self.active_journal() {
+            return Ok(journal.total as u64);
+        }
         match self {
             Self::Signatures { options, .. } => {
                 let r = options.range(size)?;
@@ -143,6 +194,7 @@ impl Cursor {
             Self::Ntfs { cursor, .. } => Ok(cursor.total),
             Self::Fat { cursor, .. } => Ok(if cursor.sealed { cursor.records } else { 0 }),
             Self::Ext { cursor, .. } => Ok(if cursor.sealed { cursor.entries } else { 0 }),
+            Self::ExtJournal { cursor } => Ok(cursor.total as u64),
             Self::Combined {
                 metadata: Some(metadata),
                 signature_phase: false,
@@ -160,6 +212,7 @@ impl Cursor {
             Self::Ntfs { cursor, .. } => cursor.sealed,
             Self::Fat { cursor, .. } => cursor.sealed,
             Self::Ext { cursor, .. } => cursor.sealed,
+            Self::ExtJournal { cursor } => cursor.sealed,
             Self::Combined {
                 signature_phase,
                 signature_cursor,
@@ -173,11 +226,17 @@ impl Cursor {
             Self::Ntfs { cursor, .. } => cursor.count,
             Self::Fat { cursor, .. } => cursor.count,
             Self::Ext { cursor, .. } => cursor.count,
+            Self::ExtJournal { cursor } => cursor.count(),
             Self::Combined {
                 metadata,
+                journal,
                 signature_cursor,
                 ..
-            } => metadata.as_deref().map_or(0, Self::count) + signature_cursor.count as usize,
+            } => {
+                metadata.as_deref().map_or(0, Self::count)
+                    + journal.as_ref().map_or(0, ext_deleted::Checkpoint::count)
+                    + signature_cursor.count as usize
+            }
         }
     }
     pub fn verify(&self, reader: &mut (impl Read + Seek), size: u64) -> Result<(), String> {
@@ -189,7 +248,9 @@ impl Cursor {
             }
             Self::Ntfs { mode, cursor } => cursor.verify(reader, *mode),
             Self::Fat { mode, cursor } => cursor.verify(reader, *mode, size),
-            Self::Ext { .. } => Err("Ext 校验必须使用已绑定的 owned reader".into()),
+            Self::Ext { .. } | Self::ExtJournal { .. } => {
+                Err("Ext 校验必须使用已绑定的 owned reader".into())
+            }
             Self::Combined { metadata, .. } => {
                 if let Some(metadata) = metadata {
                     metadata.verify(reader, size)?;
@@ -205,7 +266,10 @@ impl Cursor {
     ) -> Result<(), String> {
         match self {
             Self::Ext { mode, cursor } => cursor.verify(reader, *mode, size),
-            Self::Combined { metadata, .. } => {
+            Self::ExtJournal { cursor } => cursor.verify(reader),
+            Self::Combined {
+                metadata, journal, ..
+            } => {
                 let mut reader = ext_scan::SharedReader::new(reader);
                 match metadata.as_deref() {
                     Some(Self::Ext { mode, cursor }) => {
@@ -213,6 +277,9 @@ impl Cursor {
                     }
                     Some(metadata) => metadata.verify(&mut reader, size)?,
                     None => {}
+                }
+                if let Some(journal) = journal {
+                    journal.verify(reader.clone())?;
                 }
                 self.verify_combined_signature(&mut reader, size)
             }
@@ -263,6 +330,7 @@ pub enum Records {
     Ext {
         files: Vec<ext_scan::Record>,
     },
+    ExtJournal {},
     Combined {
         metadata: Option<Box<Records>>,
         signatures: Vec<signature_scan::StoredCandidate>,
@@ -292,7 +360,21 @@ impl Progress {
             cursor,
             records,
         };
-        p.validate(&p.source)?;
+        let (restored, restored_catalog) = p.validate(&p.source)?;
+        if let Cursor::Combined {
+            metadata,
+            journal: Some(journal),
+            ..
+        } = &p.cursor
+        {
+            let start = metadata.as_deref().map_or(0, Cursor::count);
+            let deleted = start..start + journal.count();
+            if restored_catalog.snapshot() != tree.snapshot()
+                || !ext_deleted::same_results(&files[deleted.clone()], &restored[deleted])
+            {
+                return Err("完整恢复的 Ext4 日志进度与候选或目录不一致。".into());
+            }
+        }
         Ok(p)
     }
 
@@ -321,19 +403,33 @@ impl Progress {
             Cursor::Ext { cursor, .. } => Records::Ext {
                 files: ext_scan::capture(cursor, files, tree)?,
             },
-            Cursor::Combined { metadata, .. } => {
-                let count = metadata.as_deref().map_or(0, Cursor::count);
+            Cursor::ExtJournal { cursor } => {
+                cursor.matches(files, tree)?;
+                Records::ExtJournal {}
+            }
+            Cursor::Combined {
+                metadata, journal, ..
+            } => {
+                let directory_count = metadata.as_deref().map_or(0, Cursor::count);
+                let count =
+                    directory_count + journal.as_ref().map_or(0, ext_deleted::Checkpoint::count);
                 if files.len() != cursor.count() {
                     return Err("完整恢复进度与候选数量不一致。".into());
                 }
-                let (directory_files, signature_files) = files.split_at(count);
+                let directory_files = &files[..directory_count];
                 let metadata = metadata
                     .as_ref()
                     .map(|engine| {
+                        if let (Some(_), Cursor::Ext { cursor, .. }) = (journal, engine.as_ref()) {
+                            // Capture the directory stage against its own
+                            // tree; the complete tree is checked after restore.
+                            return ext_scan::capture(cursor, directory_files, &cursor.tree()?)
+                                .map(|files| Box::new(Records::Ext { files }));
+                        }
                         Self::capture_records(engine, directory_files, tree).map(Box::new)
                     })
                     .transpose()?;
-                let signatures = signature_files
+                let signatures = files[count..]
                     .iter()
                     .enumerate()
                     .map(|(id, candidate)| {
@@ -409,9 +505,16 @@ impl Progress {
                 }
                 ext_scan::restore(cursor, *mode, self.binding.size, files)
             }
+            (Cursor::ExtJournal { cursor }, Records::ExtJournal {}) => {
+                if self.source.partition.is_none() {
+                    return Err("Ext4 日志进度必须绑定分区。".into());
+                }
+                cursor.restore()
+            }
             (
                 Cursor::Combined {
                     metadata,
+                    journal,
                     options,
                     signature_cursor,
                     ..
@@ -429,6 +532,10 @@ impl Progress {
                     (None, None) => (Vec::new(), Catalog::default()),
                     _ => return Err("完整恢复的目录进度与候选不一致。".into()),
                 };
+                if let Some(journal) = journal {
+                    let first_deleted = files.len() as u32;
+                    journal.restore_into(&mut files, &mut tree, first_deleted)?;
+                }
                 let signatures = signature_checkpoint::Progress {
                     source: self.source.clone(),
                     binding: self.binding.clone(),
@@ -466,8 +573,11 @@ impl Progress {
             (Cursor::Ext { mode, cursor }, Records::Ext { files }) => {
                 cursor.verify_records(reader, *mode, size, Some(files))
             }
+            (Cursor::ExtJournal { cursor }, Records::ExtJournal {}) => cursor.verify(reader),
             (
-                Cursor::Combined { metadata, .. },
+                Cursor::Combined {
+                    metadata, journal, ..
+                },
                 Records::Combined {
                     metadata: records, ..
                 },
@@ -486,6 +596,9 @@ impl Progress {
                     (None, None) => {}
                     _ => return Err("完整恢复的目录进度无效。".into()),
                 }
+                if let Some(journal) = journal {
+                    journal.verify(reader.clone())?;
+                }
                 self.cursor.verify_combined_signature(&mut reader, size)
             }
             _ => self.verify_cursor(&mut reader, size),
@@ -503,16 +616,22 @@ struct Envelope {
 fn hash(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
+fn version(cursor: &Cursor) -> u32 {
+    match cursor {
+        Cursor::ExtJournal { .. } => 4,
+        Cursor::Combined {
+            journal: Some(_), ..
+        } => 5,
+        Cursor::Combined { .. } => 3,
+        _ => 2,
+    }
+}
 pub fn encode(progress: Progress) -> Result<Vec<u8>, String> {
     progress.validate(&progress.source)?;
     let digest = hash(&serde_json::to_vec(&progress).map_err(|e| e.to_string())?);
     let bytes = serde_json::to_vec(&Envelope {
         format: "DiskStudio recovery progress".into(),
-        version: if matches!(progress.cursor, Cursor::Combined { .. }) {
-            3
-        } else {
-            2
-        },
+        version: version(&progress.cursor),
         sha256: digest,
         progress,
     })
@@ -545,12 +664,7 @@ pub fn decode(bytes: &[u8], selected: &Selection) -> Result<Progress, String> {
         });
     }
     let e: Envelope = serde_json::from_slice(bytes).map_err(|_| "恢复进度文件格式无效")?;
-    let expected = if matches!(e.progress.cursor, Cursor::Combined { .. }) {
-        3
-    } else {
-        2
-    };
-    if e.version != expected
+    if e.version != version(&e.progress.cursor)
         || e.format != "DiskStudio recovery progress"
         || e.sha256 != hash(&serde_json::to_vec(&e.progress).map_err(|e| e.to_string())?)
     {
@@ -609,6 +723,273 @@ mod tests {
         v
     }
 
+    fn ext_tree_image() -> Vec<u8> {
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../../tests/fixtures/ext-journal-tree-linux.raw.gz")[..],
+        )
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut raw)
+        .unwrap();
+        assert_eq!(raw.len(), 32 * 1024 * 1024);
+        raw
+    }
+
+    #[test]
+    fn ext_journal_progress_round_trips_before_the_last_candidate() {
+        use std::sync::{atomic::AtomicBool, Arc};
+
+        let raw = ext_tree_image();
+        let size = raw.len() as u64;
+        let raw: Arc<[u8]> = raw.into();
+        let reader = || Reader::new(raw.clone());
+        let mut checkpoint = ext_deleted::Checkpoint::default();
+        let mut files = Vec::new();
+        let mut catalog = Catalog::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = ext_deleted::continue_scan(
+            reader(),
+            &mut checkpoint,
+            cancel.clone(),
+            |done, _| {
+                if done == 2 {
+                    Err("pause".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |file| files.push(file),
+            |dir| catalog.insert(dir),
+        );
+        assert_eq!(paused.unwrap_err(), "pause");
+        assert_eq!(checkpoint.count(), 2);
+        assert!(!checkpoint.sealed);
+        let progress = Progress::capture(
+            source(),
+            Binding::capture(&mut reader(), size, 32 * 1024 * 1024, 4096).unwrap(),
+            Cursor::ExtJournal { cursor: checkpoint },
+            &files,
+            &catalog,
+        )
+        .unwrap();
+        let encoded = encode(progress).unwrap();
+        let decoded = decode(&encoded, &source()).unwrap();
+        assert_eq!(version(&decoded.cursor), 4);
+        decoded.verify_owned(reader(), size).unwrap();
+        let (mut restored, mut tree) = decoded.validate(&source()).unwrap();
+        assert_eq!(normal(&files), normal(&restored));
+        assert_eq!(tree.snapshot(), catalog.snapshot());
+        let Cursor::ExtJournal {
+            cursor: mut checkpoint,
+        } = decoded.cursor
+        else {
+            panic!()
+        };
+        ext_deleted::continue_scan(
+            reader(),
+            &mut checkpoint,
+            cancel,
+            |_, _| Ok(()),
+            |file| restored.push(file),
+            |dir| tree.insert(dir),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["removed.txt", "fragment.bin", "extent-tree.bin"]
+        );
+        assert!(checkpoint.sealed);
+        assert_eq!(
+            restored.iter().map(|file| file.id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(restored[1].directory, restored[2].directory);
+        assert_eq!(restored[2].size, 12_583_631);
+        let mut changed = raw.to_vec();
+        // The bytes after the 1024-byte JBD2 superblock are outside that
+        // structure's CRC but still belong to the saved journal digest.
+        let journal = changed
+            .chunks_exact(4096)
+            .position(|block| block[..8] == [0xc0, 0x3b, 0x39, 0x98, 0, 0, 0, 4])
+            .unwrap();
+        changed[journal * 4096 + 2048] ^= 1;
+        assert!(checkpoint
+            .verify(Reader::new(changed))
+            .unwrap_err()
+            .contains("删除凭据已改变"));
+    }
+
+    #[test]
+    fn complete_ext4_progress_resumes_journal_then_scans_verified_free_space() {
+        use crate::data_tasks::recovery_tasks::scan_combined_metadata;
+        use std::sync::{atomic::AtomicBool, Arc};
+
+        let mut image = ext_tree_image();
+        let size = image.len() as u64;
+        let mut incompatible = image.clone();
+        let control = incompatible
+            .chunks_exact(4096)
+            .position(|block| block[..8] == [0xc0, 0x3b, 0x39, 0x98, 0, 0, 0, 4])
+            .unwrap();
+        incompatible[control * 4096 + 0xfc] ^= 1;
+        assert!(!ext_deleted::supports(
+            Reader::new(incompatible),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap());
+        let last_block = image.len() - 4096;
+        let sample = include_bytes!("../../tests/fixtures/ext-complete-sample.pdf");
+        assert!(image[last_block..].iter().all(|&byte| byte == 0));
+        image[last_block..last_block + sample.len()].copy_from_slice(sample);
+        let source_bytes: Arc<[u8]> = image.into();
+        let mut reader = ext_scan::SharedReader::new(Reader::new(source_bytes));
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(ext_deleted::may_probe(&mut reader).unwrap());
+        assert!(ext_deleted::supports(reader.clone(), cancel.clone()).unwrap());
+        let binding = Binding::capture(&mut reader, size, 32 * 1024 * 1024, 4096).unwrap();
+        let mut metadata = Cursor::Ext {
+            mode: ScanMode::AllFiles,
+            cursor: Default::default(),
+        };
+        let mut journal = ext_deleted::Checkpoint::default();
+        let options = signature_scan::Options {
+            kinds: vec![signature_scan::Kind::Pdf],
+            start: last_block as u64,
+            length: Some(4096),
+            sector_aligned: true,
+            free_only: true,
+        };
+        let mut found = Vec::new();
+        let mut tree = Catalog::default();
+        let paused = scan_combined_metadata(
+            &mut reader,
+            size,
+            &mut metadata,
+            Some(&mut journal),
+            &cancel,
+            |phase, done, _| {
+                if phase == "Ext4 日志扫描" && done == 2 {
+                    Err("pause".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |file| found.push(file),
+            |node, _| tree.insert_ext_journal(node),
+        );
+        assert_eq!(paused.unwrap_err(), "pause");
+        assert!(metadata.sealed());
+        assert_eq!(metadata.count(), 1);
+        assert_eq!(journal.count(), 2);
+        for signature_phase in [true, false] {
+            let attempt = Cursor::Combined {
+                metadata: Some(Box::new(metadata.clone())),
+                journal: Some(journal.clone()),
+                signature_phase,
+                options: options.clone(),
+                signature_cursor: Default::default(),
+            };
+            assert_eq!(attempt.validate(size).is_ok(), !signature_phase);
+        }
+        let progress = Progress::capture(
+            source(),
+            binding.clone(),
+            Cursor::Combined {
+                metadata: Some(Box::new(metadata)),
+                journal: Some(journal),
+                signature_phase: false,
+                options: options.clone(),
+                signature_cursor: Default::default(),
+            },
+            &found,
+            &tree,
+        )
+        .unwrap();
+        assert_eq!(progress.cursor.kind(), "extJournal");
+        let loaded = decode(&encode(progress).unwrap(), &source()).unwrap();
+        assert_eq!(version(&loaded.cursor), 5);
+        loaded.verify_owned(reader.clone(), size).unwrap();
+        let (mut found, mut tree) = loaded.validate(&source()).unwrap();
+        let Cursor::Combined {
+            metadata: Some(mut metadata),
+            journal: Some(mut journal),
+            ..
+        } = loaded.cursor
+        else {
+            panic!()
+        };
+        scan_combined_metadata(
+            &mut reader,
+            size,
+            &mut metadata,
+            Some(&mut journal),
+            &cancel,
+            |_, _, _| Ok(()),
+            |file| found.push(file),
+            |node, _| tree.insert_ext_journal(node),
+        )
+        .unwrap();
+        assert!(journal.sealed);
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].name, "retained.txt");
+        assert!(found[1..].iter().all(|file| file.deleted));
+        assert_eq!(found[2].directory, found[3].directory);
+        assert_eq!(
+            tree.snapshot()
+                .iter()
+                .filter(|dir| dir.name == "nested")
+                .count(),
+            1
+        );
+        let free = crate::used_space::inspect(&mut reader, size, 4096, None, &cancel).unwrap();
+        let mut signature_cursor = signature_scan::Checkpoint::default();
+        let first_signature = found.len() as u32;
+        signature_scan::continue_scan_scoped(
+            &mut reader,
+            size,
+            &options,
+            &mut signature_cursor,
+            4096,
+            Some(&free),
+            |_, _| Ok(()),
+            |mut file| {
+                file.id += first_signature;
+                tree.add_file(&file);
+                found.push(file);
+            },
+        )
+        .unwrap();
+        let completed = Progress::capture(
+            source(),
+            binding,
+            Cursor::Combined {
+                metadata: Some(metadata),
+                journal: Some(journal),
+                signature_phase: true,
+                options,
+                signature_cursor,
+            },
+            &found,
+            &tree,
+        )
+        .unwrap();
+        let loaded = decode(&encode(completed).unwrap(), &source()).unwrap();
+        let (files, restored_catalog) = loaded.validate(&source()).unwrap();
+        assert_eq!(
+            files.iter().map(|file| file.id).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(files[3].name, "extent-tree.bin");
+        assert_eq!(files[4].size, sample.len() as u64);
+        assert_eq!(normal(&files), normal(&found));
+        assert_eq!(restored_catalog.snapshot(), tree.snapshot());
+        loaded.verify_owned(reader.clone(), size).unwrap();
+        signature_scan::verify_free_candidates(&free, &files).unwrap();
+    }
+
     #[test]
     fn complete_recovery_restores_metadata_and_signature_records_in_one_progress() {
         let p = fixture(ScanMode::AllFiles, u64::MAX);
@@ -632,6 +1013,7 @@ mod tests {
             binding.clone(),
             Cursor::Combined {
                 metadata: Some(Box::new(p.cursor.clone())),
+                journal: None,
                 signature_phase: false,
                 options: options.clone(),
                 signature_cursor: Default::default(),
@@ -640,7 +1022,13 @@ mod tests {
             &tree,
         )
         .unwrap();
-        let boundary = decode(&encode(boundary).unwrap(), &source()).unwrap();
+        let saved_boundary = encode(boundary).unwrap();
+        let original_shape: serde_json::Value = serde_json::from_slice(&saved_boundary).unwrap();
+        assert_eq!(original_shape["version"], 3);
+        assert!(original_shape["progress"]["cursor"]
+            .get("journal")
+            .is_none());
+        let boundary = decode(&saved_boundary, &source()).unwrap();
         assert!(!boundary.cursor.sealed());
         assert_eq!(boundary.cursor.kind(), "ntfs");
         assert_eq!(
@@ -665,6 +1053,7 @@ mod tests {
             binding,
             Cursor::Combined {
                 metadata: Some(Box::new(p.cursor)),
+                journal: None,
                 signature_phase: true,
                 options,
                 signature_cursor,
@@ -725,6 +1114,7 @@ mod tests {
         let (files, tree) = p.validate(&p.source).unwrap();
         let cursor = Cursor::Combined {
             metadata: Some(Box::new(p.cursor)),
+            journal: None,
             signature_phase: true,
             options: Default::default(),
             signature_cursor: Default::default(),
@@ -756,6 +1146,7 @@ mod tests {
         .unwrap();
         let cursor = Cursor::Combined {
             metadata: None,
+            journal: None,
             signature_phase: true,
             options,
             signature_cursor: signatures,

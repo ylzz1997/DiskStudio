@@ -124,6 +124,12 @@ Office 和 OpenDocument 签名验收使用 `start --4kn --signature-documents` �
 
 Ext4 删除夹具使用 Ubuntu 的 `seed-ext-journal-image` 和 `ext-journal-image`。此阶段只有隔离来宾系统镜像和只读种子盘。脚本在 tmpfs 的普通文件中建立 32 MiB Ext4，用 Linux 先同步双语文本、多段 extent 稀疏文件与改名对照，再在一次后续事务删除两个文件并改名对照。卸载后用 `e2fsck -fn` 和 `debugfs logdump -O` 核对，串口日志记录压缩夹具和删除前的摘要。Windows 验收使用 `start --4kn --ext-journal` 的独立空白 A/B 盘和 `build-guest-checks.ps1 -ExtJournal`。在 QMP 预检、来宾 A/B 完整序列、容量、扇区与正式载荷校验通过后运行一次 `Ext-Journal-4Kn-Prepare.exe`。选脱机 B/2 的「找回删除文件」，应只找到 `removed.txt` 与 `nested/fragment.bin`。预览文本，按平面布局导出到 A 上的 `DS-ExtJournal`，再运行 `Ext-Journal-4Kn-Verify.exe` 核对两项输出与 Linux 证据、源范围、邻区、两盘 GPT 和来宾系统盘布局。
 
+多层 extent 树另用 Ubuntu 的 `seed-ext-journal-tree-image` 和 `ext-journal-tree-image`。脚本用 `debugfs` 核对 `nested/extent-tree.bin` 的两层树、1,537 个已初始化的数据段与各段逻辑偏移，然后删除文件。Windows 使用 `start --4kn --ext-journal-tree` 和 `build-guest-checks.ps1 -ExtJournalTree`。用 `make-tools-iso.ps1 -Live -GuestTools @('Ext-Journal-Tree-4Kn-Prepare.exe','Ext-Journal-Tree-4Kn-Verify.exe')` 准备匹配的只读光盘。预检后运行一次 Prepare。选择脱机 B/2，应发现三个删除文件。按平面布局导出到 A 的 `DS-ExtJournalTree`，再用 Verify 将三个输出的 SHA-256 与删除前的 Linux 证据逐一核对，并复核 B 保持脱机以及源范围、邻区、两盘 GPT 和来宾系统盘布局。
+
+删除进度使用 `start --4kn --ext-journal-resume` 的独立空白 A/B 盘。新建夹具时仍运行 `Ext-Journal-Tree-4Kn-Prepare.exe`，扫描 B/2 时暂停，把第 4 版 `.dsrecover` 保存到 A 的根目录。重开应用并选择 B/2，加载进度、确认结果仍停在已完成的候选数，再继续扫描。以平面布局恢复到 A 上的 `DS-ExtJournalTree`，运行 `Ext-Journal-Tree-4Kn-Verify.exe` 校验三个导出摘要、源范围和受保护布局。记录扫描前后的 A/B 读写计数。`-ExtJournalResume` 仅构建复核历史验收基线的工具，使用原来准备的 A/B 盘和留存的根目录导出结果。
+
+Ext4 完整恢复使用 `start --4kn --ext-complete` 的独立空白 A/B 盘，以及 `build-guest-checks.ps1 -ExtComplete`。只读光盘包含 `Ext-Complete-4Kn-Prepare.exe` 和 `Ext-Complete-4Kn-Verify.exe`。预检通过后运行一次 Prepare。它在已核对的脱机 B/2 放入 Ext4 日志夹具及最后一个可核对空闲块中的 PDF。进入完整恢复，签名只选 PDF，并开启空闲簇和逻辑扇区对齐。日志阶段完成 2/3 个删除候选时暂停，此时结果应有三个。将第 5 版进度保存到 A 的根目录，重开、载入并继续，应找到一个现存文件、三个删除文件和一个签名 PDF。平面导出至 A 的 `DS-ExtComplete` 后，Verify 核对暂停位置、签名选项、五个文件的 SHA-256、B 的完整源范围及受保护布局。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。
