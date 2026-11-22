@@ -379,7 +379,7 @@ pub fn scan<R: Read + Seek>(
 /// Cursor is committed only after a complete scan chunk. Interrupted probes
 /// discard that chunk's unpublished candidates, so restart cannot duplicate or
 /// skip results. Carry bytes and an unterminated signature survive a restart.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Checkpoint {
     pub consumed: u64,

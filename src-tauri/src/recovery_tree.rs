@@ -9,6 +9,7 @@ pub mod query;
 pub const MAX_DEPTH: usize = 64;
 pub const ROOT: &str = "root";
 pub const UNKNOWN: &str = "unknown";
+pub const SIGNATURES: &str = "signature-results";
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Directory {
@@ -70,6 +71,7 @@ pub struct FolderPage {
     pub total: usize,
     pub offset: usize,
     pub unknown_files: usize,
+    pub signature_files: usize,
     pub can_export_directory: bool,
 }
 impl Catalog {
@@ -93,6 +95,7 @@ impl Catalog {
         if node.id.is_empty()
             || node.id.len() > 128
             || node.id == UNKNOWN
+            || node.id == SIGNATURES
             || node.name.is_empty()
             || node.name.len() > 1024
             || node.name.contains('\0')
@@ -123,6 +126,9 @@ impl Catalog {
         Ok(path)
     }
     pub fn add_file(&mut self, candidate: &Candidate) {
+        if matches!(candidate.locator, Locator::Signature { .. }) {
+            *self.counts.entry(SIGNATURES.into()).or_default() += 1;
+        }
         if let Some(id) = &candidate.directory {
             if let Ok(path) = self.path(id) {
                 for dir in path {
@@ -154,7 +160,7 @@ impl Catalog {
     }
     pub fn folders(&self, folder: Option<&str>, offset: usize) -> Result<FolderPage, String> {
         let id = folder.unwrap_or(ROOT);
-        let path = if id == UNKNOWN {
+        let path = if matches!(id, UNKNOWN | SIGNATURES) {
             vec![]
         } else {
             self.path(id)?
@@ -178,6 +184,7 @@ impl Catalog {
             total,
             offset,
             unknown_files: *self.counts.get(UNKNOWN).unwrap_or(&0),
+            signature_files: *self.counts.get(SIGNATURES).unwrap_or(&0),
             items: items
                 .into_iter()
                 .skip(offset)
@@ -238,7 +245,7 @@ impl Filter {
             if folder.len() > 128 {
                 return Err("目录标识过长。".into());
             }
-            if folder != UNKNOWN {
+            if !matches!(folder.as_str(), UNKNOWN | SIGNATURES) {
                 catalog.path(folder)?;
             }
         }
@@ -251,17 +258,21 @@ impl Filter {
         Ok(())
     }
     pub fn matches(&self, c: &Candidate, catalog: &Catalog) -> bool {
-        let state = if matches!(c.locator, Locator::Signature { .. }) {
+        let signature = matches!(c.locator, Locator::Signature { .. });
+        let state = if signature {
             FileState::Unknown
         } else if c.deleted {
             FileState::Deleted
         } else {
             FileState::Existing
         };
-        self.folder
-            .as_ref()
-            .is_none_or(|f| catalog.contains(c.directory.as_deref(), f, self.descendants))
-            && (self.state == FileState::All || self.state == state)
+        self.folder.as_ref().is_none_or(|f| {
+            if f == SIGNATURES {
+                signature
+            } else {
+                catalog.contains(c.directory.as_deref(), f, self.descendants)
+            }
+        }) && (self.state == FileState::All || self.state == state)
             && (self.kind == FileKind::All || self.kind == file_kind(&c.name))
             && self.min_size.is_none_or(|n| c.size >= n)
             && self.max_size.is_none_or(|n| c.size <= n)
@@ -293,8 +304,8 @@ fn file_kind(name: &str) -> FileKind {
         .as_deref()
     {
         Some(
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" | "cur" | "heic" | "svg"
-            | "raw",
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" | "cur"
+            | "heic" | "svg" | "raw",
         ) => FileKind::Images,
         Some(
             "txt" | "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "csv" | "md" | "rtf"

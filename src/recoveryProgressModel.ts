@@ -7,6 +7,7 @@ export type RecoveryProgress = {
   source: { target: string; layoutKey: string; partition: number | null };
   engine: "signatures" | "ntfs" | "fat" | "exfat" | "ext";
   mode: "deleted" | "allFiles" | "existing" | "signatures";
+  combined?: boolean;
   options: {
     kinds: SignatureKind[];
     start: number;
@@ -36,7 +37,7 @@ export function progressMatches(
   );
 }
 export function settingsFromProgress(p: RecoveryProgress): SignatureSettings {
-  if (p.engine !== "signatures" || !p.options)
+  if ((!p.combined && p.engine !== "signatures") || !p.options)
     throw Error("此进度不是签名扫描");
   return {
     kinds: [...p.options.kinds],
@@ -69,6 +70,7 @@ export function progressMode(
   p: RecoveryProgress,
   language: Language = "zh-CN",
 ) {
+  if (p.combined) return translate(language, "完整恢复");
   const modes = {
     deleted: "已删除文件",
     allFiles: "全部文件",

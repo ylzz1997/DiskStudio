@@ -110,6 +110,12 @@ Ext4 丢失分区验收使用 `build-guest-checks.ps1 -LostExt4` 和独立 512 �
 
 全部未分配空间验收使用 `build-guest-checks.ps1 -UnallocatedSearch` 和已完成 Ext4 丢失分区验收的 `start --ext-copy` 配置。Prepare 先复核脱机 B 的 Ext4 和 A/2 上一轮导出，再在 A/2 的 `DS-Unallocated-Search` 创建两个 4Kn 逻辑来源。用匹配的正式程序分别打开 VHDX 和整盘备份，每次选择「全部未分配空间」，核对只找到 LBA 512 和 8192，跳过 LBA 4096 的已登记 exFAT。对实体 B 运行同一范围预设，核对 LBA 16777217 的 Ext4 候选。Verify 复核两个保留文件的 SHA-256、Ext4 原始范围及邻区、两盘 GPT 和来宾系统盘布局。
 
+Office 文件预览验收使用 `build-guest-checks.ps1 -OfficePreview` 和独立 512 字节 `start --ext-copy` 配置。匹配的只读光盘包含 `Office-Preview-Prepare.exe` 和 `Office-Preview-Verify.exe`。Prepare 核对正式载荷、A/2 的 NTFS 卷关联与脱机 B，在 A/2 的 `DS-Office-Preview` 新建四份普通文件。用正式程序浏览 A/2，逐项核对 DOCX 双语正文与第二段、XLSX 第 7 行的共享字符串和缓存值 42、切换工作表、PPTX 两张幻灯片的顺序，以及截断 DOCX 的十六进制回退。Verify 重新核对四份文件的完整 SHA-256、两盘 GPT 与来宾系统盘布局。
+
+PDF 与 TIFF 分页预览使用 `build-guest-checks.ps1 -PagedPreview` 和独立 512 字节 `start --ext-copy` 配置。用匹配的只读光盘运行 `Paged-Preview-Prepare.exe`，核对 A/2 的 NTFS 文件夹 `DS-Paged-Preview`。在原生界面核对 PDF 横向第一页与纵向第二页、适合宽度、跳转页码、普通 TIFF 的两页、平铺 BigTIFF 的单页和截断 PDF 的十六进制回退。用 `Paged-Preview-Verify.exe` 核对四份原文件 SHA-256、两盘 GPT 和来宾系统盘布局。
+
+完整恢复使用已有签名媒体夹具的 `start --4kn --signature-media` 配置。构建 `build-guest-checks.ps1 -CompleteRecovery`，匹配的只读光盘包含 `Complete-Recovery-4Kn-Prepare.exe` 与 `Complete-Recovery-4Kn-Verify.exe`。Prepare 复核既有脱机 B/2 文件系统、边界及布局后，在 A/2 的 `DS-Complete-Recovery` 保存两阶段交界处的 `Resume.dsrecover`。用正式程序选择 B/2，加载并续扫。核对目录记录 `LIVE.PDF` 与四个按类型找回的媒体候选。重新选择「完整恢复」，沿用 MP4、MOV、Ogg、空闲簇和扇区对齐设置，从头扫描并确认五项结果一致。将完成进度保存为 `Complete.dsrecover`，将全部五项按平面布局导出到该目录。Verify 独立核对两阶段进度、候选身份、五份文件的字节和输出 SHA-256、源数据及两盘布局。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。

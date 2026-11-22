@@ -13,6 +13,9 @@ const MAX_ENTRIES: u64 = 16_384;
 const MAX_DIRECTORY: u64 = 8 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
 const MAX_XML: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_OFFICE_PACKAGE: u64 = 8 * 1024 * 1024;
+const MAX_OFFICE_EXPANDED: u64 = 48 * 1024 * 1024;
+const MAX_OFFICE_XML: u64 = 16 * 1024 * 1024;
 const BLOCK: usize = 64 * 1024;
 pub struct Budget {
     remaining: u64,
@@ -97,6 +100,44 @@ pub struct Archive {
     pub header: Vec<u8>,
     pub footer: Vec<u8>,
 }
+
+pub(crate) struct OfficePackage {
+    pub kind: Kind,
+    pub main: String,
+    pub xml: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+pub(crate) fn office_package(bytes: &[u8]) -> Option<OfficePackage> {
+    if bytes.len() < 22 || bytes.len() as u64 > MAX_OFFICE_PACKAGE {
+        return None;
+    }
+    // A complete preview must occupy the whole retained file. Reject ambiguous
+    // end records even when they fit in a ZIP comment.
+    let mut ends = (bytes.len().saturating_sub(22 + 65535)..=bytes.len() - 22).filter(|&at| {
+        &bytes[at..at + 4] == b"PK\x05\x06"
+            && at + 22 + usize::from(le16(bytes, at + 20)) == bytes.len()
+    });
+    let end_record = ends.next()?;
+    if ends.next().is_some() {
+        return None;
+    }
+    let mut reader = std::io::Cursor::new(bytes);
+    let mut budget = Budget {
+        remaining: 96 * 1024 * 1024,
+    };
+    let mut probe = Probe {
+        reader: &mut reader,
+        range: 0..bytes.len() as u64,
+        budget: &mut budget,
+        tick: || Ok(()),
+    };
+    let (archive, package) = inspect(&mut probe, end_record as u64, true).ok()?;
+    if archive.start != 0 || archive.size != bytes.len() as u64 {
+        return None;
+    }
+    package
+}
+
 #[derive(Debug)]
 struct Entry {
     name: Vec<u8>,
@@ -160,8 +201,8 @@ pub fn probe<R: Read + Seek>(
         budget,
         tick,
     };
-    match inspect(&mut p, eocd) {
-        Ok(a) => Ok(Some(a)),
+    match inspect(&mut p, eocd, false) {
+        Ok((archive, _)) => Ok(Some(archive)),
         Err(Error::Invalid) => Ok(None),
         Err(Error::Failed(e)) => Err(e),
     }
@@ -169,7 +210,8 @@ pub fn probe<R: Read + Seek>(
 fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
     p: &mut Probe<'_, R, T>,
     eocd: u64,
-) -> Result<Archive> {
+    preview: bool,
+) -> Result<(Archive, Option<OfficePackage>)> {
     let h = p.read(eocd, 22)?;
     require(
         &h[..4] == b"PK\x05\x06"
@@ -290,7 +332,14 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
             require(std::str::from_utf8(&e.name).is_ok())?;
         }
         expanded = expanded.checked_add(e.unpacked).ok_or(Error::Invalid)?;
-        require(expanded <= MAX_EXPANDED)?;
+        require(
+            expanded
+                <= if preview {
+                    MAX_OFFICE_EXPANDED
+                } else {
+                    MAX_EXPANDED
+                },
+        )?;
         entries.push(e);
         at = next;
     }
@@ -300,6 +349,7 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
         require(first.offset == 0)?;
     }
     let mut xml = BTreeMap::new();
+    let mut preview_xml = 0;
     for (i, e) in entries.iter().enumerate() {
         let next = entries.get(i + 1).map_or(cd_start, |e| start + e.offset);
         let local = start + e.offset;
@@ -359,26 +409,38 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
         } else {
             require(data_end == next)?;
         }
-        let capture =
-            (e.name == b"[Content_Types].xml" || e.name == b"_rels/.rels") && e.unpacked <= MAX_XML;
+        let metadata = e.name == b"[Content_Types].xml" || e.name == b"_rels/.rels";
+        let preview_part = preview && (e.name.ends_with(b".xml") || e.name.ends_with(b".rels"));
+        let capture = e.unpacked <= MAX_XML
+            && (metadata || preview_part && preview_xml + e.unpacked <= MAX_OFFICE_XML);
         let bytes = content(p, e, data, capture)?;
         if capture {
+            preview_xml += e.unpacked;
             xml.insert(e.name.clone(), bytes);
         }
     }
-    let kind = office_kind(&xml, &names).unwrap_or(Kind::Zip);
+    let identity = office_identity(&xml, &names);
+    let kind = identity.as_ref().map_or(Kind::Zip, |(kind, _)| *kind);
+    let package = if preview {
+        identity.map(|(kind, main)| OfficePackage { kind, main, xml })
+    } else {
+        None
+    };
     p.budget.charge(end - start).map_err(Error::Failed)?;
     let digest = hash_range(p.reader, start, end - start, &mut p.tick).map_err(Error::Failed)?;
     let header = p.read(start, usize::try_from((end - start).min(30)).unwrap())?;
     let footer = p.read(end - 16, 16)?;
-    Ok(Archive {
-        start,
-        size: end - start,
-        kind,
-        digest,
-        header,
-        footer,
-    })
+    Ok((
+        Archive {
+            start,
+            size: end - start,
+            kind,
+            digest,
+            header,
+            footer,
+        },
+        package,
+    ))
 }
 
 fn content<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
@@ -468,7 +530,7 @@ pub fn hash_range<R: Read + Seek>(
 
 // Only package metadata is interpreted; no document rendering, URI fetching,
 // entity expansion, macros or extraction of archive entry names to paths.
-fn flat_xml(
+pub(crate) fn flat_xml(
     bytes: &[u8],
     namespace: &[u8],
     root: &[u8],
@@ -546,7 +608,7 @@ fn flat_xml(
         }
     }
 }
-fn part_name(name: &str) -> Option<&str> {
+pub(crate) fn part_name(name: &str) -> Option<&str> {
     let name = name.strip_prefix('/').unwrap_or(name);
     (!name.is_empty()
         && !name.contains(['\\', ':', '%', '?', '#', '\0'])
@@ -555,7 +617,10 @@ fn part_name(name: &str) -> Option<&str> {
             .all(|p| !p.is_empty() && p != "." && p != ".."))
     .then_some(name)
 }
-fn office_kind(xml: &BTreeMap<Vec<u8>, Vec<u8>>, names: &BTreeSet<Vec<u8>>) -> Option<Kind> {
+fn office_identity(
+    xml: &BTreeMap<Vec<u8>, Vec<u8>>,
+    names: &BTreeSet<Vec<u8>>,
+) -> Option<(Kind, String)> {
     let types = flat_xml(
         xml.get(b"[Content_Types].xml".as_slice())?,
         b"http://schemas.openxmlformats.org/package/2006/content-types",
@@ -615,7 +680,7 @@ fn office_kind(xml: &BTreeMap<Vec<u8>, Vec<u8>>, names: &BTreeSet<Vec<u8>>) -> O
             return None;
         }
     }
-    identified
+    identified.map(|kind| (kind, target.to_owned()))
 }
 
 #[cfg(test)]

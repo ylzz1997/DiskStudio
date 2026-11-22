@@ -43,6 +43,8 @@ import {
   type DynamicDiskView,
 } from "./DynamicDiskDialog";
 import { SignatureOptions } from "./SignatureOptions";
+import { OfficeFilePreview, type OfficePreview } from "./OfficeFilePreview";
+import { PagedFilePreview, type RasterPreview, type RenderedPage } from "./PagedFilePreview";
 import {
   defaultSignatureSettings,
   signatureRequest,
@@ -81,7 +83,7 @@ type Job = {
   message: string;
   sha256: string | null;
 };
-type Preview = { name: string; bytes: number[]; truncated: boolean };
+type Preview = { name: string; bytes: number[]; truncated: boolean; office?: OfficePreview; raster?: RasterPreview };
 type ScanStatus = {
   id: string;
   sourceName: string;
@@ -202,6 +204,8 @@ export function DataTools({
   const [plan, setPlan] = useState<DataPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
+  const raster = preview?.raster;
+  const pagedPreviewId = raster?.id;
   const [previewBlob, setPreviewBlob] = useState<{
     source: Preview;
     url: string;
@@ -278,7 +282,7 @@ export function DataTools({
     !!selectedPart &&
     !selectedPart.encryption &&
     !selectedPart.system &&
-    (page === "files" || (page === "recovery" && mode !== "signatures" && mode !== "reconstruct"));
+    (page === "files" || (page === "recovery" && ["deleted", "allFiles"].includes(mode)));
   const memberOptions =
     allowMemberSelection && selectedPart
       ? disks.flatMap((other) => {
@@ -390,8 +394,9 @@ export function DataTools({
   );
   let signatureError = "";
   const canScanFree = !!selectedPart && !selectedPart.encryption;
+  const signatureOptionsVisible = mode === "signatures" || mode === "complete";
   const activeSignatureSettings = canScanFree ? signatureSettings : { ...signatureSettings, freeOnly: false };
-  if (mode === "signatures" && sourceSize > 0) {
+  if (signatureOptionsVisible && sourceSize > 0) {
     try {
       signatureRequest(activeSignatureSettings, sourceSize);
     } catch (e) {
@@ -410,7 +415,8 @@ export function DataTools({
   const canScan =
     physical &&
     !!disk.hardware?.identity &&
-    (mode === "signatures" || !!partition);
+    (mode === "signatures" || !!partition) &&
+    (mode !== "complete" || !selectedPart?.encryption);
   useEffect(() => {
     setPartition(String(fixedPartition ?? ""));
     setDestination("");
@@ -503,6 +509,10 @@ export function DataTools({
     setPreviewBlob({ source: preview, url, mime });
     return () => URL.revokeObjectURL(url);
   }, [preview]);
+  useEffect(() => {
+    if (!pagedPreviewId) return;
+    return () => { void invoke("data_discard_preview", { id: pagedPreviewId }).catch(() => {}); };
+  }, [pagedPreviewId]);
   async function action(work: () => Promise<void>) {
     if (busy) return;
     setPending(true);
@@ -522,13 +532,14 @@ export function DataTools({
       setProgressNotice("");
       const source = selection(disk, partition);
       const scanMode = page === "files" ? "existing" : mode;
+      const combined = scanMode === "complete";
       let id: string;
       if (scanMode === "reconstruct") {
         id = await invoke<string>("data_reconstruct_filesystem", {
           request: { type: "partition", selection: source },
           mode: "allFiles",
         });
-      } else if (selectedPart?.encryption && scanMode !== "signatures") {
+      } else if (selectedPart?.encryption && scanMode !== "signatures" && !combined) {
         id = await invoke<string>("data_scan_bitlocker", {
           source,
           mode: scanMode,
@@ -545,9 +556,9 @@ export function DataTools({
       } else {
         id = await invoke<string>("data_scan", {
             source,
-            mode: scanMode,
+          mode: combined ? "allFiles" : scanMode,
             signatures:
-              scanMode === "signatures"
+              scanMode === "signatures" || combined
                 ? signatureRequest(activeSignatureSettings, sourceSize)
                 : null,
           });
@@ -575,8 +586,8 @@ export function DataTools({
       );
       if (!loaded) return;
       setRecoveryProgress(loaded);
-      setMode(loaded.mode === "existing" ? "allFiles" : loaded.mode);
-      if (loaded.engine === "signatures")
+      setMode(loaded.combined ? "complete" : loaded.mode === "existing" ? "allFiles" : loaded.mode);
+      if (loaded.combined || loaded.engine === "signatures")
         setSignatureSettings(settingsFromProgress(loaded));
       setScanId(loaded.id);
       setOwnJobId(loaded.id);
@@ -665,6 +676,16 @@ export function DataTools({
         }),
       ),
     );
+  }
+  async function showPreviewPage(id: string, index: number) {
+    const page = await invoke<RenderedPage>("data_preview_page", {
+      scanId: resultsScanId,
+      id,
+      index,
+    });
+    setPreview((current) => current?.raster?.id === id
+      ? { ...current, raster: { id, ...page } }
+      : current);
   }
   const sourceSelector = (target = false) => (
     <div className="data-source-card">
@@ -975,6 +996,11 @@ export function DataTools({
                         ),
                       },
                       {
+                        id: "complete",
+                        title: t("完整恢复"),
+                        body: t("先读文件记录，再按所选类型深扫。两阶段结果保留在同一列表。"),
+                      },
+                      {
                         id: "reconstruct",
                         title: t("重建文件视图"),
                         body: t("使用 NTFS、FAT32、exFAT 或 Ext4 的备用元数据读取文件，提取前重新核对。"),
@@ -1000,7 +1026,7 @@ export function DataTools({
                       </button>
                     ))}
                   </div>
-                  {mode === "signatures" && (
+                  {signatureOptionsVisible && (
                     <>
                       <SignatureOptions
                         value={signatureSettings}
@@ -1015,7 +1041,9 @@ export function DataTools({
                   )}
                   <div className="data-action-row">
                     {mode !== "reconstruct" && <span>
-                      {mode === "signatures"
+                      {mode === "complete"
+                        ? t("完整恢复适用于未加密分区。目录阶段支持 NTFS、FAT、exFAT 和干净卸载的 Ext2/3/4。类型和范围设置用于签名阶段。")
+                        : mode === "signatures"
                         ? t(
                             "支持上列 文件类型；BMP 限未压缩格式，WAV 限 RIFF/WAVE。ZIP/Office 限单卷未加密 Stored/Deflate，逐项验证 CRC；不含旧版 Office 或宏类型识别。单文件上限 256 MiB，不重组碎片。",
                           )
@@ -1737,6 +1765,7 @@ export function DataTools({
               </span>
               <span>
                 {job.title === "文件恢复扫描" ||
+                job.title === "完整恢复" ||
                 job.title === "读取分区目录" ||
                 job.title === "读取备份目录" ||
                 job.title === "读取镜像目录" ||
@@ -2201,7 +2230,16 @@ export function DataTools({
               "预览只读取候选内容，不执行文件。显示正常也不能保证整个文件完整。",
             )}
           </Hint>
-          {displayedPreview ? (
+          {preview.office ? (
+            <OfficeFilePreview preview={preview.office} />
+          ) : raster ? (
+            <PagedFilePreview
+              key={raster.id}
+              name={preview.name}
+              page={raster}
+              onPage={(index) => showPreviewPage(raster.id, index)}
+            />
+          ) : displayedPreview ? (
             displayedPreview.mime.startsWith("image/") ? (
               <img
                 className="recovery-preview-image"
@@ -2240,13 +2278,17 @@ export function DataTools({
                     .join("")}
             </pre>
           )}
-          {!displayedPreview && (
+          {!displayedPreview && !preview.office && !preview.raster && (
             <p className="data-footnote">
               {preview.truncated
                 ? t("仅显示文件开头，内容已截断。")
                 : previewError === preview
                   ? catalogText("无法显示媒体预览，请导出后使用兼容软件核对。")
-                  : t("非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。")}
+                  : /\.(docx|xlsx|pptx)$/i.test(preview.name)
+                    ? catalogText("无法显示此 Office 文档，已显示文件开头的十六进制摘要。")
+                    : /\.(pdf|tiff?)$/i.test(preview.name)
+                      ? catalogText("无法分页预览此文件，已显示文件开头的十六进制摘要。")
+                      : t("非图片和文本文件显示十六进制摘要；请导出后使用对应软件核对。")}
             </p>
           )}
         </Dialog>

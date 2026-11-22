@@ -60,11 +60,15 @@ mod ntfs_names;
 mod ntfs_scan;
 mod ntfs_streams;
 mod ntfs_wof;
+mod office_preview;
 mod partition_attributes;
 #[cfg(any(test, windows))]
 mod partition_move;
 mod partition_move_task;
 mod partitions;
+#[cfg(windows)]
+mod pdf_preview;
+mod raster_preview;
 mod recovery;
 mod recovery_checkpoint;
 mod recovery_export;
@@ -642,6 +646,20 @@ async fn data_preview(scan_id: String, file_id: u32) -> Result<data_tasks::Previ
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
+async fn data_preview_page(
+    scan_id: String,
+    id: String,
+    index: u32,
+) -> Result<raster_preview::Page, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::preview_page(&scan_id, &id, index))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn data_discard_preview(id: String) {
+    raster_preview::discard(&id);
+}
+#[tauri::command]
 async fn data_prepare(request: data_tasks::Request) -> Result<Option<data_tasks::Plan>, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::prepare(request))
         .await
@@ -1174,6 +1192,8 @@ fn main() {
             data_select_results,
             data_export_directory_report,
             data_preview,
+            data_preview_page,
+            data_discard_preview,
             data_prepare,
             data_execute
         ])

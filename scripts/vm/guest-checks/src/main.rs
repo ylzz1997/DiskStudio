@@ -144,6 +144,7 @@ mod recovery_tree;
 mod resize_clone_checks;
 mod retained_restore_checks;
 mod retained_partition_checks;
+mod file_preview_checks;
 #[path = "../../../../src-tauri/src/image_convert.rs"]
 mod image_convert;
 mod unallocated_search_checks;
@@ -159,6 +160,12 @@ mod signature_checkpoint;
 mod signature_scan;
 #[path = "../../../../src-tauri/src/signature_zip.rs"]
 mod signature_zip;
+#[path = "../../../../src-tauri/src/office_preview.rs"]
+mod office_preview;
+#[path = "../../../../src-tauri/src/pdf_preview.rs"]
+mod pdf_preview;
+#[path = "../../../../src-tauri/src/raster_preview.rs"]
+mod raster_preview;
 #[path = "../../../../src-tauri/src/snapshot.rs"]
 mod snapshot;
 mod state_checks;
@@ -676,6 +683,8 @@ fn main() {
                 | "Signature-Formats-4Kn-Verify"
                 | "Signature-Media-4Kn-Prepare"
                 | "Signature-Media-4Kn-Verify"
+                | "Complete-Recovery-4Kn-Prepare"
+                | "Complete-Recovery-4Kn-Verify"
                 | "Signature-Images-4Kn-Prepare"
                 | "Signature-Images-4Kn-Verify"
                 | "Table-MBR-4Kn-Prepare"
@@ -859,6 +868,8 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Signature-Formats-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Formats),
         Some("Signature-Media-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Media),
         Some("Signature-Media-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Media),
+        Some("Complete-Recovery-4Kn-Prepare") => signature_scope_checks::prepare_complete(),
+        Some("Complete-Recovery-4Kn-Verify") => signature_scope_checks::verify_complete(),
         Some("Signature-Images-4Kn-Prepare") => signature_scope_checks::prepare(signature_scope_checks::Sample::Images),
         Some("Signature-Images-4Kn-Verify") => signature_scope_checks::verify(signature_scope_checks::Sample::Images),
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
@@ -1221,6 +1232,10 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Retained-Lost-Verify") => retained_partition_checks::verify(),
         Some("Unallocated-Search-Prepare") => unallocated_search_checks::prepare(),
         Some("Unallocated-Search-Verify") => unallocated_search_checks::verify(),
+        Some("Office-Preview-Prepare") => file_preview_checks::prepare_office(),
+        Some("Office-Preview-Verify") => file_preview_checks::verify_office(),
+        Some("Paged-Preview-Prepare") => file_preview_checks::prepare_paged(),
+        Some("Paged-Preview-Verify") => file_preview_checks::verify_paged(),
         Some("BitLocker-Marker-Prepare") => bitlocker_checks::prepare(),
         Some("BitLocker-Marker-Verify") => bitlocker_checks::verify(),
         Some("Resize-Clone-Prepare") => resize_clone_checks::prepare(),

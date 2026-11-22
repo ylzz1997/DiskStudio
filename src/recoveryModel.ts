@@ -75,6 +75,7 @@ export type RecoveryFolders = {
   total: number;
   offset: number;
   unknownFiles: number;
+  signatureFiles?: number;
 };
 export const initialRecoveryFilter: RecoveryFilter = {
   folder: null,

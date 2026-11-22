@@ -336,7 +336,10 @@ pub(super) fn verify(sample: Sample) -> Result<String, String> {
     if !options.free_only
         || !options.sector_aligned
         || options.kinds.len() != sample.kinds().len()
-        || sample.kinds().iter().any(|kind| !options.kinds.contains(kind))
+        || sample
+            .kinds()
+            .iter()
+            .any(|kind| !options.kinds.contains(kind))
         || !cursor.sealed
         || found.len() != expected.len()
         || found
@@ -393,6 +396,182 @@ pub(super) fn verify(sample: Sample) -> Result<String, String> {
         return Err("Expected exactly one native export".into());
     }
     Ok(format!("PASS: Saved settings, {} candidates, original B extent, both GPTs, adjacent sectors, guest OS layout and exported SHA-256 verified. B remains offline.", expected.len()))
+}
+
+const COMPLETE_FOLDER: &str = "DS-Complete-Recovery";
+// The last independently verified preparation of the isolated media pair.
+const MEDIA_DESKTOP: &str = "1cea3f4c51ade6dc3b473461f1f460581885924daa03fed0feb91a2985a135f2";
+
+fn complete_fixture() -> Result<(File, u32, u64), String> {
+    btrfs_checks::desktop()?;
+    let sample = Sample::Media;
+    let baseline: Baseline = serde_json::from_reader(
+        File::open(receipt(MEDIA_DESKTOP, sample))
+            .map_err(err)?
+            .take(4096),
+    )
+    .map_err(err)?;
+    let (bytes, aligned) = fixture(sample)?;
+    let b = b_device(true)?;
+    if part()? != baseline.partition
+        || ntfs_reconstruction_checks::table_hashes()? != baseline.tables
+        || edges(&b)? != baseline.edges
+        || hash(&b, START, SIZE)? != format!("{:x}", Sha256::digest(&bytes))
+    {
+        return Err("Existing offline media fixture or its guest layout does not match".into());
+    }
+    Ok((b, baseline.partition, aligned))
+}
+
+pub(super) fn prepare_complete() -> Result<String, String> {
+    use recovery_checkpoint::{Cursor as ScanCursor, Progress};
+    let (b, partition, _) = complete_fixture()?;
+    let mut reader = region(&b, START, SIZE)?;
+    let mut metadata = fat_recovery::scan_progress::Checkpoint::default();
+    let mut files = Vec::new();
+    let mut tree = recovery_tree::Catalog::default();
+    fat_recovery::scan_progress::continue_scan(
+        &mut reader,
+        recovery::ScanMode::AllFiles,
+        &mut metadata,
+        |_, _| Ok(()),
+        |candidate| files.push(candidate),
+        |directory| tree.insert(directory),
+    )?;
+    if !metadata.sealed || files.len() != 1 || !files[0].name.eq_ignore_ascii_case("LIVE.PDF") {
+        return Err(
+            "The complete recovery fixture should contain one recoverable file record".into(),
+        );
+    }
+    let selection = selection(B, Some(partition))?;
+    let binding = signature_checkpoint::Binding::capture(&mut reader, SIZE, START, SECTOR)?;
+    let cursor = ScanCursor::Combined {
+        metadata: Some(Box::new(ScanCursor::Fat {
+            mode: recovery::ScanMode::AllFiles,
+            cursor: metadata,
+        })),
+        signature_phase: false,
+        options: signature_scan::Options {
+            kinds: Sample::Media.kinds().to_vec(),
+            free_only: true,
+            sector_aligned: true,
+            ..Default::default()
+        },
+        signature_cursor: Default::default(),
+    };
+    let progress = Progress::capture(selection, binding, cursor, &files, &tree)?;
+    let encoded = recovery_checkpoint::encode(progress)?;
+    let (root, path) = ntfs_reconstruction_checks::verified_a_root()?;
+    root.create_dir(COMPLETE_FOLDER).map_err(err)?;
+    let folder = root.open_dir(COMPLETE_FOLDER).map_err(err)?;
+    let mut file = folder
+        .open_with(
+            "Resume.dsrecover",
+            cap_std::fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .map_err(err)?;
+    file.write_all(&encoded).map_err(err)?;
+    file.sync_all().map_err(err)?;
+    Ok(format!("PASS: existing offline B/{partition} media fixture matches. On A, {} contains Resume.dsrecover at the stage boundary. Complete recovery should retain LIVE.PDF and four aligned free-cluster files.", path.join(COMPLETE_FOLDER).display()))
+}
+
+pub(super) fn verify_complete() -> Result<String, String> {
+    use recovery_checkpoint::Cursor as ScanCursor;
+    let (b, partition, aligned) = complete_fixture()?;
+    let selected = selection(B, Some(partition))?;
+    let (root, _) = ntfs_reconstruction_checks::verified_a_root()?;
+    let folder = root.open_dir(COMPLETE_FOLDER).map_err(err)?;
+    let mut bytes = Vec::new();
+    folder
+        .open("Complete.dsrecover")
+        .map_err(err)?
+        .take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(err)?;
+    let progress = recovery_checkpoint::decode(&bytes, &selected)?;
+    let (files, catalog) = progress.validate(&selected)?;
+    let ScanCursor::Combined {
+        metadata: Some(metadata),
+        signature_phase: true,
+        options,
+        signature_cursor,
+    } = &progress.cursor
+    else {
+        return Err("Expected saved complete recovery progress".into());
+    };
+    let mut reader = region(&b, START, SIZE)?;
+    progress.binding.verify(&mut reader, SIZE, START, SECTOR)?;
+    let owned = data_io::Region::new(b.try_clone().map_err(err)?, START, SIZE).map_err(err)?;
+    progress.verify_owned(owned, SIZE)?;
+    let plan = used_space::inspect(&mut reader, SIZE, SECTOR, None, &AtomicBool::new(false))?;
+    signature_cursor.verify_scope(options, &plan)?;
+    signature_scan::verify_free_candidates(&plan, &files)?;
+    let signatures = Sample::Media.expected(aligned);
+    if !metadata.sealed()
+        || metadata.count() != 1
+        || !signature_cursor.sealed
+        || !options.free_only
+        || !options.sector_aligned
+        || options.kinds != Sample::Media.kinds()
+        || files.len() != signatures.len() + 1
+        || catalog.folders(None, 0)?.signature_files != signatures.len()
+        || !files[0].name.eq_ignore_ascii_case("LIVE.PDF")
+        || files[0].size != LIVE_PDF.len() as u64
+        || files[1..]
+            .iter()
+            .zip(&signatures)
+            .any(|(candidate, (at, ext, data))| {
+                candidate.name != format!("recovered_{at:016x}.{ext}")
+                    || candidate.size != data.len() as u64
+            })
+    {
+        return Err("Saved complete recovery does not match both sets of candidates".into());
+    }
+    let exports = folder
+        .entries()
+        .map_err(err)?
+        .map(|entry| entry.map(|entry| entry.file_name()).map_err(err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let output_dirs = exports
+        .iter()
+        .filter(|name| name.to_string_lossy().starts_with("DiskStudio-recovered-"))
+        .collect::<Vec<_>>();
+    let [name] = output_dirs.as_slice() else {
+        return Err("Expected one complete recovery export".into());
+    };
+    let output = folder.open_dir(name).map_err(err)?;
+    let report: serde_json::Value = serde_json::from_reader(
+        output
+            .open(recovery_export::REPORT)
+            .map_err(err)?
+            .take(128 * 1024),
+    )
+    .map_err(err)?;
+    if report["completed"] != true
+        || report["savedFiles"] != files.len()
+        || report["failedFiles"] != 0
+        || report["layout"] != "flat"
+    {
+        return Err("Complete recovery export was incomplete or selected the wrong layout".into());
+    }
+    for (i, (file, data)) in files
+        .iter()
+        .zip(std::iter::once(LIVE_PDF).chain(signatures.iter().map(|(_, _, data)| *data)))
+        .enumerate()
+    {
+        let leaf = format!("{:06}_{}", file.id, file.name);
+        if file.id != i as u32
+            || output.read(&leaf).map_err(err)? != data
+            || !report["outcomes"].as_array().is_some_and(|outcomes| {
+                outcomes
+                    .iter()
+                    .any(|outcome| outcome["sha256"] == format!("{:x}", Sha256::digest(data)))
+            })
+        {
+            return Err(format!("Wrong bytes or SHA-256 for {}", file.name));
+        }
+    }
+    Ok("PASS: both stages, five stable candidate IDs, five exported SHA-256 values, source bytes and boundaries, both GPTs and the guest OS layout match. B stayed offline.".into())
 }
 
 #[cfg(test)]

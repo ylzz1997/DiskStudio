@@ -184,6 +184,189 @@ fn inspect_bytes(bytes: &[u8]) -> Option<Archive> {
     .unwrap()
 }
 
+const OFFICE_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+fn document_package(kind: Kind, main: &str, parts: &[(&str, &[u8])]) -> Vec<u8> {
+    let content_type = match kind {
+        Kind::Docx => "wordprocessingml.document",
+        Kind::Xlsx => "spreadsheetml.sheet",
+        Kind::Pptx => "presentationml.presentation",
+        _ => unreachable!(),
+    };
+    let types = format!(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/{main}" ContentType="application/vnd.openxmlformats-officedocument.{content_type}.main+xml"/></Types>"#
+    );
+    let rel = relationships(&[("rId1", "officeDocument", main, false)]);
+    let mut files = vec![
+        ("[Content_Types].xml", types.as_bytes()),
+        ("_rels/.rels", rel.as_bytes()),
+    ];
+    files.extend_from_slice(parts);
+    build(&files, true, 0, false, true, b"package comment")
+}
+
+fn relationships(entries: &[(&str, &str, &str, bool)]) -> String {
+    let mut xml = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (id, kind, target, external) in entries {
+        let mode = if *external { "External" } else { "Internal" };
+        xml.push_str(&format!(r#"<Relationship Id="{id}" Type="{OFFICE_REL}/{kind}" Target="{target}" TargetMode="{mode}"/>"#));
+    }
+    xml.push_str("</Relationships>");
+    xml
+}
+
+#[test]
+fn office_preview_word_reads_only_document_paragraphs_and_bounds_output() {
+    let word = |body: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+        )
+    };
+    let document = word(
+        r#"<w:p><w:r><w:t>中文 &lt;script&gt;</w:t><w:tab/><w:t>line &#x2603;</w:t><w:br/><w:t>last</w:t></w:r><w:del><w:r><w:t>Removed</w:t></w:r></w:del></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>table text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let main = "office/main.xml";
+    let archive = document_package(Kind::Docx, main, &[(main, document.as_bytes())]);
+    let preview = |bytes| {
+        crate::office_preview::read(bytes, Kind::Docx)
+            .map(|view| serde_json::to_value(view).unwrap())
+    };
+    assert_eq!(
+        preview(&archive).unwrap(),
+        serde_json::json!({
+            "kind": "document", "paragraphs": ["中文 <script>\tline ☃\nlast", "table text"], "limited": false
+        })
+    );
+    assert!(crate::office_preview::read(&archive, Kind::Xlsx).is_none());
+    assert!(preview(&archive[..archive.len() - 1]).is_none());
+    let long = word(&format!(
+        "<w:p><w:r><w:t>{}</w:t></w:r></w:p>",
+        "字".repeat(5000)
+    ));
+    let capped = document_package(Kind::Docx, main, &[(main, long.as_bytes())]);
+    let result = preview(&capped).unwrap();
+    assert_eq!(result["limited"], true);
+    assert_eq!(result["paragraphs"][0].as_str().unwrap(), "字".repeat(1365));
+    let dtd = format!(
+        r#"<!DOCTYPE w:document [<!ENTITY sample SYSTEM "file:///secret">]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>&sample;</w:body></w:document>"#
+    );
+    assert!(preview(&document_package(
+        Kind::Docx,
+        main,
+        &[(main, dtd.as_bytes())]
+    ))
+    .is_none());
+}
+
+#[test]
+fn office_preview_workbook_follows_sheet_order_and_shows_cached_cell_values() {
+    let main = "xl/workbook.xml";
+    let rels = relationships(&[
+        ("one", "worksheet", "worksheets/sheet1.xml", false),
+        ("two", "worksheet", "/xl/worksheets/sheet2.xml", false),
+        ("strings", "sharedStrings", "sharedStrings.xml", false),
+        (
+            "link",
+            "externalLink",
+            "https://example.invalid/external",
+            true,
+        ),
+    ]);
+    let book = format!(
+        r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="{OFFICE_REL}"><sheets><sheet name="Totals &amp; Notes" x:id="two"/><sheet name="First" x:id="one"/></sheets></workbook>"#
+    );
+    let worksheet = |cells: &str| {
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="7">{cells}</row></sheetData></worksheet>"#
+        )
+    };
+    let first = worksheet(r#"<c r="A7" t="str"><v>next sheet</v></c>"#);
+    let second = worksheet(
+        r#"<c r="A7" t="s"><v>0</v></c><c r="C7"><f>6*7</f><v>42</v></c><c r="D7" t="inlineStr"><is><t>inline</t></is></c><c r="M7" t="b"><v>1</v></c>"#,
+    );
+    let strings = br#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><r><t>shared </t></r><r><t>value</t></r><rPh><t>do not display</t></rPh></si></sst>"#;
+    let parts = [
+        (main, book.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", first.as_bytes()),
+        ("xl/worksheets/sheet2.xml", second.as_bytes()),
+        ("xl/sharedStrings.xml", strings.as_slice()),
+    ];
+    let archive = document_package(Kind::Xlsx, main, &parts);
+    let preview = crate::office_preview::read(&archive, Kind::Xlsx).unwrap();
+    let result = serde_json::to_value(preview).unwrap();
+    assert_eq!(result["limited"], true);
+    assert_eq!(result["sheets"][0]["name"], "Totals & Notes");
+    assert_eq!(result["sheets"][0]["rows"][0]["number"], 7);
+    let cells = result["sheets"][0]["rows"][0]["cells"].as_array().unwrap();
+    assert_eq!(
+        &cells[..4],
+        &[
+            serde_json::json!("shared value"),
+            serde_json::Value::Null,
+            serde_json::json!("42"),
+            serde_json::json!("inline")
+        ]
+    );
+    assert_eq!(result["sheets"][1]["rows"][0]["cells"][0], "next sheet");
+
+    let mut invalid_parts = parts;
+    let wrong_row = worksheet(r#"<c r="B8"><v>7</v></c>"#);
+    invalid_parts[3].1 = wrong_row.as_bytes();
+    assert!(crate::office_preview::read(
+        &document_package(Kind::Xlsx, main, &invalid_parts),
+        Kind::Xlsx
+    )
+    .is_none());
+}
+
+#[test]
+fn office_preview_slides_follow_internal_relationships_only() {
+    let main = "ppt/presentation.xml";
+    let presentation = format!(
+        r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="{OFFICE_REL}"><p:sldIdLst><p:sldId r:id="second"/><p:sldId r:id="first"/></p:sldIdLst></p:presentation>"#
+    );
+    let slide = |text: &str| {
+        format!(
+            r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+        )
+    };
+    let first = slide("second on screen");
+    let second = slide("first on screen");
+    let rels = relationships(&[
+        ("first", "slide", "slides/slide1.xml", false),
+        ("second", "slide", "slides/slide2.xml", false),
+    ]);
+    let mut parts = [
+        (main, presentation.as_bytes()),
+        ("ppt/_rels/presentation.xml.rels", rels.as_bytes()),
+        ("ppt/slides/slide1.xml", first.as_bytes()),
+        ("ppt/slides/slide2.xml", second.as_bytes()),
+    ];
+    let archive = document_package(Kind::Pptx, main, &parts);
+    let preview = crate::office_preview::read(&archive, Kind::Pptx).unwrap();
+    assert_eq!(
+        serde_json::to_value(preview).unwrap(),
+        serde_json::json!({
+            "kind": "presentation", "slides": [
+                {"number": 1, "paragraphs": ["first on screen"]},
+                {"number": 2, "paragraphs": ["second on screen"]}
+            ], "limited": false
+        })
+    );
+    let external = relationships(&[
+        ("first", "slide", "slides/slide1.xml", false),
+        ("second", "slide", "https://example.invalid/slide.xml", true),
+    ]);
+    parts[1].1 = external.as_bytes();
+    assert!(
+        crate::office_preview::read(&document_package(Kind::Pptx, main, &parts), Kind::Pptx)
+            .is_none()
+    );
+}
+
 #[test]
 fn sector_alignment_checks_the_archive_start_not_the_end_record() {
     let archive = build(&[("sample", b"payload")], false, 0, false, false, b"");

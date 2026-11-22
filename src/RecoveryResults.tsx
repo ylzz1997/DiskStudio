@@ -722,6 +722,16 @@ export function RecoveryResults({
             <span>{t("目录未知")}</span>
             <small>{count(folders?.unknownFiles)}</small>
           </button>
+          {!!folders?.signatureFiles && (
+            <button
+              className={filter.folder === "signature-results" ? "active" : ""}
+              onClick={() => navigate("signature-results")}
+            >
+              <FileSearch size={16} />
+              <span>{t("按类型找回")}</span>
+              <small>{count(folders.signatureFiles)}</small>
+            </button>
+          )}
           <div className="directory-divider">{t("原目录")}</div>
           <button
             className={filter.folder === "root" ? "active" : ""}

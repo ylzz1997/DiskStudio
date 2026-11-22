@@ -18,12 +18,121 @@ pub(super) struct Saved {
     pub pause_requested: bool,
     loaded: bool,
 }
+
+#[cfg(windows)]
+fn identify_metadata(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    size: u64,
+    mode: ScanMode,
+) -> Result<Option<Cursor>, String> {
+    use crate::data_windows::err;
+    use std::io::SeekFrom;
+    let mut boot = [0; 512];
+    reader.read_exact(&mut boot).map_err(err)?;
+    if crate::bitlocker::boot_marker(&boot) {
+        return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
+    }
+    reader.seek(SeekFrom::Start(0)).map_err(err)?;
+    if &boot[3..11] == b"NTFS    " {
+        return Ok(Some(Cursor::Ntfs {
+            mode,
+            cursor: Default::default(),
+        }));
+    }
+    if crate::recovery::fat_boot(&boot) {
+        return Ok(Some(Cursor::Fat {
+            mode,
+            cursor: Default::default(),
+        }));
+    }
+    if size >= 2048 {
+        reader.seek(SeekFrom::Start(1080)).map_err(err)?;
+        let mut magic = [0; 2];
+        reader.read_exact(&mut magic).map_err(err)?;
+        reader.seek(SeekFrom::Start(0)).map_err(err)?;
+        if magic == [0x53, 0xef] {
+            return Ok(Some(Cursor::Ext {
+                mode,
+                cursor: Default::default(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn scan_metadata<R: std::io::Read + std::io::Seek + 'static>(
+    reader: &mut crate::ext_recovery::scan_progress::SharedReader<R>,
+    cursor: &mut Cursor,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tick: impl FnMut(u64, u64) -> Result<(), String>,
+    found: impl FnMut(crate::recovery::Candidate),
+    directory: impl FnMut(crate::recovery_tree::Directory) -> Result<(), String>,
+) -> Result<String, String> {
+    match cursor {
+        Cursor::Ntfs { mode, cursor } => {
+            crate::ntfs_scan::continue_scan(reader, *mode, cursor, tick, found, directory)
+        }
+        Cursor::Fat { mode, cursor } => crate::fat_recovery::scan_progress::continue_scan(
+            reader, *mode, cursor, tick, found, directory,
+        ),
+        Cursor::Ext { mode, cursor } => crate::ext_recovery::scan_progress::continue_scan(
+            reader.clone(),
+            *mode,
+            cursor,
+            cancel.clone(),
+            tick,
+            found,
+            directory,
+        ),
+        _ => Err("目录阶段使用了无效的扫描引擎。".into()),
+    }
+}
+
+#[cfg(windows)]
+fn scan_signatures(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    size: u64,
+    sector: u64,
+    options: &Options,
+    cursor: &mut crate::signature_scan::Checkpoint,
+    job: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    found: impl FnMut(crate::recovery::Candidate),
+) -> Result<String, String> {
+    let range = options.range(size)?;
+    let phase = if options.free_only {
+        "核对空闲簇"
+    } else {
+        "签名扫描"
+    };
+    super::progress(job, cancel, phase, cursor.consumed, range.end - range.start)?;
+    let allocation = options
+        .free_only
+        .then(|| crate::used_space::inspect(reader, size, sector, None, cancel))
+        .transpose()?;
+    let message = crate::signature_scan::continue_scan_scoped(
+        reader,
+        size,
+        options,
+        cursor,
+        sector,
+        allocation.as_ref(),
+        |done, total| super::progress(job, cancel, "签名扫描", done, total),
+        found,
+    )?;
+    if let Some(plan) = allocation {
+        plan.proof.verify(reader, cancel)?;
+    }
+    Ok(message)
+}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub id: String,
     source: Selection,
     mode: ScanMode,
+    combined: bool,
     engine: &'static str,
     options: Option<Options>,
     done: u64,
@@ -43,6 +152,7 @@ pub fn status() -> Option<Info> {
     }
     let job = s.job.as_ref().filter(|j| j.id == p.id);
     let running = job.is_some_and(|j| j.state == "running");
+    let combined = matches!(cursor, Cursor::Combined { .. });
     let valid = cursor.validate(p.size).is_ok()
         && p.binding.is_some()
         && cursor.count() == s.candidates.len();
@@ -50,7 +160,15 @@ pub fn status() -> Option<Info> {
         id: p.id.clone(),
         source: p.source.clone(),
         mode: p.mode,
-        engine: cursor.kind(),
+        combined,
+        engine: if combined
+            && running
+            && job.is_some_and(|j| matches!(j.phase.as_str(), "签名扫描" | "核对空闲簇"))
+        {
+            "signatures"
+        } else {
+            cursor.kind()
+        },
         options: cursor.options(),
         done: if running {
             job.unwrap().done
@@ -111,8 +229,12 @@ pub fn start_scan(
     mode: ScanMode,
     options: Option<Options>,
 ) -> Result<String, String> {
-    if mode != ScanMode::Signatures && (source.partition.is_none() || options.is_some()) {
-        return Err("文件系统扫描须选择分区，签名类型选项只适用于签名扫描".into());
+    if (mode != ScanMode::Signatures && source.partition.is_none())
+        || (options.is_some() && !matches!(mode, ScanMode::Signatures | ScanMode::AllFiles))
+    {
+        return Err(
+            "请选择分区进行文件系统扫描。签名类型选项适用于完整恢复或单独签名扫描。".into(),
+        );
     }
     launch(source, mode, options, None)
 }
@@ -130,13 +252,12 @@ fn launch(
     #[cfg(windows)]
     {
         use crate::data_windows as platform;
-        use std::io::{Read, Seek, SeekFrom};
         let guard = crate::OPERATION
             .try_lock()
             .map_err(|_| "另一项磁盘任务正在运行")?;
         idle(&state())?;
         let resolved = platform::resolve(&source, false, false)?;
-        let options = if mode == ScanMode::Signatures {
+        let options = if mode == ScanMode::Signatures || options.is_some() {
             let o = options.unwrap_or_default();
             o.range(resolved.size)?;
             o.alignment(resolved.disk.logical_sector_size.unwrap_or(0))?;
@@ -171,8 +292,11 @@ fn launch(
                 &s.directories,
             )?;
         }
+        let combined = mode == ScanMode::AllFiles && options.is_some();
         let (id, cancel) = start(if mode == ScanMode::Existing {
             "读取分区目录"
+        } else if combined {
+            "完整恢复"
         } else {
             "文件恢复扫描"
         })?;
@@ -183,10 +307,13 @@ fn launch(
             options: options.clone(),
             size: resolved.size,
             binding: None,
-            cursor: options.clone().map(|options| Cursor::Signatures {
-                options,
-                cursor: Default::default(),
-            }),
+            cursor: options
+                .clone()
+                .filter(|_| !combined)
+                .map(|options| Cursor::Signatures {
+                    options,
+                    cursor: Default::default(),
+                }),
             pause_requested: false,
             loaded: false,
         });
@@ -247,56 +374,35 @@ fn launch(
                             .ok_or("续扫引擎缺失")?
                             .verify_owned(reader.clone(), r.size)?;
                     } else if mode != ScanMode::Signatures {
-                        let mut boot = [0; 512];
-                        reader.read_exact(&mut boot).map_err(platform::err)?;
-                        if crate::bitlocker::boot_marker(&boot) {
-                            return Err(crate::bitlocker::CIPHERTEXT_NOTICE.into());
-                        }
-                        reader.seek(SeekFrom::Start(0)).map_err(platform::err)?;
-                        if &boot[3..11] == b"NTFS    " {
-                            cursor = Some(Cursor::Ntfs {
-                                mode,
-                                cursor: Default::default(),
-                            });
-                        } else if crate::recovery::fat_boot(&boot) {
-                            cursor = Some(Cursor::Fat {
-                                mode,
-                                cursor: Default::default(),
-                            });
-                        } else if r.size >= 2048 {
-                            reader.seek(SeekFrom::Start(1080)).map_err(platform::err)?;
-                            let mut magic = [0; 2];
-                            reader.read_exact(&mut magic).map_err(platform::err)?;
-                            reader.seek(SeekFrom::Start(0)).map_err(platform::err)?;
-                            if magic == [0x53, 0xef] {
-                                cursor = Some(Cursor::Ext {
-                                    mode,
-                                    cursor: Default::default(),
-                                });
+                        let metadata = identify_metadata(&mut reader, r.size, mode)?;
+                        cursor = if let Some(options) = &options {
+                            if metadata.is_none() && options.free_only {
+                                return Err("无法确认文件系统，完整恢复的空闲簇范围不可用。".into());
                             }
-                        }
+                            Some(Cursor::Combined {
+                                signature_phase: metadata.is_none(),
+                                metadata: metadata.map(Box::new),
+                                options: options.clone(),
+                                signature_cursor: Default::default(),
+                            })
+                        } else {
+                            metadata
+                        };
                     }
                     if cursor.is_some() && binding.is_none() {
                         binding = Some(Binding::capture(&mut reader, r.size, r.offset, sector)?);
                     }
                     {
                         let mut s = state();
+                        if matches!(cursor, Some(Cursor::Combined { metadata: None, .. })) {
+                            s.scan_mode = ScanMode::Signatures;
+                        }
                         if let Some(p) = s.recovery_progress.as_mut().filter(|p| p.id == work_id) {
                             p.cursor = cursor.clone();
                         }
                     }
                     let tick = |done, total| {
-                        super::progress(
-                            &work_id,
-                            &cancel,
-                            if mode == ScanMode::Signatures {
-                                "签名扫描"
-                            } else {
-                                "文件系统扫描"
-                            },
-                            done,
-                            total,
-                        )
+                        super::progress(&work_id, &cancel, "文件系统扫描", done, total)
                     };
                     let found = |c| {
                         let mut s = state();
@@ -309,69 +415,69 @@ fn launch(
                     };
                     let directory = |d| state().directories.insert(d);
                     let message = match &mut cursor {
-                        Some(Cursor::Signatures { options, cursor }) => {
-                            let allocation = if options.free_only {
-                                let range = options.range(r.size)?;
-                                super::progress(
-                                    &work_id,
-                                    &cancel,
-                                    "核对空闲簇",
-                                    cursor.consumed,
-                                    range.end - range.start,
-                                )?;
-                                Some(crate::used_space::inspect(
+                        Some(Cursor::Signatures { options, cursor }) => scan_signatures(
+                            &mut reader,
+                            r.size,
+                            sector,
+                            options,
+                            cursor,
+                            &work_id,
+                            &cancel,
+                            found,
+                        )?,
+                        Some(Cursor::Combined {
+                            metadata,
+                            signature_phase,
+                            options,
+                            signature_cursor,
+                        }) => {
+                            if !*signature_phase {
+                                let files =
+                                    metadata.as_deref_mut().ok_or("完整恢复缺少目录阶段。")?;
+                                if !files.sealed() {
+                                    scan_metadata(
+                                        &mut reader,
+                                        files,
+                                        &cancel,
+                                        tick,
+                                        found,
+                                        directory,
+                                    )?;
+                                }
+                                if !files.sealed() {
+                                    return Err("完整恢复的目录阶段未结束。".into());
+                                }
+                                files.verify_owned(reader.clone(), r.size)?;
+                                binding.as_ref().ok_or("恢复源特征缺失")?.verify(
                                     &mut reader,
                                     r.size,
+                                    r.offset,
                                     sector,
-                                    None,
-                                    &cancel,
-                                )?)
-                            } else {
-                                None
-                            };
-                            let message = crate::signature_scan::continue_scan_scoped(
+                                )?;
+                                *signature_phase = true;
+                            }
+                            let count = metadata.as_deref().map_or(0, Cursor::count);
+                            let scanned = scan_signatures(
                                 &mut reader,
                                 r.size,
-                                options,
-                                cursor,
                                 sector,
-                                allocation.as_ref(),
-                                tick,
-                                found,
+                                options,
+                                signature_cursor,
+                                &work_id,
+                                &cancel,
+                                |mut candidate| {
+                                    candidate.id += count as u32;
+                                    found(candidate);
+                                },
                             )?;
-                            if let Some(plan) = allocation {
-                                plan.proof.verify(&mut reader, &cancel)?;
+                            if metadata.is_none() {
+                                format!("此分区未识别到完整恢复支持的文件记录。{scanned}")
+                            } else {
+                                format!("文件记录扫描找到 {count} 个候选。{scanned}")
                             }
-                            message
                         }
-                        Some(Cursor::Ntfs { mode, cursor }) => crate::ntfs_scan::continue_scan(
-                            &mut reader,
-                            *mode,
-                            cursor,
-                            tick,
-                            found,
-                            directory,
-                        )?,
-                        Some(Cursor::Fat { mode, cursor }) => {
-                            crate::fat_recovery::scan_progress::continue_scan(
-                                &mut reader,
-                                *mode,
-                                cursor,
-                                tick,
-                                found,
-                                directory,
-                            )?
-                        }
-                        Some(Cursor::Ext { mode, cursor }) => {
-                            crate::ext_recovery::scan_progress::continue_scan(
-                                reader.clone(),
-                                *mode,
-                                cursor,
-                                cancel.clone(),
-                                tick,
-                                found,
-                                directory,
-                            )?
+                        Some(cursor) => {
+                            scan_metadata(&mut reader, cursor, &cancel, tick, found, directory)?
                         }
                         None => {
                             if disk_core::btrfs::has_magic(&mut reader, r.size)? {
@@ -447,12 +553,16 @@ pub fn save(id: String) -> Result<Option<String>, String> {
             .map_err(|_| "另一项磁盘任务正在运行")?;
         let (p, files, tree) = stopped(&id)?;
         let cursor = p.cursor.ok_or("此扫描引擎尚未支持保存进度")?;
-        let name = match cursor.kind() {
-            "ntfs" => "DiskStudio-NTFS-progress.dsrecover",
-            "fat" => "DiskStudio-FAT-progress.dsrecover",
-            "exfat" => "DiskStudio-exFAT-progress.dsrecover",
-            "ext" => "DiskStudio-Ext-progress.dsrecover",
-            _ => "DiskStudio-recovery.dsrecover",
+        let name = if matches!(cursor, Cursor::Combined { .. }) {
+            "DiskStudio-complete-recovery.dsrecover"
+        } else {
+            match cursor.kind() {
+                "ntfs" => "DiskStudio-NTFS-progress.dsrecover",
+                "fat" => "DiskStudio-FAT-progress.dsrecover",
+                "exfat" => "DiskStudio-exFAT-progress.dsrecover",
+                "ext" => "DiskStudio-Ext-progress.dsrecover",
+                _ => "DiskStudio-recovery.dsrecover",
+            }
         };
         let progress = Progress::capture(
             p.source,
@@ -483,10 +593,10 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
         };
         let progress = recovery_checkpoint::decode(&bytes, &source)?; // identity/scope before raw open
         let (files, tree) = progress.validate(&source)?;
-        let scoped = match &progress.cursor {
-            Cursor::Signatures { options, cursor } if options.free_only => Some((options, cursor)),
-            _ => None,
-        };
+        let scoped = progress
+            .cursor
+            .signature_progress()
+            .filter(|(options, cursor)| options.free_only && cursor.allocation_digest().is_some());
         let locked = scoped
             .is_some()
             .then(|| platform::StableRead::lock(&source))
@@ -517,6 +627,7 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
         let c = &progress.cursor;
         let sealed = c.sealed();
         let mode = c.mode();
+        let combined = matches!(c, Cursor::Combined { .. });
         {
             let mut s = state();
             idle(&s)?;
@@ -524,14 +635,18 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             s.directories = tree;
             s.scan = Some((id.clone(), source.clone().into()));
             s.scan_name = r.label;
-            s.scan_mode = mode;
+            s.scan_mode = if matches!(c, Cursor::Combined { metadata: None, .. }) {
+                ScanMode::Signatures
+            } else {
+                mode
+            };
             s.scan_completion = if sealed {
                 crate::directory_report::Completion::Ended
             } else {
                 crate::directory_report::Completion::Paused
             };
             s.pending = None;
-            s.job=Some(super::Job{id:id.clone(),title:if mode==ScanMode::Existing{"读取分区目录"}else{"文件恢复扫描"}.into(),state:if sealed{"completed"}else{"paused"}.into(),phase:"已加载进度".into(),done:c.done(),total:c.total(r.size)?,found:s.candidates.len(),message:"已核对磁盘、布局、内容特征和续扫边界。结果和目录是历史观察；少量特征不能证明源内容全部未变，预览与提取会重新核对候选。加载不会自动继续扫描。".into(),sha256:None});
+            s.job=Some(super::Job{id:id.clone(),title:if mode==ScanMode::Existing{"读取分区目录"}else if combined{"完整恢复"}else{"文件恢复扫描"}.into(),state:if sealed{"completed"}else{"paused"}.into(),phase:"已加载进度".into(),done:c.done(),total:c.total(r.size)?,found:s.candidates.len(),message:"已核对磁盘、布局、内容特征和续扫边界。结果和目录是历史观察；少量特征不能证明源内容全部未变，预览与提取会重新核对候选。加载不会自动继续扫描。".into(),sha256:None});
             s.recovery_progress = Some(Saved {
                 id,
                 source,

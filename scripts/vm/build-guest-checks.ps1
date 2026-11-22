@@ -1,4 +1,4 @@
-param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$ExtReconstruction, [switch]$LostBackupBoot, [switch]$LostExt4, [switch]$RetainedLost, [switch]$UnallocatedSearch, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$SignatureMedia, [switch]$SignatureImages, [switch]$TableMbr, [switch]$NtfsWofRecovery, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone, [switch]$SurfaceRefinement, [switch]$SurfaceRefinementSetup, [switch]$SurfaceTimeout, [switch]$SurfaceParallel, [switch]$SurfaceRepair, [switch]$SectorEdit)
+param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$ExtReconstruction, [switch]$LostBackupBoot, [switch]$LostExt4, [switch]$RetainedLost, [switch]$UnallocatedSearch, [switch]$OfficePreview, [switch]$PagedPreview, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$SignatureMedia, [switch]$CompleteRecovery, [switch]$SignatureImages, [switch]$TableMbr, [switch]$NtfsWofRecovery, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone, [switch]$SurfaceRefinement, [switch]$SurfaceRefinementSetup, [switch]$SurfaceTimeout, [switch]$SurfaceParallel, [switch]$SurfaceRepair, [switch]$SectorEdit)
 $ErrorActionPreference = 'Stop'
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 Push-Location $diskStudioProject
@@ -9,7 +9,7 @@ try {
     # Build only. Never launch this executable on the host.
     # Apply CRT selection to C dependencies too (not just the final Rust crate).
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
-    $fixtureBatches = @($SectorEdit, $SurfaceRepair, $SurfaceParallel, $SurfaceTimeout, $SurfaceRefinementSetup, $SurfaceRefinement, $NtfsReconstruction, $FatReconstruction, $ExtReconstruction, $LostBackupBoot, $LostExt4, $RetainedLost, $UnallocatedSearch, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $SignatureMedia, $SignatureImages, $TableMbr, $NtfsWofRecovery, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
+    $fixtureBatches = @($SectorEdit, $SurfaceRepair, $SurfaceParallel, $SurfaceTimeout, $SurfaceRefinementSetup, $SurfaceRefinement, $NtfsReconstruction, $FatReconstruction, $ExtReconstruction, $LostBackupBoot, $LostExt4, $RetainedLost, $UnallocatedSearch, $OfficePreview, $PagedPreview, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $SignatureMedia, $CompleteRecovery, $SignatureImages, $TableMbr, $NtfsWofRecovery, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
     if (@($fixtureBatches).Count -gt 1) { throw 'Select one fixture batch' }
     if ($fixtureBatches) {
         $desktopHash = (Get-FileHash -LiteralPath 'target/release/diskstudio.exe').Hash.ToLowerInvariant()
@@ -25,8 +25,10 @@ try {
         }
         $env:DISKSTUDIO_ACCEPTANCE_WOF_IMAGE_SHA256 = (Get-FileHash -LiteralPath $wof.FullName).Hash.ToLowerInvariant()
     }
-    cargo build --manifest-path scripts/vm/guest-checks/Cargo.toml --release --target-dir target/guest-checks
+    $diskStudioGuestBuild = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target/guest-checks' }
+    cargo build --manifest-path scripts/vm/guest-checks/Cargo.toml --release --target-dir $diskStudioGuestBuild
     if ($LASTEXITCODE -ne 0) { throw 'Guest acceptance driver build failed' }
+    $diskStudioGuestExe = Join-Path $diskStudioGuestBuild 'release/diskstudio-guest-checks.exe'
     $diskStudioPayload = Join-Path $diskStudioProject '.vm\payload'
     if (!(Test-Path -LiteralPath $diskStudioPayload)) { New-Item -ItemType Directory -Path $diskStudioPayload | Out-Null }
     if ((Get-Item -LiteralPath $diskStudioPayload).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Payload must not be a link' }
@@ -99,6 +101,8 @@ try {
             @('Table-MBR-4Kn-Prepare.exe', 'Table-MBR-4Kn-Verify.exe')
         } elseif ($SignatureImages) {
             @('Signature-Images-4Kn-Prepare.exe', 'Signature-Images-4Kn-Verify.exe')
+        } elseif ($CompleteRecovery) {
+            @('Complete-Recovery-4Kn-Prepare.exe', 'Complete-Recovery-4Kn-Verify.exe')
         } elseif ($SignatureMedia) {
             @('Signature-Media-4Kn-Prepare.exe', 'Signature-Media-4Kn-Verify.exe')
         } elseif ($SignatureFormats) {
@@ -123,6 +127,10 @@ try {
             @('Resize-Clone-Prepare.exe', 'Resize-Clone-After-Growth.exe', 'Resize-Clone-Verify.exe')
         } elseif ($BitLockerMarker) {
             @('BitLocker-Marker-Prepare.exe', 'BitLocker-Marker-Verify.exe')
+        } elseif ($PagedPreview) {
+            @('Paged-Preview-Prepare.exe', 'Paged-Preview-Verify.exe')
+        } elseif ($OfficePreview) {
+            @('Office-Preview-Prepare.exe', 'Office-Preview-Verify.exe')
         } elseif ($UnallocatedSearch) {
             @('Unallocated-Search-Prepare.exe', 'Unallocated-Search-Verify.exe')
         } elseif ($RetainedLost) {
@@ -141,37 +149,37 @@ try {
         foreach ($name in $testEntrypoints) {
             $destination = Join-Path $diskStudioPayload $name
             if (Test-Path -LiteralPath $destination) { throw "Preserve existing guest entry: $destination" }
-            Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination $destination
+            Copy-Item -LiteralPath $diskStudioGuestExe -Destination $destination
             Get-FileHash -LiteralPath $destination
         }
         return
     }
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Guest-Checks.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Fat-Resume-Checks.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Ext-Resume-Checks.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Seed.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Verify.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Inspect.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Device-State-Baseline.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Device-State-Verify.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Maintenance-Zero-Verify.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'Maintenance-Inspect.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext-Format.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext-Resize.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Checks.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Report.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT-Report.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT-Finish.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Volume-Probe.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Lock-Probe.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Metadata-Checks.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Support.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Format.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Resize.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Resume.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Online.exe')
-    Copy-Item -LiteralPath 'target/guest-checks/release/diskstudio-guest-checks.exe' -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-After-UI.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Guest-Checks.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Fat-Resume-Checks.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Ext-Resume-Checks.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Seed.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Verify.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Lost-Fixture-Inspect.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Device-State-Baseline.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Device-State-Verify.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Maintenance-Zero-Verify.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'Maintenance-Inspect.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext-Format.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext-Resize.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Checks.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Report.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT-Report.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Native-FAT-Finish.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Volume-Probe.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Lock-Probe.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Metadata-Checks.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Format-Support.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Format.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Resize.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Resume.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-Online.exe')
+    Copy-Item -LiteralPath $diskStudioGuestExe -Destination (Join-Path $diskStudioPayload 'DiskStudio-Ext4-After-UI.exe')
     Get-FileHash -LiteralPath (Join-Path $diskStudioPayload 'DiskStudio-Guest-Checks.exe') -Algorithm SHA256
 } finally {
     $env:DISKSTUDIO_ACCEPTANCE_WOF_IMAGE_SHA256 = $diskStudioPreviousWofHash
