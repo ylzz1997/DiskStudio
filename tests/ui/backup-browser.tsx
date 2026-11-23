@@ -59,6 +59,9 @@ function Harness() {
           setEvent(`读取分区 ${id}：${backup.partitions[id].name}`);
         }}
         onReconstruct={(id) => setEvent(`重建分区 ${id}`)}
+        onSignatures={(request) => setEvent(`签名扫描 ${JSON.stringify(request)}`)}
+        onLoadProgress={(source) => setEvent(`加载进度 ${JSON.stringify(source)}`)}
+        recoveryProgress={null}
         onPoint={(point) => {
           setInfo({
             ...info!,

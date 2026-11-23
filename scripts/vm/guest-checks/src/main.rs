@@ -19,6 +19,10 @@ mod backup_secrets;
 #[path = "../../../../src-tauri/src/bitlocker.rs"]
 mod bitlocker;
 mod bitlocker_checks;
+#[path = "../../../../src-tauri/src/boot_configuration.rs"]
+mod boot_configuration;
+#[path = "../../../../src-tauri/src/boot_inspection.rs"]
+mod boot_inspection;
 mod btrfs_checks;
 #[path = "../../../../src-tauri/src/btrfs_recovery.rs"]
 mod btrfs_recovery;
@@ -72,6 +76,8 @@ mod image_bridge;
 mod image_browser;
 #[path = "../../../../src-tauri/src/image_files.rs"]
 mod image_files;
+#[path = "../../../../src-tauri/src/parallels_descriptor.rs"]
+mod parallels_descriptor;
 mod letter_outcome_checks;
 mod lost_backup_boot_checks;
 mod lost_fixture;
@@ -144,6 +150,8 @@ mod recovery_tree;
 mod resize_clone_checks;
 mod retained_restore_checks;
 mod retained_partition_checks;
+mod retained_signature_checks;
+mod image_chain_checks;
 mod file_preview_checks;
 #[path = "../../../../src-tauri/src/image_convert.rs"]
 mod image_convert;
@@ -151,9 +159,13 @@ mod unallocated_search_checks;
 mod archive_restore_checks;
 mod capacity_restore_checks;
 mod fat_restore_checks;
+mod device_image_checks;
+mod boot_inspection_checks;
 #[path = "../../../../src-tauri/src/sector_copy.rs"]
 mod sector_copy;
 mod sector_copy_checks;
+#[path = "../../../../src-tauri/src/sector_edit.rs"]
+mod sector_edit;
 #[path = "../../../../src-tauri/src/signature_checkpoint.rs"]
 mod signature_checkpoint;
 #[path = "../../../../src-tauri/src/signature_scan.rs"]
@@ -700,6 +712,35 @@ fn main() {
                 | "Ext-Journal-Resume-4Kn-Verify"
                 | "Ext-Complete-4Kn-Prepare"
                 | "Ext-Complete-4Kn-Verify"
+                | "Retained-Signatures-4Kn-Prepare"
+                | "Retained-Signatures-4Kn-Verify"
+                | "Retained-Progress-4Kn-Prepare"
+                | "Retained-Progress-4Kn-Verify"
+                | "Vhdx-Chain-4Kn-Prepare"
+                | "Vhdx-Chain-4Kn-Verify"
+                | "Vmdk-Chain-4Kn-Prepare"
+                | "Vmdk-Chain-4Kn-Verify"
+                | "Vdi-Chain-4Kn-Prepare"
+                | "Vdi-Chain-4Kn-Verify"
+                | "Vhdx-Log-4Kn-Prepare"
+                | "Vhdx-Log-4Kn-Verify"
+                | "Esxi-Chain-4Kn-Prepare"
+                | "Esxi-Chain-4Kn-Verify"
+                | "Parallels-Bundle-4Kn-Prepare"
+                | "Parallels-Bundle-4Kn-Verify"
+                | "Parallels-History-4Kn-Prepare"
+                | "Parallels-History-4Kn-Verify"
+                | "Image-Archive-4Kn-Verify"
+                | "Device-Image-4Kn-Prepare"
+                | "Device-Image-4Kn-Verify"
+                | "Boot-Inspection-4Kn-Prepare"
+                | "Boot-Inspection-4Kn-Verify"
+                | "Boot-References-4Kn-Prepare"
+                | "Boot-References-4Kn-Verify"
+                | "Boot-Inheritance-4Kn-Prepare"
+                | "Boot-Inheritance-4Kn-Verify"
+                | "Boot-Repair-4Kn-Prepare"
+                | "Boot-Repair-4Kn-Verify"
                 | "Table-MBR-4Kn-Prepare"
                 | "Table-MBR-4Kn-Verify"
                 | "Table-MBR-4Kn-Record"
@@ -898,6 +939,35 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Ext-Journal-Resume-4Kn-Verify") => signature_scope_checks::verify_ext_journal_resume(),
         Some("Ext-Complete-4Kn-Prepare") => signature_scope_checks::prepare_ext_complete(),
         Some("Ext-Complete-4Kn-Verify") => signature_scope_checks::verify_ext_complete(),
+        Some("Retained-Signatures-4Kn-Prepare") => retained_signature_checks::prepare(),
+        Some("Retained-Signatures-4Kn-Verify") => retained_signature_checks::verify(),
+        Some("Retained-Progress-4Kn-Prepare") => retained_signature_checks::prepare_progress(),
+        Some("Retained-Progress-4Kn-Verify") => retained_signature_checks::verify_progress(),
+        Some("Vhdx-Chain-4Kn-Prepare") => retained_signature_checks::prepare_vhdx_chain(),
+        Some("Vhdx-Chain-4Kn-Verify") => retained_signature_checks::verify_vhdx_chain(),
+        Some("Vmdk-Chain-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::VMDK),
+        Some("Vmdk-Chain-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::VMDK),
+        Some("Vdi-Chain-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::VDI),
+        Some("Vdi-Chain-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::VDI),
+        Some("Vhdx-Log-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::VHDX_LOG),
+        Some("Vhdx-Log-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::VHDX_LOG),
+        Some("Esxi-Chain-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::ESXI),
+        Some("Esxi-Chain-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::ESXI),
+        Some("Parallels-Bundle-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::PARALLELS),
+        Some("Parallels-Bundle-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::PARALLELS),
+        Some("Parallels-History-4Kn-Prepare") => image_chain_checks::prepare(image_chain_checks::PARALLELS_HISTORY),
+        Some("Parallels-History-4Kn-Verify") => image_chain_checks::verify(image_chain_checks::PARALLELS_HISTORY),
+        Some("Image-Archive-4Kn-Verify") => image_chain_checks::verify_image_archives(),
+        Some("Device-Image-4Kn-Prepare") => device_image_checks::prepare(),
+        Some("Device-Image-4Kn-Verify") => device_image_checks::verify(),
+        Some("Boot-Inspection-4Kn-Prepare") => boot_inspection_checks::prepare(),
+        Some("Boot-Inspection-4Kn-Verify") => boot_inspection_checks::verify(),
+        Some("Boot-References-4Kn-Prepare") => boot_inspection_checks::prepare_references(),
+        Some("Boot-References-4Kn-Verify") => boot_inspection_checks::verify_references(),
+        Some("Boot-Inheritance-4Kn-Prepare") => boot_inspection_checks::prepare_inheritance(),
+        Some("Boot-Inheritance-4Kn-Verify") => boot_inspection_checks::verify_inheritance(),
+        Some("Boot-Repair-4Kn-Prepare") => boot_inspection_checks::prepare_repair(),
+        Some("Boot-Repair-4Kn-Verify") => boot_inspection_checks::verify_repair(),
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
         Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
         Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),

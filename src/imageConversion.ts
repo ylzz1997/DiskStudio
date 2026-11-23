@@ -178,9 +178,10 @@ export async function convertImage(
       if (
         reader.size !== source.size ||
         reader.sectorSize !== source.sectorSize ||
-        reader.format !== source.format
+        reader.format !== source.format ||
+        reader.parallelsSnapshot?.id !== source.parallelsSnapshot?.id
       )
-        throw Error("重新读取时源镜像类型、容量或扇区大小变化。");
+        throw Error("重新读取时源镜像类型、容量、扇区大小或快照发生变化。");
       await reader.verify();
       for (let at = 0; at < reader.size; at += 1024 ** 2) {
         check();

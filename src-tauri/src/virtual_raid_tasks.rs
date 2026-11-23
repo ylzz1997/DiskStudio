@@ -576,6 +576,8 @@ pub fn open(request: OpenRequest) -> Result<Status, String> {
                 options: request.options,
                 partitions: Vec::new(),
                 warning: "已打开整组逻辑扇区，可搜索丢失分区。".into(),
+                verification_notes: Vec::new(),
+                parallels_snapshot: None,
                 format: String::new(),
                 files: Vec::new(),
             }
@@ -875,6 +877,7 @@ impl Source {
                 offset: offset.to_string(),
                 size: size.to_string(),
                 sector: self.saved.info.options.sector,
+                parallels_snapshot: None,
             },
             recovered_filesystem: match &self.scope {
                 Scope::Found { candidate, .. } => Some(candidate.filesystem.clone()),
@@ -981,6 +984,8 @@ mod tests {
                 },
                 partitions: Vec::new(),
                 warning: String::new(),
+                verification_notes: Vec::new(),
+                parallels_snapshot: None,
                 format: "RAID".into(),
                 files: vec!["a.img".into(), "b.img".into()],
             },

@@ -2,9 +2,10 @@ import type { SignatureKind, SignatureSettings } from "./signatureModel";
 import type { Language } from "./i18n/languages";
 import { translate } from "./i18n/translate";
 import { formatSize } from "./types";
+export type RetainedScanSelection = { kind: "image" | "backup"; id: string; partition: number | null };
 export type RecoveryProgress = {
   id: string;
-  source: { target: string; layoutKey: string; partition: number | null };
+  source: { target: string; layoutKey: string; partition: number | null } | RetainedScanSelection;
   engine: "signatures" | "ntfs" | "fat" | "exfat" | "ext" | "extJournal";
   mode: "deleted" | "allFiles" | "existing" | "signatures";
   combined?: boolean;
@@ -19,6 +20,7 @@ export type RecoveryProgress = {
   total: number;
   found: number;
   running: boolean;
+  canPause?: boolean;
   canResume: boolean;
   canSave: boolean;
   loaded: boolean;
@@ -31,10 +33,19 @@ export function progressMatches(
 ) {
   return (
     !!progress &&
+    "target" in progress.source &&
     progress.source.target === target &&
     progress.source.layoutKey === layoutKey &&
     progress.source.partition === partition
   );
+}
+export function retainedProgressMatches(
+  progress: RecoveryProgress | null,
+  kind: RetainedScanSelection["kind"],
+  info: { id: string; scanId: string | null } | null,
+): progress is RecoveryProgress & { source: RetainedScanSelection } {
+  return !!progress && !!info && "kind" in progress.source && progress.source.kind === kind
+    && progress.source.id === info.id && progress.id === info.scanId;
 }
 export function settingsFromProgress(p: RecoveryProgress): SignatureSettings {
   if ((!p.combined && p.engine !== "signatures") || !p.options)

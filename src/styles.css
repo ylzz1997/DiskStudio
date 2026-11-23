@@ -2403,6 +2403,62 @@ i {
   gap: 17px;
   flex-shrink: 0;
 }
+
+.boot-report,
+.boot-volume,
+.boot-store,
+.boot-artifacts {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+.boot-report { margin-top: 1rem; }
+.boot-volume { padding: 0.9rem 0; }
+.boot-volume h3,
+.boot-volume h4,
+.boot-volume p { margin: 0; }
+.boot-artifacts { list-style: none; margin: 0; padding: 0; }
+.boot-artifacts li,
+.boot-entry-manager {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.boot-artifacts li > div,
+.boot-entry-manager > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.65rem;
+}
+.boot-store small,
+.boot-artifacts small { color: var(--muted); }
+.boot-inherited { font-size: 0.84em; }
+.boot-inherited summary { cursor: pointer; }
+.boot-inherited small { display: block; margin: 0.3rem 0 0 1rem; }
+.boot-repair {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
+  overflow-wrap: anywhere;
+}
+.boot-repair > summary { cursor: pointer; font-weight: 600; }
+.boot-repair[open] > summary { margin-bottom: 0.75rem; }
+.boot-repair-fields {
+  display: grid;
+  gap: 0.75rem;
+  border: 0;
+  padding: 0;
+  margin: 0.8rem 0;
+  min-width: 0;
+}
+.boot-repair-fields label { display: grid; gap: 0.3rem; }
+.boot-repair-fields select { width: 100%; min-width: 0; }
+.boot-repair-fields .checkbox-row { display: flex; align-items: center; }
+.boot-repair .dialog-actions { margin-top: 0.75rem; }
+.boot-repair-preview { margin: 0.65rem 0; }
 .button {
   display: inline-flex;
   gap: 8px;
@@ -4956,6 +5012,16 @@ i {
   align-items: flex-start;
   gap: 8px;
   line-height: 1.6;
+}
+.parallels-snapshot-picker {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  min-width: 0;
+}
+.parallels-snapshot-picker select {
+  width: 100%;
+  min-width: 0;
 }
 .image-source-check input {
   margin-top: 5px;

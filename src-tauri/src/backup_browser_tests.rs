@@ -491,17 +491,19 @@ fn three_points_keep_independent_readers_and_validate_each_logical_version() {
     assert_ne!(first.info.id, browser.info.id);
     assert_eq!(first.info.selected_point, base_id);
     assert_eq!(browser.info.selected_point, newest_id);
+    assert_ne!(first.recovery_identity().unwrap(), browser.recovery_identity().unwrap());
+    assert_eq!(first.recovery_identity().unwrap(), browser.select_point(&base_id, |_, _| Ok(())).unwrap().recovery_identity().unwrap());
     for (view, id, label) in [
         (&browser, &newest_id, "最新增量备份"),
         (&middle, &middle_id, "此前第 1 层增量备份"),
         (&first, &base_id, "最早完整备份"),
     ] {
-        let source = view.provenance(0).unwrap();
+        let source = view.scope_provenance(Some(0)).unwrap();
         assert_eq!(&source.point_id, id);
         assert_eq!(source.point_label, label);
         assert_eq!(source.archive_name, "three");
-        assert!(view.source_label(0).unwrap().contains(label));
-        assert!(view.provenance(99).is_err());
+        assert!(view.scope_label(Some(0)).unwrap().starts_with("three / "));
+        assert!(view.scope_provenance(Some(99)).is_err());
         let digest = view.verify_content(|_, _| Ok(())).unwrap();
         assert_eq!(
             digest,

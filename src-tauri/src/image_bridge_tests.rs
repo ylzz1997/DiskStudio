@@ -226,6 +226,6 @@ fn production_image_and_filesystem_readers_scan_and_extract_through_binary_frame
     )
     .unwrap();
     assert_eq!(out, b"12345");
-    assert_eq!(browser.provenance(0).unwrap().format, "VDI");
+    assert_eq!(browser.scope_provenance(Some(0)).unwrap().format, "VDI");
     assert!(bridge.healthy().is_ok());
 }

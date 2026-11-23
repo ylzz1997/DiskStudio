@@ -3,7 +3,16 @@ import { openVmdkSource, MissingVmdkFilesError } from "./vmdkBundle";
 import { openVmdk, vmdkBudget } from "./vmdkImage";
 import { parseVmdkDescriptor, vmdkNameKey } from "./vmdkDescriptor";
 import { memoryFile, MiB } from "../tests/fixtures/vhd-memory";
-import { raw, fixture, set64 } from "../tests/fixtures/vmdk-data";
+import {
+  raw,
+  fixture,
+  set64,
+  set32,
+  u32,
+  table,
+  entry,
+  editDescriptor,
+} from "../tests/fixtures/vmdk-data";
 import {
   bundleBytes,
   bundleFile,
@@ -102,7 +111,7 @@ it("binds safe case-folded names and rejects ambiguous names and self references
     expect(() => vmdkNameKey(name)).toThrow();
   expect(vmdkNameKey("数据分卷.vmdk")).toBe("数据分卷.vmdk");
 });
-it("rejects parent chains, unsupported forms, malformed geometry and excessive extents without touching companions", async () => {
+it("rejects inconsistent parent metadata, unsupported forms, malformed geometry and excessive extents without touching companions", async () => {
   const input = memoryFile(bundleBytes("flat0.bin"), "flat0.bin");
   for (const edit of [
     (s: string) => s.replace("ffffffff", "abcd1234"),
@@ -134,6 +143,125 @@ it("rejects parent chains, unsupported forms, malformed geometry and excessive e
   await expect(
     openVmdkSource(bundleFile("flat.vmdk"), Array(65).fill(input.file)),
   ).rejects.toThrow("64");
+});
+const parentClause = (name: string, cid: string) =>
+  `parentCID=${cid}\nparentFileNameHint="${name}"`;
+
+it("reads a split child and monolithic snapshot over a flat base with inherited, zeroed and overridden grains", async () => {
+  const original = raw();
+  const base = textFile(
+    desc('RW 16384 FLAT "base-flat.bin" 0', "monolithicFlat"),
+    "base.vmdk",
+  );
+  const middle = fixture();
+  editDescriptor(middle, (s) =>
+    s
+      .replace(/^CID=[0-9a-f]+/im, "CID=a1111111")
+      .replace(
+        "parentCID=ffffffff",
+        parentClause("../old/base.vmdk", "12345678"),
+      ),
+  );
+  set32(middle, 8, u32(middle, 8) | 4);
+  const grain = 65536;
+  const changed = u32(middle, table(middle) + 4) * 512;
+  expect(changed).toBeGreaterThan(512);
+  for (let index = 0; index < 128; index++) entry(middle, index, 0);
+  entry(middle, 0, 1);
+  entry(middle, 1, changed / 512);
+  middle.fill(0x94, changed, changed + grain);
+  const names = bundleNames.sparse;
+  const a = bundleBytes(names[1]),
+    b = bundleBytes(names[2]);
+  for (const extent of [a, b])
+    for (let index = 0; index < 64; index++) entry(extent, index, 0);
+  const tail = u32(bundleBytes(names[2]), table(b) + 63 * 4) * 512;
+  expect(tail).toBeGreaterThan(512);
+  entry(b, 0, tail / 512);
+  b.fill(0x5e, tail, tail + grain);
+  const latest = textFile(
+    desc(
+      'RW 8192 SPARSE "latest-s001.vmdk"\nRW 8192 SPARSE "latest-s002.vmdk"',
+      "twoGbMaxExtentSparse",
+    ).replace("parentCID=ffffffff", parentClause("MID.vmdk", "a1111111")),
+    "latest.vmdk",
+  );
+  const disk = memoryFile(original, "base-flat.bin").file,
+    first = memoryFile(a, "latest-s001.vmdk").file,
+    second = memoryFile(b, "latest-s002.vmdk").file,
+    parent = memoryFile(middle, "mid.vmdk").file,
+    inputs = [second, base, disk, first, parent];
+  await expect(
+    openVmdkSource(latest, [first, second, base, disk]),
+  ).rejects.toMatchObject({
+    missing: ["MID.vmdk"],
+    kind: "parent",
+  });
+  const image = await openVmdkSource(latest, inputs, undefined, true);
+  expect(image.chain).toEqual(["latest.vmdk", "mid.vmdk", "base.vmdk"]);
+  expect(image.fileCount).toBe(6);
+  expect(image.fileSize).toBe(
+    [latest, ...inputs].reduce((n, f) => n + f.size, 0),
+  );
+  const expected = original.slice();
+  expected.fill(0, 0, grain);
+  expected.fill(0x94, grain, grain * 2);
+  expected.fill(0x5e, 4 * MiB, 4 * MiB + grain);
+  for (let offset = 0; offset < 8 * MiB;) {
+    const length = Math.min(400_019, 8 * MiB - offset);
+    expect(
+      Buffer.from(await image.read(offset, length)).equals(
+        expected.subarray(offset, offset + length),
+      ),
+    ).toBe(true);
+    offset += length;
+  }
+  await image.verify();
+  middle[512] ^= 1;
+  await expect(image.verify()).rejects.toThrow("发生变化");
+});
+
+it("rejects wrong parent CID or capacity, cycles, cross-layer aliases and excessive depth", async () => {
+  const sparse = (name: string, parent: string, id: string = "12345678") => {
+    const bytes = fixture();
+    editDescriptor(bytes, (s) =>
+      s
+        .replace(/^CID=[0-9a-f]+/im, `CID=${id}`)
+        .replace("parentCID=ffffffff", parentClause(parent, "12345678")),
+    );
+    return memoryFile(bytes, name).file;
+  };
+  const leaf = sparse("leaf.vmdk", "parent.vmdk");
+  const changed = sparse("parent.vmdk", "base.vmdk", "a1111111");
+  const short = textFile(
+    desc('RW 8192 FLAT "base.bin" 0', "monolithicFlat"),
+    "parent.vmdk",
+  );
+  for (const invalid of [changed, short])
+    await expect(openVmdkSource(leaf, [invalid])).rejects.toThrow(/CID|容量/);
+  await expect(
+    openVmdkSource(leaf, [sparse("parent.vmdk", "leaf.vmdk")]),
+  ).rejects.toThrow("循环");
+  const alias = textFile(
+    desc('RW 16384 SPARSE "parent.vmdk"', "twoGbMaxExtentSparse").replace(
+      "parentCID=ffffffff",
+      parentClause("parent.vmdk", "12345678"),
+    ),
+    "alias.vmdk",
+  );
+  const base = textFile(
+    desc('RW 16384 FLAT "base.bin" 0', "monolithicFlat"),
+    "parent.vmdk",
+  );
+  await expect(
+    openVmdkSource(alias, [base, memoryFile(raw(), "base.bin").file]),
+  ).rejects.toThrow("重复使用");
+  const chain = Array.from({ length: 16 }, (_, index) =>
+    sparse(`layer${index}.vmdk`, `layer${index + 1}.vmdk`),
+  );
+  await expect(openVmdkSource(chain[0], chain.slice(1))).rejects.toThrow(
+    "16 层",
+  );
 });
 it("allows disjoint ranges in a shared flat file but rejects overlapping and sparse aliases", async () => {
   const input = memoryFile(raw(), "data.bin").file;

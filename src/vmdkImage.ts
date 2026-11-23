@@ -1,4 +1,4 @@
-// Standalone hosted sparse VMDK. Read only the explicitly selected File;
+// Hosted sparse VMDK. Read only the explicitly selected File;
 // embedded extent names are checked as metadata, never resolved as paths.
 import {
   logicalLimit,
@@ -17,7 +17,8 @@ export const vmdkBudget = (stream: ImageReadMode = false) => ({
   metaBytes: 0,
   mapBytes: 0,
 });
-type Budget = ReturnType<typeof vmdkBudget>;
+export type VmdkBudget = ReturnType<typeof vmdkBudget>;
+type ReadParent = LogicalImage["read"];
 const MiB = 1024 ** 2,
   TABLE_LIMIT = 32 * MiB;
 const dv = (b: Uint8Array) =>
@@ -34,7 +35,7 @@ const same = (a: Uint8Array, b: Uint8Array) =>
 const align = (n: number) => Math.ceil(n / 512) * 512;
 type Span = { at: number; end: number };
 type Inflate = (bytes: Uint8Array, expected: number) => Promise<Uint8Array>;
-function range(at: number, length: number, size: number) {
+export function vmdkRange(at: number, length: number, size: number) {
   if (
     !Number.isSafeInteger(at) ||
     !Number.isSafeInteger(length) ||
@@ -43,6 +44,56 @@ function range(at: number, length: number, size: number) {
     at > size - length
   )
     throw Error("VMDK 读取范围越界。");
+}
+export function chargeVmdkTables(budget: VmdkBudget, length: number) {
+  budget.mapBytes += length;
+  if (budget.mapBytes > TABLE_LIMIT)
+    throw Error("VMDK 粒度映射超过 32 MiB 上限。");
+}
+
+export function vmdkFileReads(
+  file: Pick<ImageFile, "size" | "slice">,
+  budget: VmdkBudget,
+) {
+  if (!Number.isSafeInteger(file.size) || file.size < 512 || file.size % 512)
+    throw Error("VMDK 文件长度无效或未按扇区对齐。");
+  if (budget.stream) {
+    budget.byteLimit += file.size * fileFactor(budget.stream);
+    budget.callLimit += (file.size / 512) * fileFactor(budget.stream);
+  }
+  const physical = async (at: number, length: number) => {
+    vmdkRange(at, length, file.size);
+    budget.fileBytes += length;
+    if (
+      length > TABLE_LIMIT ||
+      budget.fileBytes > budget.byteLimit ||
+      ++budget.calls > budget.callLimit
+    )
+      throw Error("VMDK 分区表读取超过资源上限。");
+    const b = new Uint8Array(await file.slice(at, at + length).arrayBuffer());
+    if (b.length !== length) throw Error("VMDK 文件读取不完整。");
+    return b;
+  };
+  const saved: { at: number; bytes: Uint8Array }[] = [];
+  const capture = async (at: number, length: number) => {
+    budget.metaBytes += length;
+    if (budget.metaBytes > 66 * MiB)
+      throw Error("VMDK 元数据超过 66 MiB 上限。");
+    const bytes = await physical(at, length);
+    saved.push({ at, bytes });
+    return bytes;
+  };
+  return {
+    physical,
+    capture,
+    async verify() {
+      for (const { at, bytes } of saved)
+        if (!same(bytes, await physical(at, bytes.length)))
+          throw Error(
+            "读取期间 VMDK 索引、描述符或压缩标记发生变化，请重新打开离线副本。",
+          );
+    },
+  };
 }
 function disjoint(spans: Span[]) {
   spans.sort((a, b) => a.at - b.at);
@@ -107,45 +158,20 @@ function header(bytes: Uint8Array, external = false) {
 export async function openVmdk(
   file: Pick<ImageFile, "size" | "slice">,
   inflate?: Inflate,
-  external?: { size: number; budget: Budget },
+  external?: { size: number; budget: VmdkBudget; parent?: ReadParent },
   stream: ImageReadMode = false,
+  chain?: {
+    budget: VmdkBudget;
+    bind: (
+      desc: ReturnType<typeof parseVmdkDescriptor>,
+    ) => Promise<ReadParent | undefined>;
+  },
 ): Promise<LogicalImage> {
-  if (
-    !Number.isSafeInteger(file.size) ||
-    file.size < 512 ||
-    file.size % 512 !== 0
-  )
-    throw Error("VMDK 文件长度无效或未按扇区对齐。");
-  const budget = external?.budget ?? vmdkBudget(stream);
-  if (budget.stream) {
-    budget.byteLimit += file.size * fileFactor(budget.stream);
-    budget.callLimit += (file.size / 512) * fileFactor(budget.stream);
-  }
+  const budget = external?.budget ?? chain?.budget ?? vmdkBudget(stream);
+  const { physical, capture, verify } = vmdkFileReads(file, budget);
   let logicalBytes = 0,
     expandedBytes = 0;
-  const physical = async (at: number, length: number) => {
-    range(at, length, file.size);
-    budget.fileBytes += length;
-    if (
-      length > TABLE_LIMIT ||
-      budget.fileBytes > budget.byteLimit ||
-      ++budget.calls > budget.callLimit
-    )
-      throw Error("VMDK 分区表读取超过资源上限。");
-    const b = new Uint8Array(await file.slice(at, at + length).arrayBuffer());
-    if (b.length !== length) throw Error("VMDK 文件读取不完整。");
-    return b;
-  };
-  const saved: { at: number; bytes: Uint8Array }[] = [],
-    spans: Span[] = [];
-  const capture = async (at: number, length: number) => {
-    budget.metaBytes += length;
-    if (budget.metaBytes > 66 * MiB)
-      throw Error("VMDK 元数据超过 66 MiB 上限。");
-    const bytes = await physical(at, length);
-    saved.push({ at, bytes });
-    return bytes;
-  };
+  const spans: Span[] = [];
   const meta = async (at: number, length: number) => {
     const bytes = await capture(at, length);
     spans.push({ at, end: at + length });
@@ -185,6 +211,7 @@ export async function openVmdk(
   if (overhead > file.size) throw Error("VMDK 元数据区不完整。");
   const descAt = u64(active, 28) * 512,
     descLength = u64(active, 36) * 512;
+  let parent = external?.parent;
   if (external) {
     if (size !== external.size || compressed || footerIndex)
       throw Error("VMDK 稀疏分卷的容量、描述符或编码与主描述文件不一致。");
@@ -218,13 +245,14 @@ export async function openVmdk(
       desc.type !== (compressed ? "streamoptimized" : "monolithicsparse")
     )
       throw Error("VMDK 描述符与头部容量或类型不一致。");
+    if (desc.parent && !chain)
+      throw Error("VMDK 差分层须与显式选择的父盘链一起打开。");
+    if (chain) parent = await chain.bind(desc);
   }
   const grains = Math.ceil(size / grain),
     directories = Math.ceil(grains / 512),
     gdLength = align(directories * 4);
-  budget.mapBytes += directories * 2048;
-  if (budget.mapBytes > TABLE_LIMIT)
-    throw Error("VMDK 粒度映射超过 32 MiB 上限。");
+  chargeVmdkTables(budget, directories * 2048);
   const claimTable = async (at: number, length: number, type: number) => {
     if (
       at < 512 ||
@@ -278,7 +306,7 @@ export async function openVmdk(
     if (entry <= 1) continue;
     const at = entry * 512,
       length = compressed ? 12 : grain;
-    range(at, length, file.size);
+    vmdkRange(at, length, file.size);
     if (
       at < overhead ||
       (!compressed && at % grain !== 0) ||
@@ -315,7 +343,7 @@ export async function openVmdk(
       length > 2 * grain
     )
       throw Error("VMDK 压缩粒度的 LBA 或长度无效。");
-    range(at, align(12 + length), file.size);
+    vmdkRange(at, align(12 + length), file.size);
     let lo = 0,
       hi = count;
     while (lo < hi) {
@@ -346,7 +374,7 @@ export async function openVmdk(
     warnings,
     notes,
     async read(at, length) {
-      range(at, length, size);
+      vmdkRange(at, length, size);
       logicalBytes += length;
       if (length > MiB || logicalBytes > logicalLimit(budget.stream, size))
         throw Error("仅允许读取 VMDK 分区表所需的有限字节。");
@@ -355,24 +383,26 @@ export async function openVmdk(
         const offset = at + done,
           index = Math.floor(offset / grain),
           within = offset % grain,
-          run = Math.min(length - done, grain - within),
           entry = mapping[index];
+        let run = Math.min(length - done, grain - within);
         if (entry > 1) {
           const bytes = compressed
             ? (await expand(index, entry * 512)).subarray(within, within + run)
             : await physical(entry * 512 + within, run);
           out.set(bytes, done);
+        } else if (entry === 0 && parent) {
+          for (
+            let next = index + 1;
+            done + run < length && mapping[next] === 0;
+            next++
+          )
+            run = Math.min(length - done, run + grain);
+          out.set(await parent(offset, run), done);
         }
         done += run;
       }
       return out;
     },
-    async verify() {
-      for (const { at, bytes } of saved)
-        if (!same(bytes, await physical(at, bytes.length)))
-          throw Error(
-            "读取期间 VMDK 索引、描述符或压缩标记发生变化，请重新打开离线副本。",
-          );
-    },
+    verify,
   };
 }

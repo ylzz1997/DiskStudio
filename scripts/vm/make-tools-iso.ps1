@@ -107,6 +107,41 @@ if ($GuestTools -or $DesktopOnly -or $LdmFixture -or $StorageSpacesFixture -or $
         }
         $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
     }
+    if ('Boot-Inspection-4Kn-Prepare.exe' -in $GuestTools) {
+        $diskStudioBootFixtures = @{
+            'Boot-UEFI.img' = 42MB
+            'Boot-BIOS.dsbackup' = (10MB + 4096)
+            'Boot-Dirty.img' = 8MB
+        }
+        foreach ($diskStudioName in $diskStudioBootFixtures.Keys) {
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne $diskStudioBootFixtures[$diskStudioName]) {
+                throw "Unexpected boot inspection fixture: $diskStudioName"
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ('Boot-References-4Kn-Prepare.exe' -in $GuestTools) {
+        $diskStudioBootReferenceFixtures = @{
+            'Boot-References-GPT.img' = 51MB
+            'Boot-References-MBR.dsbackup' = (19MB + 4096)
+        }
+        foreach ($diskStudioName in $diskStudioBootReferenceFixtures.Keys) {
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne $diskStudioBootReferenceFixtures[$diskStudioName]) {
+                throw "Unexpected boot reference fixture: $diskStudioName"
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
+    }
+    if ('Boot-Inheritance-4Kn-Prepare.exe' -in $GuestTools) {
+        $diskStudioName = 'Boot-Inheritance-NTFS.img'
+        $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
+        if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $diskStudioItem.Length -ne 67MB) {
+            throw "Unexpected BCD inheritance fixture: $diskStudioName"
+        }
+        $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+    }
     if ($GuestTools -match '^File-Clone-Ntfs-4Kn-Wof-Image-(Prepare|Continue|After-Online)\.exe$') {
         $diskStudioName = 'Ntfs-Wof-Source.raw'
         $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioPayload $diskStudioName)
@@ -114,6 +149,31 @@ if ($GuestTools -or $DesktopOnly -or $LdmFixture -or $StorageSpacesFixture -or $
             throw 'Invalid immutable NTFS WOF fixture'
         }
         $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+    }
+    $diskStudioChainFiles = @{
+        'Vmdk-Chain' = @('base.vmdk','middle.vmdk','latest.vmdk','latest-s001.vmdk','vmdk-chain.json')
+        'Vdi-Chain' = @('base.vdi','middle.vdi','latest.vdi','vdi-chain.json')
+        'Vhdx-Log' = @('pending.vhdx','vhdx-log.json')
+        'Esxi-Chain' = @('latest.vmdk','latest-sesparse.vmdk','point.vmdk','point-delta.vmdk','base.vmdk','base-flat.vmdk','esxi-chain.json')
+        'Parallels-Bundle' = @('DiskDescriptor.xml','lower-base.hdd','lower-point.hds','lower-latest.hds','upper-base.hds','upper-point.hds','upper-latest.hds','parallels-bundle.json')
+        'Parallels-History' = @('DiskDescriptor.xml','lower-base.hdd','lower-point.hds','lower-latest.hds','upper-base.hds','upper-point.hds','upper-latest.hds','lower-historical.hds','upper-historical.hds','parallels-history.json')
+    }
+    foreach ($diskStudioChain in $diskStudioChainFiles.Keys) {
+        $diskStudioImageArchive = $diskStudioChain -eq 'Parallels-History' -and 'Image-Archive-4Kn-Verify.exe' -in $GuestTools
+        if (!$diskStudioImageArchive -and !($GuestTools -match "^$diskStudioChain-4Kn-(Prepare|Verify)\.exe$")) { continue }
+        $diskStudioChainRoot = Get-Item -LiteralPath (Join-Path $diskStudioVmRoot ($diskStudioChain.ToLowerInvariant() + '-fixture'))
+        $diskStudioFileLimit = if ($diskStudioChain -eq 'Vhdx-Log') { 16MB } else { 8MB }
+        if (!$diskStudioChainRoot.PSIsContainer -or ($diskStudioChainRoot.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'The image chain fixture directory must be an ordinary directory'
+        }
+        foreach ($diskStudioName in $diskStudioChainFiles[$diskStudioChain]) {
+            $diskStudioItem = Get-Item -LiteralPath (Join-Path $diskStudioChainRoot.FullName $diskStudioName)
+            if ($diskStudioItem.PSIsContainer -or ($diskStudioItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $diskStudioItem.Length -le 0 -or $diskStudioItem.Length -gt $diskStudioFileLimit) {
+                throw 'Invalid immutable image chain fixture'
+            }
+            $diskStudioSelected.Add($diskStudioName, $diskStudioItem.FullName)
+        }
     }
     if ($diskStudioFixtures) {
         $diskStudioFixtureNames = if ($BtrfsCloneFixture) { 'Btrfs-Clone-Source.raw' }

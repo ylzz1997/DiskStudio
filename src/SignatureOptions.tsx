@@ -115,7 +115,7 @@ export function SignatureOptions({
           {t("文件起点按逻辑扇区对齐")}
         </label>
       </div>
-      {!canScanFree && <p>{t("空闲簇扫描需要选择一个未加密的实体分区。")}</p>}
+      {!canScanFree && <p>{catalogText("空闲簇扫描需要未加密且分配信息可核对的分区。")}</p>}
       {canScanFree && value.freeOnly && <p>{t("核对分区分配信息，只列出完整位于空闲范围内的连续候选。")}</p>}
       {value.customRange && (
         <p>{t("位置相对于上方所选磁盘或分区，结束位置不包含在扫描范围内。")}</p>

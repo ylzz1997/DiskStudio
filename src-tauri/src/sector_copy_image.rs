@@ -55,14 +55,7 @@ impl ImageSource {
     }
 
     fn reader(&self) -> Result<Box<dyn Source>, String> {
-        if self.opened.browser.info.format == "RAW" {
-            let mut files = self.opened.group.raw_readers()?;
-            if files.len() != 1 {
-                return Err("RAW 镜像容量或附属文件选择不符。".into());
-            }
-            return Ok(Box::new(files.remove(0)));
-        }
-        self.opened.browser.logical_reader()
+        self.opened.logical_reader()
     }
 
     fn result(

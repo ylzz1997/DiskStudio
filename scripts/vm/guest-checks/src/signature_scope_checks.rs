@@ -153,7 +153,7 @@ fn receipt(desktop: &str, profile: &str) -> PathBuf {
     ))
 }
 
-fn fixture(sample: Sample) -> Result<(Vec<u8>, u64), String> {
+pub(super) fn fixture(sample: Sample) -> Result<(Vec<u8>, u64), String> {
     let format = fat_format::Plan::new(
         fat_format::FatType::Fat12,
         SIZE,

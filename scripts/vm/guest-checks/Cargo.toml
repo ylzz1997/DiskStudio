@@ -23,14 +23,15 @@ flate2 = { version = "1.1.11", default-features = false, features = ["rust_backe
 crc32fast = "1.5.5"
 quick-xml = "0.42.0"
 sha2 = "0.10"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 wmi = "0.18.4"
 winapi = { version = "0.3.9", features = ["vsbackup", "vss", "vsserror", "combaseapi", "objbase"] }
 ntfs = { path = "../../../vendor/ntfs" }
 ext4-view = { path = "../../../vendor/ext4-view", default-features = false }
 zstd = "0.13"
 rfd = { version = "0.15", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemInformation", "Win32_System_Threading", "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Security_Cryptography"] }
+regf = "=0.3.0"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Vhd", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemInformation", "Win32_System_Threading", "Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Security_Cryptography"] }
 zip = { version = "9.8.1", default-features = false, features = ["deflate"] }
 
 [patch.crates-io]

@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 pub const MAX_FILE: u64 = 64 * 1024 * 1024;
 const ANCHOR: u64 = 64 * 1024;
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn hex(s: &str) -> bool {
+pub(crate) fn hex(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -114,32 +114,32 @@ impl Progress {
             || !hex(&self.source.layout_key)
             || self.source.partition == Some(0)
             || (self.options.free_only && self.source.partition.is_none())
-            || self.records.len() > crate::recovery::MAX_RESULTS
-            || self.records.len() != self.cursor.count as usize
         {
             return Err("恢复进度与所选磁盘、分区或布局不匹配。".into());
         }
-        self.binding.validate()?;
-        let range = self.options.range(self.binding.size)?;
-        let alignment = self.options.alignment(self.binding.sector)?;
-        self.cursor
-            .validate(range.end - range.start, &self.options)?;
-        self.records
-            .iter()
-            .enumerate()
-            .map(|(id, r)| {
-                if !r.aligned(alignment) {
-                    return Err("保存的签名候选起点与对齐设置不一致。".into());
-                }
-                r.candidate(
-                    id as u32,
-                    range.clone(),
-                    &self.options,
-                    self.cursor.allocation_digest(),
-                )
-            })
-            .collect()
+        restore_records(&self.binding, &self.options, &self.cursor, &self.records)
     }
+}
+
+pub(crate) fn restore_records(
+    binding: &Binding,
+    options: &Options,
+    cursor: &Checkpoint,
+    records: &[StoredCandidate],
+) -> Result<Vec<Candidate>, String> {
+    if records.len() > crate::recovery::MAX_RESULTS || records.len() != cursor.count as usize {
+        return Err("恢复进度与候选数量不一致。".into());
+    }
+    binding.validate()?;
+    let range = options.range(binding.size)?;
+    let alignment = options.alignment(binding.sector)?;
+    cursor.validate(range.end - range.start, options)?;
+    records.iter().enumerate().map(|(id, record)| {
+        if !record.aligned(alignment) {
+            return Err("保存的签名候选起点与对齐设置不一致。".into());
+        }
+        record.candidate(id as u32, range.clone(), options, cursor.allocation_digest())
+    }).collect()
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

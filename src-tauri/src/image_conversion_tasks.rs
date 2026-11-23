@@ -30,7 +30,6 @@ mod platform {
             atomic::{AtomicBool, Ordering},
             Arc, Mutex,
         },
-        time::{SystemTime, UNIX_EPOCH},
     };
     use windows_sys::Win32::Storage::FileSystem::*;
     static STATE: Mutex<State> = Mutex::new(State {
@@ -182,18 +181,7 @@ mod platform {
             {
                 return Err("输出必须为普通新文件。".into());
             }
-            let seconds = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(err)?
-                .as_secs()
-                .checked_sub(946684800)
-                .ok_or("系统时间无效")?;
-            let identity = Identity {
-                created: *uuid::Uuid::new_v4().as_bytes(),
-                modified: *uuid::Uuid::new_v4().as_bytes(),
-                vhd_timestamp: u32::try_from(seconds).map_err(err)?,
-                file_name: name.clone(),
-            };
+            let identity = Identity::for_output(name.clone())?;
             let encoder = Encoder::new(file, options.clone(), identity)?;
             let report = Report {
                 id: id.clone(),

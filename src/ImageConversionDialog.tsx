@@ -9,6 +9,9 @@ import {
 import { Dialog, FormError } from "./components";
 import { useLocale } from "./i18n/LanguageProvider";
 import { conversionReader, type ImageFiles } from "./imageReader";
+import { isParallelsDescriptor } from "./parallelsBundle";
+import { ParallelsSnapshotPicker, useParallelsSnapshots } from "./ParallelsSnapshotPicker";
+import { MissingImageFilesError } from "./imageDependencies";
 import {
   conversionFormats,
   conversionFrame,
@@ -56,6 +59,10 @@ export function ImageConversionDialog({
                 ? t("转换未完成")
                 : t("准备转换");
   const needsStandalone = /\.(hdd|hds)$/i.test(files?.file.name ?? "");
+  const bundle = !!files && isParallelsDescriptor(files.file.name);
+  const snapshotList = useParallelsSnapshots(bundle ? files?.file : undefined);
+  const snapshot = bundle ? files?.parallelsSnapshot ?? snapshotList?.list?.top : undefined;
+  const snapshotReady = !bundle || !!snapshotList?.list?.snapshots.some((point) => point.id === snapshot && point.supported);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -94,6 +101,7 @@ export function ImageConversionDialog({
   async function start() {
     if (
       !files ||
+      !snapshotReady ||
       controller.current ||
       (needsStandalone && !standaloneConfirmed)
     )
@@ -108,7 +116,7 @@ export function ImageConversionDialog({
     jobId.current = null;
     try {
       const r = await convertImage(
-        () => conversionReader(files),
+        () => conversionReader({ ...files, parallelsSnapshot: snapshot }),
         format,
         {
           begin: (options) => invoke("image_conversion_begin", { options }),
@@ -135,7 +143,14 @@ export function ImageConversionDialog({
         ).catch(() => null);
         if (alive.current && current?.id === id) setReport(current);
       }
-      if (alive.current) setError(e instanceof Error ? e.message : String(e));
+      if (alive.current) {
+        setError(e instanceof MissingImageFilesError
+          ? t("{error} 还缺少：{files}", {
+            error: catalogText(e.message),
+            files: new Intl.ListFormat(language).format(e.missing),
+          })
+          : catalogText(e instanceof Error ? e.message : String(e)));
+      }
     } finally {
       controller.current = null;
       jobId.current = null;
@@ -174,7 +189,7 @@ export function ImageConversionDialog({
           ) : (
             <button
               className="button primary"
-              disabled={!files || (needsStandalone && !standaloneConfirmed)}
+              disabled={!files || !snapshotReady || (needsStandalone && !standaloneConfirmed)}
               onClick={() => void start()}
             >
               <ArrowRightLeft size={16} />
@@ -193,7 +208,7 @@ export function ImageConversionDialog({
           <span>
             {files
               ? formatSize(files.file.size)
-              : "RAW / IMG, VHD / AVHD, VHDX, VDI, VMDK, HDD / HDS"}
+              : "RAW / IMG, VHD / AVHD, VHDX / AVHDX, VDI, VMDK, HDD / HDS, DiskDescriptor.xml"}
           </span>
           <button className="button" onClick={() => primary.current?.click()}>
             <FolderOpen size={16} />
@@ -204,7 +219,7 @@ export function ImageConversionDialog({
           hidden
           ref={primary}
           type="file"
-          accept=".raw,.img,.vhd,.avhd,.vhdx,.vdi,.vmdk,.hdd,.hds"
+          accept=".raw,.img,.vhd,.avhd,.vhdx,.avhdx,.vdi,.vmdk,.hdd,.hds,.xml"
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (file) {
@@ -230,6 +245,15 @@ export function ImageConversionDialog({
             </span>
           </label>
         )}
+        {files && snapshotList?.list && (
+          <ParallelsSnapshotPicker list={snapshotList.list} id={snapshot} onChange={(id) => {
+            setFiles({ ...files, parallelsSnapshot: id });
+            setReport(null);
+            setError("");
+          }} />
+        )}
+        {snapshotList?.error && <FormError message={catalogText(snapshotList.error)} />}
+        {bundle && snapshotList?.list && !snapshotReady && <FormError message={catalogText("所选 Parallels 快照需要超过 16 层或 64 个文件。")} />}
         {files && (
           <>
             <div className="image-conversion-companions">
@@ -239,13 +263,13 @@ export function ImageConversionDialog({
               >
                 {t("选择分卷或父盘文件…")}
               </button>
-              <small>
-                {files.companions.length
-                  ? t("已选择 {count} 个文件", {
-                      count: files.companions.length.toLocaleString(language),
-                    })
-                  : t("仅用于分卷 VMDK 或差分 VHD")}
-              </small>
+              {files.companions.length ? (
+                <small>{t("已选择 {count} 个文件", {
+                  count: files.companions.length.toLocaleString(language),
+                })}</small>
+              ) : !isParallelsDescriptor(files.file.name) ? (
+                <small>{t("用于差分 VHD、VHDX、VDI、VMDK 或分卷 VMDK")}</small>
+              ) : null}
             </div>
             {!!files.companions.length && (
               <p className="image-conversion-names">

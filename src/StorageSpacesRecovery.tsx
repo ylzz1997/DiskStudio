@@ -75,7 +75,9 @@ export function StorageSpacesRecoveryPanel({ info, busy, onClose, onRead }: {
 }) {
   const { t, catalogText } = useLocale();
   const [partition, setPartition] = useState(String(info.scanPartition ?? info.partitions[0]?.id ?? ""));
-  const [mode, setMode] = useState<ImageBrowseMode>(info.scanMode ?? "existing");
+  const [mode, setMode] = useState<ImageBrowseMode>(
+    info.scanMode === "signatures" ? "existing" : (info.scanMode ?? "existing"),
+  );
   return (
     <section className="data-panel backup-browser" aria-label={t("存储空间")}>
       <div className="section-heading">

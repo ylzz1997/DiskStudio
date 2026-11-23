@@ -5,19 +5,41 @@ use crate::{
     signature_checkpoint::Binding,
     signature_scan::Options,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 const JOURNAL_PHASE: &str = "Ext4 日志扫描";
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ProgressSource {
+    Disk(Selection),
+    Retained(super::retained_signature_tasks::Selection),
+}
+
+impl ProgressSource {
+    fn matches(&self, source: &ScanSource) -> bool {
+        match (self, source) {
+            (Self::Disk(saved), ScanSource::Disk(source)) => {
+                saved.target == source.target && saved.layout_key == source.layout_key
+                    && saved.partition == source.partition
+            }
+            (Self::Retained(saved), source) => saved.matches(source),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Saved {
     pub id: String,
-    source: Selection,
-    mode: ScanMode,
-    options: Option<Options>,
-    size: u64,
-    binding: Option<Binding>,
+    pub(super) source: ProgressSource,
+    pub(super) mode: ScanMode,
+    pub(super) options: Option<Options>,
+    pub(super) size: u64,
+    pub(super) binding: Option<Binding>,
+    pub(super) retained_digest: Option<String>,
     pub cursor: Option<Cursor>,
     pub pause_requested: bool,
-    loaded: bool,
+    pub(super) loaded: bool,
 }
 
 #[cfg(windows)]
@@ -149,7 +171,7 @@ pub(crate) fn scan_combined_metadata<R: std::io::Read + std::io::Seek + 'static>
 }
 
 #[cfg(windows)]
-fn scan_signatures(
+pub(super) fn scan_signatures(
     reader: &mut (impl std::io::Read + std::io::Seek),
     size: u64,
     sector: u64,
@@ -189,7 +211,7 @@ fn scan_signatures(
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub id: String,
-    source: Selection,
+    source: ProgressSource,
     mode: ScanMode,
     combined: bool,
     engine: &'static str,
@@ -198,6 +220,7 @@ pub struct Info {
     total: u64,
     found: usize,
     running: bool,
+    can_pause: bool,
     can_resume: bool,
     can_save: bool,
     loaded: bool,
@@ -206,7 +229,7 @@ pub fn status() -> Option<Info> {
     let s = state();
     let p = s.recovery_progress.as_ref()?;
     let cursor = p.cursor.as_ref()?;
-    if !matches!(s.scan.as_ref(),Some((id,ScanSource::Disk(_))) if *id==p.id) {
+    if !s.scan.as_ref().is_some_and(|(id, source)| *id == p.id && p.source.matches(source)) {
         return None;
     }
     let job = s.job.as_ref().filter(|j| j.id == p.id);
@@ -242,8 +265,9 @@ pub fn status() -> Option<Info> {
         },
         found: s.candidates.len(),
         running,
+        can_pause: running && (matches!(p.source, ProgressSource::Disk(_)) || p.binding.is_some()),
         can_resume: !running && valid && !cursor.sealed(),
-        can_save: !running && valid,
+        can_save: !running && valid && (matches!(p.source, ProgressSource::Disk(_)) || p.retained_digest.is_some()),
         loaded: p.loaded,
     })
 }
@@ -258,28 +282,29 @@ pub fn pause(id: String) -> Result<(), String> {
     let p = s
         .recovery_progress
         .as_mut()
-        .filter(|p| p.id == id && p.cursor.is_some())
+        .filter(|p| p.id == id && p.cursor.is_some() && (matches!(p.source, ProgressSource::Disk(_)) || p.binding.is_some()))
         .ok_or("此扫描引擎尚不支持暂停续扫")?;
     p.pause_requested = true;
     s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
-fn stopped(id: &str) -> Result<(Saved, Vec<crate::recovery::Candidate>, Catalog), String> {
+pub(super) fn stopped(id: &str) -> Result<(Saved, Vec<crate::recovery::Candidate>, Catalog), String> {
     let s = state();
     idle(&s)?;
     let p = s
         .recovery_progress
         .as_ref()
-        .filter(|p| p.id == id && s.scan.as_ref().is_some_and(|(scan, _)| scan == id))
+        .filter(|p| p.id == id && s.scan.as_ref().is_some_and(|(scan, source)| scan == id && p.source.matches(source)))
         .ok_or("恢复进度已失效")?;
     Ok((p.clone(), s.candidates.clone(), s.directories.clone()))
 }
-pub fn resume(id: String, source: Selection) -> Result<String, String> {
+pub fn resume(id: String, source: ProgressSource) -> Result<String, String> {
+    let source = match source {
+        ProgressSource::Disk(source) => source,
+        ProgressSource::Retained(source) => return super::retained_signature_tasks::resume(id, source),
+    };
     let (p, _, _) = stopped(&id)?;
-    if source.target != p.source.target
-        || source.layout_key != p.source.layout_key
-        || source.partition != p.source.partition
-    {
+    if !p.source.matches(&ScanSource::Disk(source.clone())) {
         return Err("请选择进度对应的原磁盘或分区".into());
     }
     launch(source, p.mode, p.options.clone(), Some(p))
@@ -362,11 +387,12 @@ fn launch(
         })?;
         let mut saved = previous.clone().unwrap_or(Saved {
             id: id.clone(),
-            source: source.clone(),
+            source: ProgressSource::Disk(source.clone()),
             mode,
             options: options.clone(),
             size: resolved.size,
             binding: None,
+            retained_digest: None,
             cursor: options
                 .clone()
                 .filter(|_| !combined)
@@ -652,6 +678,10 @@ pub fn save(id: String) -> Result<Option<String>, String> {
             .try_lock()
             .map_err(|_| "另一项磁盘任务正在运行")?;
         let (p, files, tree) = stopped(&id)?;
+        let source = match p.source.clone() {
+            ProgressSource::Disk(source) => source,
+            ProgressSource::Retained(selection) => return super::retained_signature_tasks::save(selection, p, &files),
+        };
         let cursor = p.cursor.ok_or("此扫描引擎尚未支持保存进度")?;
         let name = if matches!(cursor, Cursor::Combined { .. }) {
             "DiskStudio-complete-recovery.dsrecover"
@@ -666,17 +696,19 @@ pub fn save(id: String) -> Result<Option<String>, String> {
             }
         };
         let progress = Progress::capture(
-            p.source,
+            source.clone(),
             p.binding.ok_or("尚无可保存的源特征")?,
             cursor,
             &files,
             &tree,
         )?;
-        let bytes = recovery_checkpoint::encode(progress.clone())?;
-        files::save(&progress.source, &bytes, name)
+        let bytes = recovery_checkpoint::encode(progress)?;
+        files::save(&ScanSource::Disk(source.clone()), &bytes, name, |readback| {
+            recovery_checkpoint::decode(readback, &source).map(|_| ())
+        })
     }
 }
-pub fn load(source: Selection) -> Result<Option<Info>, String> {
+pub fn load(source: ProgressSource) -> Result<Option<Info>, String> {
     #[cfg(not(windows))]
     {
         let _ = source;
@@ -689,7 +721,11 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             .try_lock()
             .map_err(|_| "另一项磁盘任务正在运行")?;
         idle(&state())?;
-        let Some(bytes) = files::load(&source)? else {
+        let source = match source {
+            ProgressSource::Disk(source) => source,
+            ProgressSource::Retained(selection) => return super::retained_signature_tasks::load(selection),
+        };
+        let Some(bytes) = files::load(&ScanSource::Disk(source.clone()))? else {
             return Ok(None);
         };
         let progress = recovery_checkpoint::decode(&bytes, &source)?; // identity/scope before raw open
@@ -751,11 +787,12 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
             s.job=Some(super::Job{id:id.clone(),title:if mode==ScanMode::Existing{"读取分区目录"}else if combined{"完整恢复"}else{"文件恢复扫描"}.into(),state:if sealed{"completed"}else{"paused"}.into(),phase:"已加载进度".into(),done:c.done(),total:c.total(r.size)?,found:s.candidates.len(),message:"已核对磁盘、布局、内容特征和续扫边界。结果和目录是历史观察；少量特征不能证明源内容全部未变，预览与提取会重新核对候选。加载不会自动继续扫描。".into(),sha256:None});
             s.recovery_progress = Some(Saved {
                 id,
-                source,
+                source: ProgressSource::Disk(source),
                 mode,
                 options: c.options(),
                 size: r.size,
                 binding: Some(progress.binding),
+                retained_digest: None,
                 cursor: Some(progress.cursor),
                 pause_requested: false,
                 loaded: true,
@@ -767,7 +804,7 @@ pub fn load(source: Selection) -> Result<Option<Info>, String> {
 }
 
 #[cfg(windows)]
-mod files {
+pub(super) mod files {
     use super::*;
     use crate::data_windows as platform;
     use cap_std::fs::OpenOptionsExt;
@@ -777,7 +814,7 @@ mod files {
     use windows_sys::Win32::Storage::FileSystem::*;
     fn selected(
         path: &std::path::Path,
-        source: &Selection,
+        source: &ScanSource,
         size: u64,
     ) -> Result<(Dir, String), String> {
         if !path
@@ -795,20 +832,20 @@ mod files {
         {
             return Err("进度文件名无效。".into());
         }
-        let parent = platform::destination_folder(
-            path.parent().ok_or("文件目录无效")?,
-            &source.target,
-            size,
-        )?;
-        Ok((
-            Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(platform::err)?,
-            name.into(),
-        ))
+        let parent = source.destination(path.parent().ok_or("文件目录无效")?, size)?;
+        let dir = Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(platform::err)?;
+        let location = platform::file_location(&dir.try_clone().map_err(platform::err)?.into_std_file())?;
+        if source.forbidden_disks().contains(&location.target)
+            || source.forbidden_disk_numbers().contains(&location.disk_number())
+        {
+            return Err("输出必须位于另一块物理磁盘，不能写回恢复/备份源盘。".into());
+        }
+        Ok((dir, name.into()))
     }
-    pub fn load(source: &Selection) -> Result<Option<Vec<u8>>, String> {
+    pub fn load(source: &ScanSource) -> Result<Option<Vec<u8>>, String> {
         let Some(path) = rfd::FileDialog::new()
             .set_title(crate::native_locale::text(
-                "加载所选磁盘或分区的恢复扫描进度",
+                "加载所选扫描范围的恢复进度",
             ))
             .add_filter(
                 crate::native_locale::text("DiskStudio 恢复进度"),
@@ -840,9 +877,10 @@ mod files {
         Ok(Some(bytes))
     }
     pub fn save(
-        source: &Selection,
+        source: &ScanSource,
         bytes: &[u8],
         default_name: &str,
+        verify: impl FnOnce(&[u8]) -> Result<(), String>,
     ) -> Result<Option<String>, String> {
         let Some(path) = rfd::FileDialog::new()
             .set_title(crate::native_locale::text(
@@ -880,7 +918,7 @@ mod files {
         if Sha256::digest(bytes) != Sha256::digest(&readback) {
             return Err(format!("进度回读校验失败，保留 {partial}"));
         }
-        recovery_checkpoint::decode(&readback, source)?;
+        verify(&readback)?;
         crate::recovery_output::finish(&file, &dir, &name)
             .map_err(|e| format!("{e}；未完成文件保留为 {partial}"))?;
         Ok(Some(name))

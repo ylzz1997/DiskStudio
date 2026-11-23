@@ -8,6 +8,15 @@ fn u64le(b: &[u8], i: usize) -> u64 {
 fn byte_lba(n: u64, sector: u64) -> Result<u64, String> {
     n.checked_mul(sector).ok_or("分区偏移溢出。".into())
 }
+pub(crate) fn logical_image_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "diskdescriptor.xml"
+        || [
+            ".img", ".raw", ".vhd", ".avhd", ".vhdx", ".avhdx", ".vdi", ".vmdk", ".hdd", ".hds",
+        ]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
 // Bytes and size describe the logical disk. The frontend unwraps supported
 // containers using bounded File slices before submitting these bytes.
 pub fn parse_image(head: &[u8], size: u64, filename: &str) -> Result<Disk, String> {
@@ -23,22 +32,17 @@ pub fn parse_image(head: &[u8], size: u64, filename: &str) -> Result<Disk, Strin
         return Err("只接受普通镜像文件名。".into());
     }
     let lower = filename.to_lowercase();
-    if ![
-        ".img", ".raw", ".vhd", ".avhd", ".vhdx", ".vdi", ".vmdk", ".hdd", ".hds",
-    ]
-    .iter()
-    .any(|ext| lower.ends_with(ext))
-    {
+    if !logical_image_name(filename) {
         return Err(
-            "仅接受 RAW/IMG 或已解码 VHD/AVHD/VHDX/VDI/VMDK/HDD/HDS 的逻辑磁盘字节。".into(),
+            "仅接受 RAW/IMG 或受支持虚拟磁盘容器的已解码逻辑磁盘字节。".into(),
         );
     }
     let sector = [512usize, 4096]
         .into_iter()
         .find(|s| head.get(*s..*s + 8) == Some(b"EFI PART"));
-    if [".vhd", ".avhd", ".vdi", ".vmdk", ".hdd", ".hds"]
+    if (lower == "diskdescriptor.xml" || [".vhd", ".avhd", ".vdi", ".vmdk", ".hdd", ".hds"]
         .iter()
-        .any(|ext| lower.ends_with(ext))
+        .any(|ext| lower.ends_with(ext)))
         && sector == Some(4096)
     {
         return Err(

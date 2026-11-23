@@ -1,10 +1,20 @@
 // Descriptor names are keys into explicitly selected Files, never paths to open.
 export interface VmdkExtent {
   name: string;
-  kind: "SPARSE" | "FLAT";
+  kind: "SPARSE" | "FLAT" | "VMFS" | "VMFSSPARSE" | "SESPARSE";
   size: number;
   offset: number;
 }
+const extentKinds = new Map<string, VmdkExtent["kind"]>([
+  ["monolithicflat", "FLAT"],
+  ["twogbmaxextentflat", "FLAT"],
+  ["monolithicsparse", "SPARSE"],
+  ["twogbmaxextentsparse", "SPARSE"],
+  ["streamoptimized", "SPARSE"],
+  ["vmfs", "VMFS"],
+  ["vmfssparse", "VMFSSPARSE"],
+  ["sesparse", "SESPARSE"],
+]);
 export function vmdkNameKey(name: string) {
   if (
     !name ||
@@ -47,13 +57,13 @@ export function parseVmdkDescriptor(bytes: Uint8Array) {
     if (!line || line.startsWith("#")) continue;
     if (line.length > 4096) throw Error("VMDK 描述符单行过长。");
     const extent =
-      /^(?:RW|RDONLY)\s+([0-9]{1,20})\s+(SPARSE|FLAT)\s+"([^"\r\n]+)"(?:\s+([0-9]{1,20}))?\s*(?:#.*)?$/i.exec(
+      /^(?:RW|RDONLY)\s+([0-9]{1,20})\s+(SPARSE|FLAT|VMFS|VMFSSPARSE|SESPARSE)\s+"([^"\r\n]+)"(?:\s+([0-9]{1,20}))?\s*(?:#.*)?$/i.exec(
         line,
       );
     if (extent) {
       const kind = extent[2].toUpperCase() as VmdkExtent["kind"];
       if ((kind === "FLAT") !== (extent[4] !== undefined))
-        throw Error("VMDK FLAT 需要扇区偏移；SPARSE 不接受外部偏移。");
+        throw Error("只有 VMDK FLAT 使用描述符中的外部扇区偏移。");
       vmdkNameKey(extent[3]);
       const size = sectorBytes(extent[1]),
         offset = sectorBytes(extent[4] ?? "0");
@@ -71,38 +81,67 @@ export function parseVmdkDescriptor(bytes: Uint8Array) {
       value = field[2] ?? field[3];
     if (values.has(key) || values.size >= 128)
       throw Error("VMDK 描述符字段重复或超过上限。");
-    if (key.includes("parent") && key !== "parentcid")
-      throw Error("暂不支持 VMDK 父盘链，未查找父盘。");
     if (
-      !["version", "cid", "parentcid", "createtype", "encoding"].includes(
-        key,
-      ) &&
+      key.includes("parent") &&
+      !["parentcid", "parentfilenamehint"].includes(key)
+    )
+      throw Error("VMDK 描述符包含不支持的父盘字段。");
+    if (
+      ![
+        "version",
+        "cid",
+        "parentcid",
+        "parentfilenamehint",
+        "createtype",
+        "encoding",
+        "changetrackpath",
+      ].includes(key) &&
       !key.startsWith("ddb.")
     )
       throw Error("VMDK 描述符包含未知功能字段。");
     if (/encrypt|keyid|crypt/.test(key)) throw Error("加密 VMDK 暂不支持。");
     values.set(key, value);
   }
+  const type = values.get("createtype")?.toLowerCase() ?? "";
+  const extentKind = extentKinds.get(type);
+  if (!extentKind) throw Error("VMDK 描述符的镜像类型暂不支持。");
+  const version = values.get("version");
+  const cid = values.get("cid")?.toLowerCase() ?? "",
+    parentCid = values.get("parentcid")?.toLowerCase() ?? "";
   if (
-    values.get("version") !== "1" ||
-    !/^[0-9a-f]{8}$/i.test(values.get("cid") ?? "")
+    (version !== "1" &&
+      !(
+        version === "3" && ["vmfs", "vmfssparse", "sesparse"].includes(type)
+      )) ||
+    !/^[0-9a-f]{8}$/.test(cid) ||
+    !/^[0-9a-f]{8}$/.test(parentCid)
   )
     throw Error("VMDK 描述符版本或内容标识无效。");
-  if (values.get("parentcid")?.toLowerCase() !== "ffffffff")
-    throw Error("VMDK 缺少独立基盘标识或需要父盘，未读取父盘。");
-  const type = values.get("createtype")?.toLowerCase() ?? "";
-  const flat = ["monolithicflat", "twogbmaxextentflat"].includes(type);
-  if (
-    !flat &&
-    !["monolithicsparse", "streamoptimized", "twogbmaxextentsparse"].includes(
-      type,
+  const hint = values.get("parentfilenamehint");
+  let parent: { cid: string; name: string } | undefined;
+  if (parentCid !== "ffffffff") {
+    if (
+      ![
+        "monolithicsparse",
+        "twogbmaxextentsparse",
+        "vmfssparse",
+        "sesparse",
+      ].includes(type)
     )
-  )
-    throw Error("VMDK 描述符的镜像类型暂不支持。");
+      throw Error("此 VMDK 类型不能作为差分层读取。");
+    // Resolve only a basename within the explicit selection. Locator paths
+    // from another directory or machine never reach a filesystem API.
+    const name = hint?.split(/[\\/]/).at(-1) ?? "";
+    if (!/\.vmdk$/i.test(name)) throw Error("VMDK 缺少有效的父盘文件名。");
+    vmdkNameKey(name);
+    parent = { cid: parentCid, name };
+  } else if (hint !== undefined) {
+    throw Error("VMDK 基盘标识与父盘提示冲突。");
+  }
   if (
     !extents.length ||
     (!type.startsWith("twogb") && extents.length !== 1) ||
-    extents.some((e) => e.kind !== (flat ? "FLAT" : "SPARSE"))
+    extents.some((e) => e.kind !== extentKind)
   )
     throw Error("VMDK 描述符的类型与分卷列表不一致。");
   const size = extents.reduce((n, e) => n + e.size, 0);
@@ -121,5 +160,5 @@ export function parseVmdkDescriptor(bytes: Uint8Array) {
     !["512", "4096"].includes(values.get("ddb.physicalsectorsize")!)
   )
     throw Error("VMDK 物理扇区字段暂不支持。");
-  return { type, extents, size };
+  return { type, extents, size, cid, parent };
 }

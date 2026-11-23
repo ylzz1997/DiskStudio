@@ -1,13 +1,19 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FolderOpen, LoaderCircle, Plus } from "lucide-react";
 import { Dialog, FormError } from "./components";
 import type { ImageBrowseOptions } from "./ImageBrowserPanel";
-import { formatForName, type NativeImageGroup } from "./imageBrowserSource";
+import {
+  acceptsImageCompanions,
+  formatForName,
+  type NativeImageGroup,
+} from "./imageBrowserSource";
 import {
   openImageBrowser,
   ImageSourceConsumedError,
+  retainedPrimaryImage,
 } from "./nativeImageBrowser";
+import { ParallelsSnapshotPicker, useParallelsSnapshots } from "./ParallelsSnapshotPicker";
 import { MissingImageFilesError } from "./imageDependencies";
 import { useLocale } from "./i18n/LanguageProvider";
 import { formatSize } from "./types";
@@ -34,7 +40,14 @@ export function ImageBrowseOpenDialog({
     missing?: string[];
   } | null>(null);
   const [consumed, setConsumed] = useState(false);
+  const [snapshot, setSnapshot] = useState<string>();
   const format = formatForName(group.files[0].name);
+  const bundle = format === "parallelsBundle";
+  const descriptor = useMemo(() => bundle ? retainedPrimaryImage(group) : undefined, [group, bundle]);
+  const snapshotList = useParallelsSnapshots(descriptor);
+  const snapshotReady = !bundle || !!snapshotList?.list?.snapshots.some(
+    (point) => point.id === (snapshot ?? snapshotList.list?.top) && point.supported,
+  );
   async function action(f: () => Promise<void>) {
     setWorking(true);
     onWorking(true);
@@ -91,6 +104,7 @@ export function ImageBrowseOpenDialog({
                 setGroup(next);
                 setIndependent(false);
                 setConsumed(false);
+                setSnapshot(undefined);
               }
             })
           }
@@ -100,7 +114,7 @@ export function ImageBrowseOpenDialog({
         </button>
         <button
           className="button"
-          disabled={working || consumed || !["vhd", "vmdk"].includes(format)}
+          disabled={working || consumed || !acceptsImageCompanions(format)}
           onClick={() =>
             void action(async () =>
               setGroup(
@@ -156,16 +170,30 @@ export function ImageBrowseOpenDialog({
       ) : (
         <>
           <p className="data-footnote">
-            {format.toUpperCase()}{" "}
+            {bundle ? "Parallels HDD" : format.toUpperCase()}{" "}
             {t("容器按整盘打开，容量和逻辑扇区由容器元数据确定。")}
           </p>
           <label className="image-source-check">
-            <input type="checkbox" checked={settings.kind === "search"} disabled={working}
-              onChange={(event) => setSettings({ ...settings, kind: event.target.checked ? "search" : "disk" })} />
+            <input
+              type="checkbox"
+              checked={settings.kind === "search"}
+              disabled={working}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  kind: event.target.checked ? "search" : "disk",
+                })
+              }
+            />
             {t("搜索丢失分区")}
           </label>
         </>
       )}
+      {snapshotList?.list && (
+        <ParallelsSnapshotPicker list={snapshotList.list} id={snapshot} disabled={working || consumed} onChange={(id) => { setSnapshot(id); setError(null); }} />
+      )}
+      {snapshotList?.error && <FormError message={catalogText(snapshotList.error)} />}
+      {bundle && snapshotList?.list && !snapshotReady && <FormError message={catalogText("所选 Parallels 快照需要超过 16 层或 64 个文件。")} />}
       {format === "parallels" && (
         <label className="image-source-check">
           <input
@@ -201,11 +229,11 @@ export function ImageBrowseOpenDialog({
         <button
           className="button primary"
           disabled={
-            working || consumed || (format === "parallels" && !independent)
+            working || consumed || !snapshotReady || (format === "parallels" && !independent)
           }
           onClick={() =>
             void action(async () => {
-              const id = await openImageBrowser(group, settings, independent);
+              const id = await openImageBrowser(group, settings, independent, snapshot);
               setConsumed(true);
               await onOpened(id);
             })

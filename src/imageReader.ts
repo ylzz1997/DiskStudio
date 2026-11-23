@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openVhdChain } from "./vhdChain";
-import { openVhdx } from "./vhdxImage";
-import { openVdi } from "./vdiImage";
+import { openVhdxChain } from "./vhdxImage";
+import { openVdiChain } from "./vdiImage";
 import { openVmdkSource } from "./vmdkBundle";
 import { openParallels } from "./parallelsImage";
+import { isParallelsDescriptor, openParallelsBundle } from "./parallelsBundle";
 import type { ImageFile, ImageReadMode, LogicalImage } from "./imageSource";
 
 // Conversion uses two complete source passes; browsing uses fresh random-read
@@ -12,11 +13,14 @@ export async function openContainer(
   file: ImageFile,
   companions: ImageFile[],
   stream: ImageReadMode = false,
+  parallelsSnapshot?: string,
 ): Promise<LogicalImage | null> {
+  if (isParallelsDescriptor(file.name))
+    return openParallelsBundle(file, companions, stream, parallelsSnapshot);
   if (/\.a?vhd$/i.test(file.name))
     return openVhdChain(file, companions, stream);
-  if (/\.vhdx$/i.test(file.name)) return openVhdx(file, stream);
-  if (/\.vdi$/i.test(file.name)) return openVdi(file, stream);
+  if (/\.a?vhdx$/i.test(file.name)) return openVhdxChain(file, companions, stream);
+  if (/\.vdi$/i.test(file.name)) return openVdiChain(file, companions, stream);
   if (/\.vmdk$/i.test(file.name))
     return openVmdkSource(
       file,
@@ -37,6 +41,7 @@ export interface ImageFiles {
   file: File;
   companions: File[];
   sector: 512 | 4096;
+  parallelsSnapshot?: string;
 }
 const selected = new Map<string, ImageFiles>();
 export function retainImageFiles(id: string, files: ImageFiles) {
@@ -54,12 +59,13 @@ export async function conversionReader(
 ): Promise<LogicalImage> {
   const { file, companions } = files;
   if (
-    !/\.(img|raw|vhd|avhd|vhdx|vdi|vmdk|hdd|hds)$/i.test(file.name) ||
+    (!isParallelsDescriptor(file.name) &&
+      !/\.(img|raw|vhd|avhd|vhdx|avhdx|vdi|vmdk|hdd|hds)$/i.test(file.name)) ||
     file.name.length > 255 ||
     /[\\/:\0]/.test(file.name)
   )
     throw Error("请选择普通的受支持镜像文件。");
-  const container = await openContainer(file, companions, true);
+  const container = await openContainer(file, companions, true, files.parallelsSnapshot);
   if (container) return container;
   if (
     !Number.isSafeInteger(file.size) ||

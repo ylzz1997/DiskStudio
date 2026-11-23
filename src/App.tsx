@@ -52,11 +52,14 @@ import { SectorViewer } from "./SectorViewer";
 import { HealthDialog } from "./HealthDialog";
 import { TableBackupDialog } from "./TableBackupDialog";
 import { TableInspectDialog } from "./TableInspectDialog";
+import { BootInspectionDialog } from "./BootInspectionDialog";
 import { LostPartitionDialog } from "./LostPartitionDialog";
 import { DeviceStateDialog } from "./DeviceStateDialog";
 import { PartitionMoveDialog } from "./PartitionMoveDialog";
 import { MaintenanceDialog } from "./MaintenanceDialog";
 import { ImageConversionDialog } from "./ImageConversionDialog";
+import { ParallelsSnapshotPicker, type ParallelsSnapshots } from "./ParallelsSnapshotPicker";
+import { isParallelsDescriptor, listParallelsSnapshots } from "./parallelsBundle";
 import { ImageCreationDialog } from "./ImageCreationDialog";
 import { StorageSpacesDialog } from "./StorageSpacesDialog";
 import { imageFiles, releaseImageFiles } from "./imageReader";
@@ -71,6 +74,7 @@ type Modal =
   | "health"
   | "tableBackup"
   | "tableInspect"
+  | "bootInspect"
   | "lostPartitions"
   | "deviceState"
   | "resumePartitionMove"
@@ -120,6 +124,12 @@ function Workspace() {
     files: File[];
     missing: string[];
     kind: "data" | "parent";
+    snapshot?: string;
+  } | null>(null);
+  const [imageSnapshot, setImageSnapshot] = useState<{
+    file: File;
+    list: ParallelsSnapshots;
+    id: string;
   } | null>(null);
   const [menu, setMenu] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -203,12 +213,20 @@ function Workspace() {
       reading.current = false;
     }
   }
-  async function importImage(file?: File, companions: File[] = []) {
+  async function importImage(file?: File, companions: File[] = [], snapshot?: string) {
     if (!file || busyRef.current) return;
     operationBusy(true);
     try {
       if (images.length >= 24) throw new Error(t("最多同时打开 24 个镜像。"));
-      const opened = await openImage(file, companions);
+      if (!snapshot && isParallelsDescriptor(file.name)) {
+        const list = await listParallelsSnapshots(file);
+        if (list.snapshots.length > 1) {
+          setImageSnapshot({ file, list, id: list.top });
+          return;
+        }
+        snapshot = list.top;
+      }
+      const opened = await openImage(file, companions, snapshot);
       setImageParts(null);
       setImages((all) =>
         all.some((d) => d.id === opened.id)
@@ -227,6 +245,7 @@ function Workspace() {
           files: companions,
           missing: e.missing,
           kind: e.kind,
+          snapshot,
         });
         setToast(null);
         return;
@@ -409,6 +428,16 @@ function Workspace() {
                 >
                   <ShieldCheck size={16} />
                   {t("分区表检查与修复…")}
+                </button>
+                <button
+                  disabled={!native || !physical || disk?.hardware?.offline !== true || !disk.hardware.identity || !disk.hardware.layoutKey || loading}
+                  onClick={() => {
+                    setMenu(false);
+                    setModal("bootInspect");
+                  }}
+                >
+                  <ScanLine size={16} />
+                  {t("Windows 启动检查")}
                 </button>
                 <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
@@ -638,6 +667,14 @@ function Workspace() {
           onClose={() => setModal(null)}
           onBusy={operationBusy}
           onRefresh={refreshLocal}
+        />
+      )}
+      {modal === "bootInspect" && disk?.hardware?.identity && disk.hardware.layoutKey && (
+        <BootInspectionDialog
+          request={{ kind: "disk", source: { target: disk.hardware.identity, layoutKey: disk.hardware.layoutKey, partition: null } }}
+          label={diskTitle(disk, t)}
+          onClose={() => setModal(null)}
+          onBusy={operationBusy}
         />
       )}
       {modal === "surface" && disk && (
@@ -910,7 +947,7 @@ function Workspace() {
         ref={input}
         hidden
         type="file"
-        accept=".img,.raw,.vhd,.avhd,.vhdx,.vdi,.vmdk,.hdd,.hds"
+        accept=".img,.raw,.vhd,.avhd,.vhdx,.avhdx,.vdi,.vmdk,.hdd,.hds,.xml"
         aria-label={t("选择磁盘镜像文件")}
         onChange={(e) => void importImage(e.target.files?.[0])}
       />
@@ -935,9 +972,21 @@ function Workspace() {
                   ),
                   ...added,
                 ];
-          void importImage(imageParts.primary, files);
+          void importImage(imageParts.primary, files, imageParts.snapshot);
         }}
       />
+      {imageSnapshot && (
+        <Dialog title={t("打开镜像")} subtitle={imageSnapshot.file.name} onClose={() => setImageSnapshot(null)}>
+          <ParallelsSnapshotPicker list={imageSnapshot.list} id={imageSnapshot.id} onChange={(id) => setImageSnapshot({ ...imageSnapshot, id })} />
+          <div className="dialog-actions">
+            <button className="button" onClick={() => setImageSnapshot(null)}>{t("取消")}</button>
+            <button className="button primary" disabled={!imageSnapshot.list.snapshots.some((point) => point.id === imageSnapshot.id && point.supported)} onClick={() => {
+              setImageSnapshot(null);
+              void importImage(imageSnapshot.file, [], imageSnapshot.id);
+            }}>{t("检查并打开")}</button>
+          </div>
+        </Dialog>
+      )}
       {imageParts && (
         <Dialog
           title={

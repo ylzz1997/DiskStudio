@@ -18,7 +18,7 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery'];
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'retained-signatures', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery', 'boot-repair'];
 function profileDisks(fourKn, fixture) {
   const base = fourKn ? fourKnDisks : disks;
   return fixture ? base.map(disk => disk.bus === 'nvme' ? {
@@ -310,7 +310,12 @@ async function start(options) {
   for (const disk of profileDisks(options.fourKn, options.fixture)) {
     if (disk.controller || (options.fixture && disk.bus === 'nvme')) {
       const filename = safePath(diskPath(disk), root, false);
-      if (!fs.existsSync(filename)) tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
+      if (!fs.existsSync(filename)) {
+        if (options.fixture === 'boot-repair' && disk.id === 'test_b') {
+          throw new Error('Prepare the offline Test B seed with build-boot-repair-disk.mjs');
+        }
+        tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
+      }
     }
     checkDisk(disk);
   }
@@ -498,6 +503,7 @@ async function preflight() {
     if (stateFixture(state) === 'signature-documents') console.log('OpenDocument and macro-enabled Office recovery use their independent 4Kn A/B pair.');
     if (stateFixture(state) === 'ext-journal-tree') console.log('Ext4 extent tree recovery uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'ext-journal-resume') console.log('Ext4 deletion progress uses its independent 4Kn A/B pair.');
+    if (stateFixture(state) === 'retained-signatures') console.log('Retained signature testing uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'ext-complete') console.log('Ext4 Complete Recovery uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'ext-journal') console.log('Ext4 journal recovery uses its independent 4Kn A/B pair.');
     if (stateFixture(state) === 'signature-containers') console.log('RAR, AVI and AIFF recovery use their independent 4Kn A/B pair.');
@@ -658,9 +664,11 @@ async function main() {
     console.log('start --4kn --signature-documents: use the dedicated 4Kn document signature fixtures');
     console.log('start --4kn --ext-journal-tree: use the dedicated 4Kn Ext4 extent tree fixture');
     console.log('start --4kn --ext-journal-resume: use the dedicated 4Kn Ext4 deletion progress fixture');
+    console.log('start --4kn --retained-signatures: test VHDX and incremental archive signature scans on the dedicated A/B pair');
     console.log('start --4kn --ext-complete: use the dedicated 4Kn Ext4 Complete Recovery fixture');
     console.log('start --4kn --ext-journal: use the dedicated 4Kn Ext4 journal fixture');
     console.log('start --4kn --table-mbr: use the dedicated 4Kn MBR partition table fixtures');
+    console.log('start --4kn --boot-repair: use the dedicated 4Kn Windows boot repair fixtures');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     console.log('surface-read-window|surface-read-clear: set or clear the fixed Test A 4Kn read limit');

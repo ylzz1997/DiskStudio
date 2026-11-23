@@ -19,15 +19,17 @@ flate2 = { version = "1.1.11", default-features = false, features = ["rust_backe
 crc32fast = "1.5.5"
 quick-xml = "0.42.0"
 sha2 = "0.10"
+md-5 = "0.10.6"
 argon2 = { version = "0.5.3", features = ["zeroize"] }
 chacha20poly1305 = "0.10.1"
 getrandom = "0.3"
 zeroize = { version = "1.8", features = ["alloc"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 ntfs = { path = "../vendor/ntfs" }
 ext4-view = { path = "../vendor/ext4-view", default-features = false }
 zstd = "0.13"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
+regf = "=0.3.0"
 rfd = { version = "0.15", default-features = false }
 rust_xlsxwriter = { version = "0.103.0", default-features = false }
 

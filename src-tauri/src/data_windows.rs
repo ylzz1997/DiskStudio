@@ -47,6 +47,52 @@ impl Resolved {
             .is_some_and(|(left, right)| left.fingerprint == right.fingerprint)
     }
 
+    pub(crate) fn verify_boot_repair_layout(
+        &self,
+        file: &File,
+        layout: &disk_core::table_check::GptIdentity,
+        boot: uuid::Uuid,
+    ) -> Result<(), String> {
+        let inventory = Inventory::read()?;
+        let proof = self.data_lock_proof.as_ref().ok_or("缺少卷和分区凭据。")?;
+        let disk = policy::target_disk(&inventory.disks, &proof.source.target)?;
+        policy::corroborate(disk, &inventory.legacy)?;
+        let parts = policy::layout(disk, &inventory.parts)?;
+        self.verify_partition_snapshot(disk, &parts)?;
+        let sector = disk.logical_sector_size.ok_or("逻辑扇区大小未知。")?;
+        let (native, service, _) = crate::extfs::restore_native(file, Some(&parts), sector)?;
+        if native.guid != uuid::Uuid::from_bytes_le(layout.disk_guid).to_string()
+            || native.entries.len() != layout.partitions.len()
+            || layout.partitions.iter().any(|raw| {
+                let id = uuid::Uuid::from_bytes_le(raw.guid).to_string();
+                let kind = uuid::Uuid::from_bytes_le(raw.kind).to_string();
+                !native.entries.iter().any(|part| {
+                    part.guid == id
+                        && part.kind == kind
+                        && part.offset == raw.range.start
+                        && part.size == raw.range.end - raw.range.start
+                        && part.attributes == raw.attributes
+                })
+            })
+        {
+            return Err("原始 GPT 与 Windows 原生布局不一致。".into());
+        }
+        // The BCD writer corroborates the complete GPT attributes on the
+        // verified device handle. Windows can leave WMI's volume-specific
+        // flags blank while the disk is offline. Any explicit flag still vetoes.
+        let boot = boot.to_string();
+        let entry = parts.iter().find(|part| {
+            part.guid.as_deref().is_some_and(|value| policy::guid(value) == boot)
+        }).ok_or("EFI 系统分区已变化。")?;
+        if service.contains(&boot)
+            || entry.is_read_only == Some(true)
+            || entry.is_shadow_copy == Some(true)
+        {
+            return Err("原生 GPT 分区受到保护。".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_partition_snapshot(
         &self,
         disk: &Disk,

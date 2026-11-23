@@ -14,6 +14,34 @@ pub use exfat::prepare_exfat;
 
 const MAX_DIRECTORY_BYTES: u64 = 128 * 1024 * 1024;
 
+/// Validate exclusive live-cluster ownership before an existing file is
+/// patched without changing directory entries or either FAT.
+pub(crate) fn check_boot_fat32<R: Read + Seek>(r: &mut R, sector: u64) -> Result<[u8; 32], String> {
+    if !matches!(sector, 512 | 4096) {
+        return Err("Invalid EFI FAT sector geometry".into());
+    }
+    let size = r.seek(SeekFrom::End(0)).map_err(e)?;
+    let fs = Fs::load(r)?;
+    let boot = at(r, 0, sector as usize)?;
+    let backup = u64::from(u16at(&boot, 50));
+    if fs.bits != 32 || fs.copies != 2 || !fs.mirror || fs.cluster > 32768
+        || u64::from(u16at(&boot, 11)) != sector || u16at(&boot, 40) != 0
+        || u16at(&boot, 19) != 0 || u64::from(u32at(&boot, 32)) * sector != size
+        || backup == 0 || backup >= u64::from(u16at(&boot, 14))
+        || at(r, backup * sector, boot.len())? != boot
+    {
+        return Err("EFI repair requires a checked FAT32 partition with matching boot sectors and FATs".into());
+    }
+    let table = ClassicTable::read(r, &fs, &boot, fs.count)?;
+    let relocation = Relocation { pairs: Vec::new(), sector: sector as usize, heap_shift: 0 };
+    let tree = check_classic_tree(r, &fs, &table, &relocation)?;
+    let mut hash = Sha256::new();
+    hash.update(&boot);
+    hash.update(table.bytes());
+    hash.update(tree.digest);
+    Ok(hash.finalize().into())
+}
+
 #[derive(Debug)]
 struct SectorEdit {
     offset: u64,

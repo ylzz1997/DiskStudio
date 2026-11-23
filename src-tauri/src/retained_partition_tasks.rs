@@ -156,6 +156,7 @@ impl Found {
                     offset: extent.offset.to_string(),
                     size: extent.size.to_string(),
                     sector: extent.sector,
+                    parallels_snapshot: image.browser.info.parallels_snapshot.as_ref().map(|point| point.id),
                 })
             }
             Backing::Backup(backup) => {

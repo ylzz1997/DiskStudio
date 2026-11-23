@@ -542,7 +542,7 @@ fn exported_manifests_include_image_source_in_complete_and_partial_results() {
         crate::recovery_export::Layout::Tree,
     )
     .unwrap();
-    plan.image_source = Some(browser.provenance(0).unwrap());
+    plan.image_source = Some(browser.scope_provenance(Some(0)).unwrap());
     for completed in [false, true] {
         let report: serde_json::Value =
             serde_json::from_slice(&plan.manifest(&[], completed).unwrap()).unwrap();

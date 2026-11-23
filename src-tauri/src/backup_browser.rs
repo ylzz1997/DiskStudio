@@ -103,17 +103,17 @@ impl Seek for LegacyReader {
     }
 }
 impl Browser {
-    pub fn provenance(
+    pub fn scope_provenance(
         &self,
-        partition: u32,
+        partition: Option<u32>,
     ) -> Result<crate::recovery_export::BackupSource, String> {
-        let part = self
-            .info
-            .partitions
-            .iter()
-            .find(|p| p.id == partition)
-            .ok_or("备份分区不存在")?;
-        self.provenance_for(part.name.clone(), None)
+        let name = match partition {
+            Some(id) => self.info.partitions.iter().find(|p| p.id == id)
+                .ok_or("备份分区不存在")?.name.clone(),
+            None if self.info.kind == "disk" => "整盘备份".into(),
+            None => return Err("备份分区不存在".into()),
+        };
+        self.provenance_for(name, None)
     }
 
     pub(crate) fn provenance_for(
@@ -135,12 +135,30 @@ impl Browser {
             found_extent,
         })
     }
-    pub fn source_label(&self, partition: u32) -> Result<String, String> {
-        let source = self.provenance(partition)?;
+    pub fn scope_label(&self, partition: Option<u32>) -> Result<String, String> {
+        let source = self.scope_provenance(partition)?;
+        let locale = crate::native_locale::current();
+        let point = self.info.points.iter().find(|point| point.id == source.point_id)
+            .ok_or("备份还原点不存在")?;
+        let point_label = match point.ordinal {
+            Some(ordinal) => locale.format("此前第 {layer} 层增量备份", &[("layer", &ordinal.to_string())]),
+            None => locale.text(&point.label).to_owned(),
+        };
+        let scope = match partition {
+            None => locale.text("整盘备份"),
+            Some(_) => &source.partition,
+        };
         Ok(format!(
             "{} / {} / {}",
-            source.archive_name, source.point_label, source.partition
+            source.archive_name, point_label, scope
         ))
+    }
+    pub(crate) fn recovery_identity(&self) -> Result<String, String> {
+        match &self.content {
+            Content::V2 { chain, layer } => Ok(chain.lock().map_err(|_| "备份读取状态异常")?
+                .manifest_at(*layer)?.to_owned()),
+            Content::V1 { header, .. } => Ok(header.sha256.clone()),
+        }
     }
     pub fn from_chain(
         chain: Chain,

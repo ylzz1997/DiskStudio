@@ -1,4 +1,4 @@
-param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$ExtReconstruction, [switch]$LostBackupBoot, [switch]$LostExt4, [switch]$RetainedLost, [switch]$UnallocatedSearch, [switch]$OfficePreview, [switch]$PagedPreview, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$SignatureMedia, [switch]$CompleteRecovery, [switch]$SignatureImages, [switch]$SignatureContainers, [switch]$SignatureAudio, [switch]$SignatureDocuments, [switch]$ExtJournal, [switch]$ExtJournalTree, [switch]$ExtJournalResume, [switch]$ExtComplete, [switch]$TableMbr, [switch]$NtfsWofRecovery, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone, [switch]$SurfaceRefinement, [switch]$SurfaceRefinementSetup, [switch]$SurfaceTimeout, [switch]$SurfaceParallel, [switch]$SurfaceRepair, [switch]$SectorEdit)
+param([switch]$NtfsReconstruction, [switch]$FatReconstruction, [switch]$ExtReconstruction, [switch]$LostBackupBoot, [switch]$LostExt4, [switch]$RetainedLost, [switch]$UnallocatedSearch, [switch]$OfficePreview, [switch]$PagedPreview, [switch]$BitLockerMarker, [switch]$ResizeClone, [switch]$ResizeCloneContinue, [switch]$RetainedRestore, [switch]$ArchiveRestore, [switch]$CapacityRestore, [switch]$FatRestore, [switch]$ExtCopy, [switch]$BtrfsExactClone, [switch]$SignatureScope, [switch]$SignatureFormats, [switch]$SignatureMedia, [switch]$CompleteRecovery, [switch]$SignatureImages, [switch]$SignatureContainers, [switch]$SignatureAudio, [switch]$SignatureDocuments, [switch]$ExtJournal, [switch]$ExtJournalTree, [switch]$ExtJournalResume, [switch]$ExtComplete, [switch]$RetainedSignatures, [switch]$RetainedSignatureProgress, [switch]$VhdxChain, [switch]$VmdkChain, [switch]$VdiChain, [switch]$VhdxLog, [switch]$EsxiChain, [switch]$ParallelsBundle, [switch]$ParallelsHistory, [switch]$ImageArchive, [switch]$DeviceImage, [switch]$BootInspection, [switch]$BootReferences, [switch]$BootInheritance, [switch]$BootRepair, [switch]$TableMbr, [switch]$NtfsWofRecovery, [switch]$FileClone, [switch]$FileCloneExfat, [switch]$FileCloneNtfs, [switch]$FileCloneNtfsMetadata, [switch]$FileCloneNtfsMetadataContinue, [switch]$FileCloneNtfsStorage, [switch]$FileCloneNtfsStorageAudit, [switch]$FileCloneNtfsLinks, [switch]$FileCloneNtfsLinksInspect, [switch]$FileCloneNtfsLinksContinue, [switch]$FileCloneNtfsLinksAudit, [switch]$FileCloneNtfsWof, [switch]$FileCloneNtfsWofContinue, [switch]$FileCloneNtfsWofImage, [switch]$FileCloneNtfsWofImageContinue, [switch]$FileCloneNtfsWofImageAfterOnline, [switch]$FileCloneNtfsEfs, [switch]$WholeFileClone, [switch]$SurfaceRefinement, [switch]$SurfaceRefinementSetup, [switch]$SurfaceTimeout, [switch]$SurfaceParallel, [switch]$SurfaceRepair, [switch]$SectorEdit)
 $ErrorActionPreference = 'Stop'
 $diskStudioProject = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 Push-Location $diskStudioProject
@@ -9,7 +9,7 @@ try {
     # Build only. Never launch this executable on the host.
     # Apply CRT selection to C dependencies too (not just the final Rust crate).
     $env:RUSTFLAGS = '-C target-feature=+crt-static'
-    $fixtureBatches = @($SectorEdit, $SurfaceRepair, $SurfaceParallel, $SurfaceTimeout, $SurfaceRefinementSetup, $SurfaceRefinement, $NtfsReconstruction, $FatReconstruction, $ExtReconstruction, $LostBackupBoot, $LostExt4, $RetainedLost, $UnallocatedSearch, $OfficePreview, $PagedPreview, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $SignatureMedia, $CompleteRecovery, $SignatureImages, $SignatureContainers, $SignatureAudio, $SignatureDocuments, $ExtJournal, $ExtJournalTree, $ExtJournalResume, $ExtComplete, $TableMbr, $NtfsWofRecovery, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
+    $fixtureBatches = @($SectorEdit, $SurfaceRepair, $SurfaceParallel, $SurfaceTimeout, $SurfaceRefinementSetup, $SurfaceRefinement, $NtfsReconstruction, $FatReconstruction, $ExtReconstruction, $LostBackupBoot, $LostExt4, $RetainedLost, $UnallocatedSearch, $OfficePreview, $PagedPreview, $BitLockerMarker, $ResizeClone, $ResizeCloneContinue, $RetainedRestore, $ArchiveRestore, $CapacityRestore, $FatRestore, $ExtCopy, $BtrfsExactClone, $SignatureScope, $SignatureFormats, $SignatureMedia, $CompleteRecovery, $SignatureImages, $SignatureContainers, $SignatureAudio, $SignatureDocuments, $ExtJournal, $ExtJournalTree, $ExtJournalResume, $ExtComplete, $RetainedSignatures, $RetainedSignatureProgress, $VhdxChain, $VmdkChain, $VdiChain, $VhdxLog, $EsxiChain, $ParallelsBundle, $ParallelsHistory, $ImageArchive, $DeviceImage, $BootInspection, $BootReferences, $BootInheritance, $BootRepair, $TableMbr, $NtfsWofRecovery, $FileClone, $FileCloneExfat, $FileCloneNtfs, $FileCloneNtfsMetadata, $FileCloneNtfsMetadataContinue, $FileCloneNtfsStorage, $FileCloneNtfsStorageAudit, $FileCloneNtfsLinks, $FileCloneNtfsLinksInspect, $FileCloneNtfsLinksContinue, $FileCloneNtfsLinksAudit, $FileCloneNtfsWof, $FileCloneNtfsWofContinue, $FileCloneNtfsWofImage, $FileCloneNtfsWofImageContinue, $FileCloneNtfsWofImageAfterOnline, $FileCloneNtfsEfs, $WholeFileClone) | Where-Object { $_ }
     if (@($fixtureBatches).Count -gt 1) { throw 'Select one fixture batch' }
     if ($fixtureBatches) {
         $desktopHash = (Get-FileHash -LiteralPath 'target/release/diskstudio.exe').Hash.ToLowerInvariant()
@@ -99,6 +99,36 @@ try {
             @('Ntfs-Wof-Recovery-4Kn-Baseline.exe', 'Ntfs-Wof-Recovery-4Kn-Verify.exe')
         } elseif ($SignatureDocuments) {
             @('Signature-Documents-4Kn-Prepare.exe', 'Signature-Documents-4Kn-Verify.exe')
+        } elseif ($VhdxChain) {
+            @('Vhdx-Chain-4Kn-Prepare.exe', 'Vhdx-Chain-4Kn-Verify.exe')
+        } elseif ($VmdkChain) {
+            @('Vmdk-Chain-4Kn-Prepare.exe', 'Vmdk-Chain-4Kn-Verify.exe')
+        } elseif ($VdiChain) {
+            @('Vdi-Chain-4Kn-Prepare.exe', 'Vdi-Chain-4Kn-Verify.exe')
+        } elseif ($VhdxLog) {
+            @('Vhdx-Log-4Kn-Prepare.exe', 'Vhdx-Log-4Kn-Verify.exe')
+        } elseif ($BootInspection) {
+            @('Boot-Inspection-4Kn-Prepare.exe', 'Boot-Inspection-4Kn-Verify.exe')
+        } elseif ($BootReferences) {
+            @('Boot-References-4Kn-Prepare.exe', 'Boot-References-4Kn-Verify.exe')
+        } elseif ($BootInheritance) {
+            @('Boot-Inheritance-4Kn-Prepare.exe', 'Boot-Inheritance-4Kn-Verify.exe')
+        } elseif ($BootRepair) {
+            @('Boot-Repair-4Kn-Prepare.exe', 'Boot-Repair-4Kn-Verify.exe')
+        } elseif ($DeviceImage) {
+            @('Device-Image-4Kn-Prepare.exe', 'Device-Image-4Kn-Verify.exe')
+        } elseif ($ImageArchive) {
+            @('Image-Archive-4Kn-Verify.exe')
+        } elseif ($ParallelsHistory) {
+            @('Parallels-History-4Kn-Prepare.exe', 'Parallels-History-4Kn-Verify.exe')
+        } elseif ($ParallelsBundle) {
+            @('Parallels-Bundle-4Kn-Prepare.exe', 'Parallels-Bundle-4Kn-Verify.exe')
+        } elseif ($EsxiChain) {
+            @('Esxi-Chain-4Kn-Prepare.exe', 'Esxi-Chain-4Kn-Verify.exe')
+        } elseif ($RetainedSignatureProgress) {
+            @('Retained-Progress-4Kn-Prepare.exe', 'Retained-Progress-4Kn-Verify.exe')
+        } elseif ($RetainedSignatures) {
+            @('Retained-Signatures-4Kn-Prepare.exe', 'Retained-Signatures-4Kn-Verify.exe')
         } elseif ($ExtComplete) {
             @('Ext-Complete-4Kn-Prepare.exe', 'Ext-Complete-4Kn-Verify.exe')
         } elseif ($ExtJournalResume) {

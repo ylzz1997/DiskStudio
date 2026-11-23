@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openContainer, retainImageFiles } from "./imageReader";
+import { isParallelsDescriptor } from "./parallelsBundle";
 import type {
   Disk,
   DiskSnapshot,
@@ -45,15 +46,17 @@ export async function readLocalDisks(): Promise<DiskSnapshot> {
 export async function openImage(
   file: File,
   companions: File[] = [],
+  parallelsSnapshot?: string,
 ): Promise<Disk> {
-  if (!/\.(img|raw|vhd|avhd|vhdx|vdi|vmdk|hdd|hds)$/i.test(file.name))
+  if (!isParallelsDescriptor(file.name) &&
+      !/\.(img|raw|vhd|avhd|vhdx|avhdx|vdi|vmdk|hdd|hds)$/i.test(file.name))
     throw new Error(
-      "请选择 RAW、IMG、VHD/AVHD、VHDX、VDI、VMDK 或 Parallels HDD/HDS。",
+      "请选择 RAW、IMG、VHD/AVHD、VHDX、VDI、VMDK、Parallels HDD/HDS 或 DiskDescriptor.xml。",
     );
   if (!native) throw new Error("请在桌面应用中打开镜像文件。");
   if (file.name.length > 255 || /[\\/:\0]/.test(file.name))
     throw new Error("只接受普通镜像文件名。");
-  const container = await openContainer(file, companions);
+  const container = await openContainer(file, companions, false, parallelsSnapshot);
   const size = container?.size ?? file.size;
   if (!Number.isSafeInteger(size) || size < 4 * 1024 ** 2 || size > 2 ** 43)
     throw new Error("镜像容量须介于 4 MiB 与 8 TiB 之间。");
@@ -149,13 +152,18 @@ export async function openImage(
   if (disk.kind !== "image") throw new Error("镜像解析结果无效。");
   if (container && disk.sectorSize !== container.sectorSize)
     throw new Error("分区表扇区大小与虚拟磁盘元数据不一致。");
-  retainImageFiles(disk.id, {
+  const point = container?.parallelsSnapshot;
+  const id = point ? `${disk.id}-${point.id}` : disk.id;
+  retainImageFiles(id, {
     file,
     companions,
     sector: disk.sectorSize as 512 | 4096,
+    parallelsSnapshot: point?.id,
   });
   return {
     ...disk,
+    id,
+    ...(point ? { name: point.name } : {}),
     tableReport: result.report,
     imageFormat: container?.format ?? "RAW · 原始镜像",
     imageFileSize: container?.fileSize ?? file.size,

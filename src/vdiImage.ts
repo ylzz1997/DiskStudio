@@ -1,5 +1,5 @@
-// VDI 1.1/1.1+ standalone images, decoded from bounded selected-File slices.
-// Header field layout: Oracle VDICore.h. No parent lookup, devices or writes.
+// VDI 1.1/1.1+ images decoded from bounded selected-file slices.
+// Header and block definitions follow Oracle VDICore.h.
 import {
   logicalLimit,
   fileFactor,
@@ -7,11 +7,30 @@ import {
   type ImageReadMode,
   type LogicalImage,
 } from "./imageSource";
+import { MissingImageFilesError } from "./imageDependencies";
 const MiB = 1024 ** 2;
 const MAP_LIMIT = 32 * MiB;
+const CHAIN_MAP_LIMIT = 64 * MiB;
+const MAX_LAYERS = 16;
+const ZERO = 0xfffffffe;
+const FREE = 0xffffffff;
 const view = (b: Uint8Array) =>
   new DataView(b.buffer, b.byteOffset, b.byteLength);
 const u32 = (b: Uint8Array, at: number) => view(b).getUint32(at, true);
+function uuid(b: Uint8Array, at: number) {
+  const stored = b.subarray(at, at + 16);
+  const fields = view(stored);
+  const tail = Array.from(stored.subarray(8), (n) =>
+    n.toString(16).padStart(2, "0"),
+  ).join("");
+  return [
+    fields.getUint32(0, true).toString(16).padStart(8, "0"),
+    fields.getUint16(4, true).toString(16).padStart(4, "0"),
+    fields.getUint16(6, true).toString(16).padStart(4, "0"),
+    tail.slice(0, 4),
+    tail.slice(4),
+  ].join("-");
+}
 const power = (n: number) => n > 0 && (n & (n - 1)) === 0;
 function bounds(at: number, length: number, size: number) {
   if (
@@ -23,15 +42,14 @@ function bounds(at: number, length: number, size: number) {
   )
     throw new Error("VDI 读取范围越界。");
 }
-export async function openVdi(
+async function inspectVdi(
   file: Pick<ImageFile, "size" | "slice">,
   stream: ImageReadMode = false,
-): Promise<LogicalImage> {
+) {
   if (!Number.isSafeInteger(file.size) || file.size < 456)
     throw new Error("VDI 文件长度无效。");
   let fileRead = 0,
-    calls = 0,
-    logicalRead = 0;
+    calls = 0;
   const physical = async (at: number, length: number) => {
     bounds(at, length, file.size);
     fileRead += length;
@@ -63,20 +81,24 @@ export async function openVdi(
   header.set(rest, 76);
   const type = u32(header, 76),
     flags = u32(header, 80);
-  if ([3, 4].includes(type) || header.subarray(424, 456).some(Boolean))
-    throw new Error("暂不支持撤销或差分 VDI 的父盘链，未查找父盘。");
-  if (![1, 2].includes(type) || flags > 1)
+  if (![1, 2, 4].includes(type) || flags > 1)
     throw new Error("VDI 镜像类型或功能标志暂不支持。");
+  const creation = uuid(header, 392),
+    modification = uuid(header, 408);
+  const hasId = (offset: number) =>
+    header.subarray(offset, offset + 16).some(Boolean);
+  if (type === 4 ? !hasId(424) || !hasId(440) : hasId(424) || hasId(440))
+    throw new Error("VDI 镜像类型与父盘标识不一致，或缺少父盘修改标识。");
+  const parent =
+    type === 4
+      ? { creation: uuid(header, 424), modification: uuid(header, 440) }
+      : undefined;
   if (
     u32(header, 360) !== 512 ||
     (headerLength === 400 && u32(header, 468) !== 512)
   )
     throw new Error("VDI 当前仅支持 512 B 逻辑扇区。");
-  if (
-    !header.subarray(392, 408).some(Boolean) ||
-    !header.subarray(408, 424).some(Boolean)
-  )
-    throw new Error("VDI 创建或修改标识为空。");
+  if (!hasId(392) || !hasId(408)) throw new Error("VDI 创建或修改标识为空。");
   const size64 = view(header).getBigUint64(368, true);
   if (size64 < BigInt(4 * MiB) || size64 > 2n ** 43n || size64 % 512n !== 0n)
     throw new Error("VDI 逻辑容量须为 4 MiB 至 8 TiB 且按 512 B 对齐。");
@@ -112,6 +134,48 @@ export async function openVdi(
     throw new Error("VDI 已分配数据区不完整。");
   if (type === 2 && allocated !== blocks)
     throw new Error("固定 VDI 未完整分配；当前不支持这种布局。");
+  return {
+    physical,
+    header,
+    type,
+    size,
+    blockSize,
+    extra,
+    blocks,
+    allocated,
+    mapAt,
+    dataAt,
+    mapLength,
+    stride,
+    dataEnd,
+    creation,
+    modification,
+    parent,
+  };
+}
+
+type VdiMetadata = Awaited<ReturnType<typeof inspectVdi>>;
+async function openLayer(
+  meta: VdiMetadata,
+  fileSize: number,
+  stream: ImageReadMode,
+  parent?: LogicalImage,
+): Promise<LogicalImage> {
+  const {
+    physical,
+    header,
+    type,
+    size,
+    blockSize,
+    extra,
+    blocks,
+    allocated,
+    mapAt,
+    dataAt,
+    mapLength,
+    stride,
+    dataEnd,
+  } = meta;
   const map = await physical(mapAt, mapLength);
   // An allocated slot must appear exactly once. A bitset keeps memory bounded
   // even with millions of small logical blocks; physical order may be arbitrary.
@@ -119,7 +183,7 @@ export async function openVdi(
   let mapped = 0;
   for (let block = 0; block < blocks; block++) {
     const slot = u32(map, block * 4);
-    if (slot >= 0xfffffffe) continue;
+    if (slot >= ZERO) continue;
     if (slot >= allocated) throw new Error("VDI 块映射超出已分配范围。");
     const mask = 1 << (slot % 8),
       byte = Math.floor(slot / 8);
@@ -131,15 +195,21 @@ export async function openVdi(
     throw new Error("VDI 已分配块数与实际映射数量不一致。");
   const warnings: string[] = [],
     notes = ["VDI 头部与块映射表不含校验和；结构检查不能证明全部内容完好。"];
-  if (file.size > dataEnd)
+  if (fileSize > dataEnd)
     warnings.push(
       "VDI 已分配数据区之后存在额外字节；未将其作为逻辑磁盘内容，也未修改源文件。",
     );
-  let freeNote = false;
+  let freeNote = false,
+    logicalRead = 0;
   return {
     size,
     sectorSize: 512,
-    format: type === 2 ? "VDI · 固定容量" : "VDI · 动态扩展",
+    format:
+      type === 2
+        ? "VDI · 固定容量"
+        : type === 4
+          ? "VDI · 差分链"
+          : "VDI · 动态扩展",
     warnings,
     notes,
     async read(at, length) {
@@ -150,17 +220,30 @@ export async function openVdi(
       const output = new Uint8Array(length);
       for (let done = 0; done < length;) {
         const logical = at + done,
-          within = logical % blockSize;
-        const slot = u32(map, Math.floor(logical / blockSize) * 4);
-        const run = Math.min(length - done, blockSize - within);
-        if (slot < 0xfffffffe)
+          within = logical % blockSize,
+          index = Math.floor(logical / blockSize),
+          slot = u32(map, index * 4);
+        let run = Math.min(length - done, blockSize - within);
+        if (slot < ZERO)
           output.set(
             await physical(dataAt + slot * stride + extra + within, run),
             done,
           );
-        else if (slot === 0xffffffff && !freeNote) {
-          notes.push("未分配 VDI 块按零读取；此视图不用于恢复这些块的旧内容。");
-          freeNote = true;
+        else if (slot === FREE) {
+          if (parent) {
+            for (
+              let next = index + 1;
+              done + run < length && u32(map, next * 4) === FREE;
+              next++
+            )
+              run = Math.min(length - done, run + blockSize);
+            output.set(await parent.read(logical, run), done);
+          } else if (!freeNote) {
+            notes.push(
+              "未分配 VDI 块按零读取；此视图不用于恢复这些块的旧内容。",
+            );
+            freeNote = true;
+          }
         }
         done += run;
       }
@@ -177,6 +260,89 @@ export async function openVdi(
             "读取期间 VDI 头部或块映射发生变化，请关闭使用它的虚拟机后重新打开离线副本。",
           );
       }
+    },
+  };
+}
+
+export async function openVdi(
+  file: Pick<ImageFile, "size" | "slice">,
+  stream: ImageReadMode = false,
+): Promise<LogicalImage> {
+  const meta = await inspectVdi(file, stream);
+  if (meta.parent)
+    throw new MissingImageFilesError([meta.parent.creation], "parent");
+  return openLayer(meta, file.size, stream);
+}
+
+export async function openVdiChain(
+  file: ImageFile,
+  parents: ImageFile[] = [],
+  stream: ImageReadMode = false,
+): Promise<LogicalImage> {
+  if (!parents.length) return openVdi(file, stream);
+  if (parents.length >= MAX_LAYERS)
+    throw new Error("VDI 差分链最多包含 16 层（含当前镜像）。");
+  const leaf = { file, meta: await inspectVdi(file, stream) };
+  const selected = new Map([[leaf.meta.creation, leaf]]);
+  for (const parent of parents) {
+    if (
+      !/\.vdi$/i.test(parent.name) ||
+      parent.name.length > 255 ||
+      /[\\/:\x00-\x1f]/.test(parent.name)
+    )
+      throw new Error("父盘必须是所选的普通 VDI 文件。");
+    const meta = await inspectVdi(parent, stream);
+    if (selected.has(meta.creation))
+      throw new Error("所选 VDI 创建 UUID 重复，无法唯一匹配父盘。");
+    selected.set(meta.creation, { file: parent, meta });
+  }
+
+  const chain = [leaf],
+    used = new Set([leaf.meta.creation]);
+  for (let child = leaf; child.meta.parent;) {
+    const id = child.meta.parent;
+    if (used.has(id.creation)) throw new Error("VDI 父盘链存在循环。");
+    const parent = selected.get(id.creation);
+    if (!parent) throw new MissingImageFilesError([id.creation], "parent");
+    if (
+      parent.meta.size !== leaf.meta.size ||
+      parent.meta.modification !== id.modification
+    )
+      throw new Error("VDI 父盘修改 UUID 或逻辑容量与差分盘不一致。");
+    chain.push(parent);
+    used.add(id.creation);
+    child = parent;
+  }
+  if (chain.length !== selected.size)
+    throw new Error("所选文件包含不属于此 VDI 差分链的父盘。");
+  if (
+    chain.reduce((sum, layer) => sum + layer.meta.mapLength, 0) >
+    CHAIN_MAP_LIMIT
+  )
+    throw new Error("VDI 差分链块映射表合计超过 64 MiB 上限。");
+  const fileSize = chain.reduce((sum, layer) => sum + layer.file.size, 0);
+  if (!Number.isSafeInteger(fileSize))
+    throw new Error("VDI 文件总长度超出安全范围。");
+  const images: LogicalImage[] = [];
+  for (const layer of [...chain].reverse())
+    images.push(
+      await openLayer(layer.meta, layer.file.size, stream, images.at(-1)),
+    );
+  const image = images.at(-1)!;
+  const names = chain.map((layer) => layer.file.name);
+  return {
+    ...image,
+    chain: names,
+    fileSize,
+    fileCount: chain.length,
+    warnings: [...new Set(images.flatMap((layer) => layer.warnings))],
+    notes: [
+      `读取顺序：${names.join(" → ")}。`,
+      "已按创建 UUID、修改 UUID 和逻辑容量核对 VDI 差分链。",
+      ...image.notes,
+    ],
+    async verify() {
+      for (const layer of images) await layer.verify();
     },
   };
 }

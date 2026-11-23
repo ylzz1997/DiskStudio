@@ -1,9 +1,151 @@
 import { expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
-import { openVdi } from "./vdiImage";
+import { openVdi, openVdiChain } from "./vdiImage";
 import { logicalDisk, memoryFile, MiB } from "../tests/fixtures/vhd-memory";
 import { vdiBytes, le32, le64, get32 } from "../tests/fixtures/vdi-memory";
+
+function snapshot(
+  parent: Uint8Array,
+  id: number,
+  writes: [number, number][] = [],
+  zeros: number[] = [],
+) {
+  const block = get32(parent, 376),
+    mapAt = get32(parent, 340),
+    mapEnd = mapAt + get32(parent, 384) * 4,
+    dataAt = get32(parent, 344);
+  const delta = new Uint8Array(dataAt + block * writes.length);
+  delta.set(parent.subarray(0, dataAt));
+  le32(delta, 76, 4);
+  le32(delta, 380, 0);
+  le32(delta, 388, writes.length);
+  delta.fill(id, 392, 408);
+  delta.fill(id + 1, 408, 424);
+  delta.set(parent.subarray(392, 424), 424);
+  delta.fill(0xff, mapAt, mapEnd);
+  for (const index of zeros) le32(delta, mapAt + index * 4, 0xfffffffe);
+  writes.forEach(([index, value], slot) => {
+    le32(delta, mapAt + index * 4, slot);
+    delta.fill(value, dataAt + slot * block, dataAt + (slot + 1) * block);
+  });
+  return delta;
+}
+
+it("resolves reordered parents by UUID and distinguishes allocated, inherited and explicit zero blocks", async () => {
+  const raw = logicalDisk(),
+    base = vdiBytes(raw, { fixed: true, plus: true }),
+    middle = snapshot(
+      base,
+      0x68,
+      [
+        [5, 0x81],
+        [2, 0x82],
+      ],
+      [1],
+    ),
+    leaf = snapshot(middle, 0x72, [[3, 0x91]], [5]);
+  const parent = memoryFile(middle, "renamed-middle.vdi").file,
+    root = memoryFile(base, "root.VDI").file,
+    current = memoryFile(leaf, "snapshot.vdi").file;
+  await expect(openVdiChain(current, [root])).rejects.toMatchObject({
+    kind: "parent",
+    missing: ["68686868-6868-6868-6868-686868686868"],
+  });
+  const image = await openVdiChain(current, [root, parent], true);
+  expect(image.chain).toEqual([
+    "snapshot.vdi",
+    "renamed-middle.vdi",
+    "root.VDI",
+  ]);
+  expect(image.fileCount).toBe(3);
+  expect(image.fileSize).toBe(base.length + middle.length + leaf.length);
+  const expected = raw.slice();
+  expected.fill(0, MiB, 2 * MiB);
+  expected.fill(0x82, 2 * MiB, 3 * MiB);
+  expected.fill(0x91, 3 * MiB, 4 * MiB);
+  expected.fill(0, 5 * MiB, 6 * MiB);
+  for (let at = 0; at < expected.length;) {
+    const length = Math.min(521_153, expected.length - at);
+    expect(
+      Buffer.from(await image.read(at, length)).equals(
+        expected.subarray(at, at + length),
+      ),
+    ).toBe(true);
+    at += length;
+  }
+  await image.verify();
+  middle[512] ^= 1;
+  await expect(image.verify()).rejects.toThrow("发生变化");
+});
+
+it("fails closed on changed, unrelated, duplicate and circular parents before reading maps", async () => {
+  const base = vdiBytes(),
+    middle = snapshot(base, 0x61),
+    leaf = snapshot(middle, 0x71);
+  const first = memoryFile(leaf, "latest.vdi"),
+    root = memoryFile(base, "root.vdi"),
+    parent = memoryFile(middle, "middle.vdi");
+  const reject = (parents: File[], detail: string) =>
+    expect(openVdiChain(first.file, parents)).rejects.toThrow(detail);
+  await reject(
+    [parent.file, root.file, memoryFile(base, "duplicate.vdi").file],
+    "重复",
+  );
+  const changed = middle.slice();
+  changed[408] ^= 1;
+  await reject([memoryFile(changed, "stale.vdi").file], "修改 UUID");
+  const wrongSize = middle.slice();
+  le64(wrongSize, 368, 8 * MiB - 512);
+  await reject([memoryFile(wrongSize, "wrong-size.vdi").file], "逻辑容量");
+  const cycle = middle.slice();
+  cycle.set(leaf.subarray(392, 424), 424);
+  await reject([memoryFile(cycle, "cycle.vdi").file], "循环");
+  const unrelated = vdiBytes();
+  unrelated[392] ^= 1;
+  await reject(
+    [parent.file, root.file, memoryFile(unrelated, "extra.vdi").file],
+    "不属于",
+  );
+  await reject(Array(16).fill(parent.file), "16 层");
+  await reject([memoryFile(middle, "raw.img").file], "普通 VDI");
+  for (const file of [first, root, parent])
+    expect(file.reads.every(([at]) => at < 512)).toBe(true);
+});
+
+it("bounds the combined VDI chain maps before allocating any mapping window", async () => {
+  const mapSize = 32 * MiB;
+  const head = vdiBytes().slice(0, 512);
+  le64(head, 368, 2n ** 43n);
+  le32(head, 384, mapSize / 4);
+  le32(head, 388, 0);
+  le32(head, 344, 512 + mapSize);
+  const mock = (name: string, id: number, parent?: Uint8Array) => {
+    const header = head.slice();
+    header.fill(id, 392, 408);
+    header.fill(id + 1, 408, 424);
+    if (parent) {
+      le32(header, 76, 4);
+      header.set(parent.subarray(392, 424), 424);
+    }
+    const file = {
+      name,
+      size: 512 + mapSize,
+      lastModified: 0,
+      slice(at: number, end: number) {
+        if (end > header.length) throw Error("Unexpected block map read");
+        return { arrayBuffer: async () => header.slice(at, end).buffer };
+      },
+    };
+    return { header, file };
+  };
+  const base = mock("base.vdi", 0x54),
+    middle = mock("middle.vdi", 0x64, base.header),
+    leaf = mock("leaf.vdi", 0x74, middle.header);
+  await expect(
+    openVdiChain(leaf.file, [base.file, middle.file]),
+  ).rejects.toThrow("64 MiB");
+});
 
 it("decodes independent QEMU fixed and dynamic containers into exact raw/EBR bytes", async () => {
   const raw = gunzipSync(

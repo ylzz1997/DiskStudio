@@ -29,12 +29,13 @@ pub struct Input {
 }
 impl Input {
     pub fn open(path: &Path, other_disk: Option<&Target>) -> Result<Self, String> {
+        Self::open_excluding(path, other_disk.map_or(&[], std::slice::from_ref))
+    }
+
+    pub(crate) fn open_excluding(path: &Path, sources: &[Target]) -> Result<Self, String> {
         let parent = path.parent().ok_or("备份目录无效")?;
-        if let Some(other) = other_disk {
-            platform::destination_folder(parent, other, 0)?;
-        }
         let (parent, disk) = platform::folder_location(parent)?;
-        if other_disk == Some(&disk) {
+        if sources.contains(&disk) {
             return Err("备份文件必须位于另一块物理磁盘。".into());
         }
         let leaf = path.file_name().ok_or("备份文件名无效")?;
@@ -187,21 +188,24 @@ pub fn create(
     required: u64,
     password: Option<&Password>,
 ) -> Result<(Output, Publication), String> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("备份文件名无效")?;
-    if name != crate::data_io::safe_name(name) || !name.to_ascii_lowercase().ends_with(".dsbackup")
-    {
-        return Err("请选择普通 .dsbackup 文件名。".into());
-    }
-    let (file, publication) = create_output(
+    create_excluding(path, std::slice::from_ref(other_disk), None, required, password)
+}
+
+pub(crate) fn create_excluding(
+    path: &Path,
+    sources: &[Target],
+    expected_disk: Option<&Target>,
+    required: u64,
+    password: Option<&Password>,
+) -> Result<(Output, Publication), String> {
+    let name = backup_name(path)?;
+    let (file, publication) = open_output(
         path,
         name,
-        other_disk,
-        None,
+        Placement { sources, excluded: None, expected: expected_disk },
         required,
         "目标备份已存在，未覆盖。",
+        true,
     )?;
     let output = match password {
         Some(password) => {
@@ -210,6 +214,49 @@ pub fn create(
         None => Output::Plain(file),
     };
     Ok((output, publication))
+}
+
+pub(crate) fn backup_name(path: &Path) -> Result<&str, String> {
+    output_filename(path, ".dsbackup", "请选择普通 .dsbackup 文件名。")
+}
+
+pub(crate) fn image_name(path: &Path, format: crate::image_convert::Format) -> Result<&str, String> {
+    output_filename(path, &format!(".{}", format.extension()), "请选择扩展名与格式相符的新镜像文件。")
+}
+
+pub(crate) fn create_image_output(
+    path: &Path,
+    format: crate::image_convert::Format,
+    source: &Target,
+    expected_disk: &Target,
+    required: u64,
+) -> Result<(File, Publication), String> {
+    open_output(
+        path,
+        image_name(path, format)?,
+        Placement { sources: std::slice::from_ref(source), excluded: None, expected: Some(expected_disk) },
+        required,
+        "目标已存在；不会覆盖已有文件。",
+        true,
+    )
+}
+
+pub(crate) fn verify_output(
+    output: Output,
+    publication: &Publication,
+    parent: Option<backup_archive::Chain>,
+    tick: impl FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    publication.validate()?;
+    let binding = publication.binding();
+    let archive = output.archive()?.bind_source(move || {
+        FileBinding::validate_all(std::slice::from_ref(&binding))
+    })?;
+    let mut chain = match parent {
+        Some(parent) => parent.prepend(archive)?,
+        None => backup_archive::Chain::new(archive),
+    };
+    chain.verify(tick)
 }
 
 pub(crate) fn create_sector_output(
@@ -232,12 +279,11 @@ pub(crate) fn reopen_sector_output(
     path: &Path,
     source: &Target,
 ) -> Result<(File, Publication), String> {
-    let name = sector_filename(path, ".bin", "请选择普通 .bin 文件名。")?;
+    let name = output_filename(path, ".bin", "请选择普通 .bin 文件名。")?;
     open_output(
         path,
         name,
-        std::slice::from_ref(source),
-        None,
+        Placement { sources: std::slice::from_ref(source), excluded: None, expected: None },
         0,
         "目标文件已经发布。请选择尚未完成的断点。",
         false,
@@ -260,6 +306,29 @@ pub(crate) fn create_sector_report(
     )
 }
 
+pub(crate) fn create_bcd_backup(
+    path: &Path,
+    source: &Target,
+    source_number: u32,
+    size: u64,
+) -> Result<(File, Publication), String> {
+    let sources = std::slice::from_ref(source);
+    let (_, destination) = platform::destination_location_excluding(
+        path.parent().ok_or("输出目录无效")?,
+        sources,
+        &[source_number],
+        size,
+    )?;
+    open_output(
+        path,
+        output_filename(path, ".bcd", "请选择新的 .bcd 文件名。")?,
+        Placement { sources, excluded: None, expected: Some(&destination) },
+        size,
+        "文件已存在，请使用新文件名。",
+        true,
+    )
+}
+
 fn create_sector_file(
     path: &Path,
     sources: &[Target],
@@ -268,19 +337,18 @@ fn create_sector_file(
     extension: &str,
     invalid_name: &str,
 ) -> Result<(File, Publication), String> {
-    let name = sector_filename(path, extension, invalid_name)?;
+    let name = output_filename(path, extension, invalid_name)?;
     open_output(
         path,
         name,
-        sources,
-        destination,
+        Placement { sources, excluded: destination, expected: None },
         size,
         "文件已存在，请使用新文件名。",
         true,
     )
 }
 
-fn sector_filename<'a>(
+fn output_filename<'a>(
     path: &'a Path,
     extension: &str,
     invalid_name: &str,
@@ -295,38 +363,27 @@ fn sector_filename<'a>(
         .ok_or_else(|| invalid_name.into())
 }
 
-fn create_output(
-    path: &Path,
-    name: &str,
-    other_disk: &Target,
-    destination: Option<&Target>,
-    required: u64,
-    exists_message: &str,
-) -> Result<(File, Publication), String> {
-    open_output(
-        path,
-        name,
-        std::slice::from_ref(other_disk),
-        destination,
-        required,
-        exists_message,
-        true,
-    )
+struct Placement<'a> {
+    sources: &'a [Target],
+    excluded: Option<&'a Target>,
+    expected: Option<&'a Target>,
 }
 
 fn open_output(
     path: &Path,
     name: &str,
-    sources: &[Target],
-    destination: Option<&Target>,
+    placement: Placement<'_>,
     required: u64,
     exists_message: &str,
     create: bool,
 ) -> Result<(File, Publication), String> {
     let (parent, disk) = platform::destination_location(
-        path.parent().ok_or("输出目录无效")?, sources, required,
+        path.parent().ok_or("输出目录无效")?, placement.sources, required,
     )?;
-    if destination == Some(&disk) {
+    if placement.expected.is_some_and(|expected| expected != &disk) {
+        return Err("输出磁盘与确认时不同。".into());
+    }
+    if placement.excluded == Some(&disk) {
         return Err("扇区复制报告需保存到源和目标以外的磁盘。".into());
     }
     let directory = Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(err)?;

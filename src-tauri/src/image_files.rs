@@ -169,6 +169,36 @@ mod platform {
             }
             Ok(())
         }
+        /// Bind a reopened image to the original ordinary files in member order.
+        /// Raw file identities remain in memory. Progress stores only the digest.
+        pub(crate) fn recovery_identity(&self) -> Result<String, String> {
+            use sha2::{Digest, Sha256};
+            let entries = self.entries.lock().map_err(|_| "镜像文件状态异常")?;
+            let mut digest = Sha256::new();
+            digest.update(b"DiskStudio recovery image files v1\0");
+            digest.update((entries.len() as u64).to_le_bytes());
+            for entry in &*entries {
+                let mut info = BY_HANDLE_FILE_INFORMATION::default();
+                // SAFETY: the group retains each live file handle and the result buffer is valid.
+                if unsafe { GetFileInformationByHandle(entry.file.as_raw_handle(), &mut info) } == 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+                if info.nFileIndexHigh == 0 && info.nFileIndexLow == 0 {
+                    return Err("无法核对镜像文件身份，不能保存或加载扫描进度。".into());
+                }
+                digest.update((entry.disk.0.len() as u64).to_le_bytes());
+                digest.update(entry.disk.0.as_bytes());
+                for value in [
+                    info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow,
+                    info.nFileSizeHigh, info.nFileSizeLow,
+                    info.ftCreationTime.dwHighDateTime, info.ftCreationTime.dwLowDateTime,
+                    info.ftLastWriteTime.dwHighDateTime, info.ftLastWriteTime.dwLowDateTime,
+                ] {
+                    digest.update(value.to_le_bytes());
+                }
+            }
+            Ok(format!("{:x}", digest.finalize()))
+        }
         pub fn disks(&self) -> Vec<Target> {
             let mut disks = vec![];
             for e in self
@@ -206,7 +236,7 @@ mod platform {
             .add_filter(
                 crate::native_locale::text("虚拟磁盘镜像"),
                 &[
-                    "img", "raw", "vhd", "avhd", "vhdx", "vdi", "vmdk", "hdd", "hds",
+                    "img", "raw", "vhd", "avhd", "vhdx", "avhdx", "vdi", "vmdk", "hdd", "hds", "xml",
                 ],
             )
             .pick_file()
@@ -219,9 +249,11 @@ mod platform {
             .unwrap_or("")
             .to_lowercase();
         if ![
-            "img", "raw", "vhd", "avhd", "vhdx", "vdi", "vmdk", "hdd", "hds",
+            "img", "raw", "vhd", "avhd", "vhdx", "avhdx", "vdi", "vmdk", "hdd", "hds",
         ]
         .contains(&extension.as_str())
+            && !path.file_name().and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("DiskDescriptor.xml"))
         {
             return Err("请选择受支持的镜像文件。".into());
         }

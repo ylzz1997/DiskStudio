@@ -25,6 +25,18 @@ impl Opened {
         }
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub(crate) fn logical_reader(&self) -> Result<Box<dyn backup_archive::Source>, String> {
+        if self.browser.info.format == "RAW" {
+            let mut files = self.group.raw_readers()?;
+            if files.len() != 1 {
+                return Err("RAW 镜像容量或附属文件选择不符。".into());
+            }
+            return Ok(Box::new(files.remove(0)));
+        }
+        self.browser.logical_reader()
+    }
 }
 #[cfg(windows)]
 pub(crate) fn opened(id: &str) -> Result<Opened, String> {
@@ -52,7 +64,7 @@ fn status_in(s: &State) -> Option<Status> {
         ScanSource::Image {
             opened: scan,
             partition,
-        } if scan.browser.info.id == opened.browser.info.id => Some((id.clone(), Some(*partition))),
+        } if scan.browser.info.id == opened.browser.info.id => Some((id.clone(), *partition)),
         ScanSource::RetainedFound(found) if found.image() == Some(opened.browser.info.id.as_str()) => Some((id.clone(), None)),
         _ => None,
     });
@@ -153,7 +165,7 @@ pub fn scan(request: ScanRequest) -> Result<String, String> {
     scan_source_mode(
         ScanSource::Image {
             opened,
-            partition: request.partition,
+            partition: Some(request.partition),
         },
         Some(Box::new(reader)),
         label,

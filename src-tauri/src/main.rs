@@ -6,6 +6,8 @@ mod backup_encryption;
 #[cfg(windows)]
 mod backup_files;
 mod bitlocker;
+mod boot_configuration;
+mod boot_inspection;
 mod backup_secrets;
 mod btrfs_recovery;
 mod data_io;
@@ -61,6 +63,8 @@ mod ntfs_scan;
 mod ntfs_streams;
 mod ntfs_wof;
 mod office_preview;
+mod parallels_descriptor;
+mod parallels_extension;
 mod partition_attributes;
 #[cfg(any(test, windows))]
 mod partition_move;
@@ -285,7 +289,7 @@ fn data_recovery_progress_pause(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn data_recovery_progress_resume(
     id: String,
-    source: data_tasks::Selection,
+    source: data_tasks::recovery_tasks::ProgressSource,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::recovery_tasks::resume(id, source))
         .await
@@ -299,7 +303,7 @@ async fn data_recovery_progress_save(id: String) -> Result<Option<String>, Strin
 }
 #[tauri::command]
 async fn data_recovery_progress_load(
-    source: data_tasks::Selection,
+    source: data_tasks::recovery_tasks::ProgressSource,
 ) -> Result<Option<data_tasks::recovery_tasks::Info>, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::recovery_tasks::load(source))
         .await
@@ -387,6 +391,29 @@ fn data_backup_status() -> Option<data_tasks::BackupStatus> {
 #[tauri::command]
 fn data_image_status() -> Option<data_tasks::image_browse_tasks::Status> {
     data_tasks::image_browse_tasks::status()
+}
+#[tauri::command]
+async fn data_inspect_boot(request: data_tasks::boot_inspection_tasks::Request) -> Result<boot_inspection::Report, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::boot_inspection_tasks::inspect(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+use data_tasks::boot_repair_tasks;
+#[tauri::command]
+async fn data_preview_boot_repair(request: boot_repair_tasks::Request) -> Result<boot_repair_tasks::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || boot_repair_tasks::preview(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn data_apply_boot_repair(token: uuid::Uuid) -> Result<Option<boot_repair_tasks::Report>, String> {
+    tauri::async_runtime::spawn_blocking(move || boot_repair_tasks::apply(token))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn data_discard_boot_repair(token: uuid::Uuid) {
+    boot_repair_tasks::discard(token);
 }
 use data_tasks::retained_partition_tasks;
 #[tauri::command]
@@ -572,6 +599,14 @@ fn data_close_backup(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn data_scan_backup(request: data_tasks::BackupScanRequest) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::scan_backup(request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn data_scan_retained_signatures(
+    request: data_tasks::retained_signature_tasks::Request,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::retained_signature_tasks::start(request))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -789,6 +824,24 @@ async fn image_inflate_grain(bytes: Vec<u8>, expected: usize) -> Result<Vec<u8>,
     tauri::async_runtime::spawn_blocking(move || image_compression::inflate_grain(&bytes, expected))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn image_parallels_descriptor(
+    request: tauri::ipc::Request<'_>,
+) -> Result<parallels_descriptor::Descriptor, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("请提供 Parallels 描述文件原始字节。".into());
+    };
+    parallels_descriptor::parse(bytes).map_err(str::to_owned)
+}
+
+#[tauri::command]
+fn image_parallels_extension(request: tauri::ipc::Request<'_>) -> Result<Vec<u64>, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("请提供 Parallels 扩展区原始字节。".into());
+    };
+    parallels_extension::reserved_sectors(bytes).map_err(str::to_owned)
 }
 #[tauri::command]
 async fn surface_start(requests: Vec<surface_tasks::Request>) -> Result<(), String> {
@@ -1112,6 +1165,8 @@ fn main() {
             inspect_image,
             image_ebr_next,
             image_inflate_grain,
+            image_parallels_descriptor,
+            image_parallels_extension,
             image_conversion_begin,
             image_creation_begin,
             image_conversion_chunk,
@@ -1141,6 +1196,10 @@ fn main() {
             data_backup_status,
             data_image_status,
             data_search_retained_partitions,
+            data_inspect_boot,
+            data_preview_boot_repair,
+            data_apply_boot_repair,
+            data_discard_boot_repair,
             data_browse_retained_partition,
             data_image_spaces_select,
             data_image_spaces_open,
@@ -1173,6 +1232,7 @@ fn main() {
             data_open_backup,
             data_close_backup,
             data_scan_backup,
+            data_scan_retained_signatures,
             data_select_backup_point,
             data_discard_plan,
             data_cancel,

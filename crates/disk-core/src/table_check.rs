@@ -36,9 +36,27 @@ pub struct TableReport {
 pub struct ImageInspection {
     #[serde(skip)]
     pub mbr_container: Option<(u64, u64)>,
+    #[serde(skip)]
+    pub gpt_identity: Option<GptIdentity>,
     pub disk: Option<Disk>,
     pub parse_error: Option<String>,
     pub report: TableReport,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct GptIdentity {
+    /// Disk GUID in the mixed-endian byte order stored in the header.
+    pub disk_guid: [u8; 16],
+    pub partitions: Vec<GptPartitionIdentity>,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct GptPartitionIdentity {
+    /// Unique partition and type GUIDs in on-disk byte order.
+    pub guid: [u8; 16],
+    pub kind: [u8; 16],
+    pub attributes: u64,
+    pub range: Range<u64>,
 }
 impl TableReport {
     fn add(&mut self, code: &str, title: &str, state: CheckState, detail: impl Into<String>) {
@@ -95,6 +113,27 @@ struct Gpt<'a> {
     count: usize,
     stride: usize,
     table: &'a [u8],
+}
+impl Gpt<'_> {
+    fn agrees(&self, other: &Self) -> bool {
+        self.guid == other.guid
+            && self.first == other.first
+            && self.last == other.last
+            && self.count == other.count
+            && self.stride == other.stride
+            && self.table == other.table
+    }
+
+    fn partitions(&self, sector: u64) -> impl Iterator<Item = (&[u8], Range<u64>)> {
+        self.table
+            .chunks_exact(self.stride)
+            .filter(|entry| entry[..16].iter().any(|byte| *byte != 0))
+            .map(move |entry| {
+                let start = u64le(entry, 32) * sector;
+                let end = (u64le(entry, 40) + 1) * sector;
+                (entry, start..end)
+            })
+    }
 }
 type Problem = (CheckState, String);
 fn invalid(message: &str) -> Problem {
@@ -243,25 +282,13 @@ pub(crate) fn checked_gpt(
     let ends = Ends { head, tail, size };
     let primary = gpt(&ends, sector, false).map_err(|(_, reason)| reason)?;
     let backup = gpt(&ends, sector, true).map_err(|(_, reason)| reason)?;
-    if primary.guid != backup.guid
-        || primary.first != backup.first
-        || primary.last != backup.last
-        || primary.count != backup.count
-        || primary.stride != backup.stride
-        || primary.table != backup.table
-    {
+    if !primary.agrees(&backup) {
         return Err("主备 GPT 的磁盘身份、范围或分区条目不一致。".into());
     }
     entries(&primary, sector)?;
     let partitions = primary
-        .table
-        .chunks_exact(primary.stride)
-        .filter(|entry| entry[..16].iter().any(|byte| *byte != 0))
-        .map(|entry| {
-            let start = u64le(entry, 32) * sector;
-            let end = (u64le(entry, 40) + 1) * sector;
-            (entry[..16].try_into().unwrap(), start..end)
-        })
+        .partitions(sector)
+        .map(|(entry, range)| (entry[..16].try_into().unwrap(), range))
         .collect();
     let mut digest = Sha256::new();
     digest.update(size.to_le_bytes());
@@ -307,14 +334,10 @@ pub fn inspect_image_with_geometry(
         || !(512..=MIB as usize).contains(&tail.len())
         || filename.len() > 255
         || filename.contains(['/', '\\', ':', '\0'])
-        || ![
-            ".img", ".raw", ".vhd", ".avhd", ".vhdx", ".vdi", ".vmdk", ".hdd", ".hds",
-        ]
-        .iter()
-        .any(|ext| filename.to_ascii_lowercase().ends_with(ext))
+        || !crate::image::logical_image_name(filename)
     {
         return Err(
-            "仅接受 RAW/IMG/VHD/AVHD/VHDX/VDI/VMDK/HDD/HDS 文件名与逻辑磁盘首尾各不超过 1 MiB 的字节数据。"
+            "仅接受受支持的镜像文件名与逻辑磁盘首尾各不超过 1 MiB 的字节数据。"
                 .into(),
         );
     }
@@ -337,6 +360,7 @@ pub fn inspect_image_with_geometry(
     }
     let mut parsed = parse_image(head, size, filename);
     let mut mbr_container = None;
+    let mut gpt_identity = None;
     let mut report = TableReport {
         filename: filename.into(),
         scheme: "未知".into(),
@@ -425,22 +449,18 @@ pub fn inspect_image_with_geometry(
                     Err((state, detail)) => report.add(code, title, state.clone(), detail.clone()),
                 }
             }
+            let mut copies_agree = false;
             if let (Ok(p), Ok(b)) = (&p, &b) {
-                let same = p.guid == b.guid
-                    && p.first == b.first
-                    && p.last == b.last
-                    && p.count == b.count
-                    && p.stride == b.stride
-                    && p.table == b.table;
+                copies_agree = p.agrees(b);
                 report.add(
                     "gpt-agreement",
                     "主备表一致性",
-                    if same {
+                    if copies_agree {
                         CheckState::Passed
                     } else {
                         CheckState::Failed
                     },
-                    if same {
+                    if copies_agree {
                         "磁盘 GUID、可用范围、条目数量及完整条目内容一致。"
                     } else {
                         "两份表各自可读但内容不一致，不能自动决定哪份较新。"
@@ -479,6 +499,25 @@ pub fn inspect_image_with_geometry(
                         ),
                         Err(e) => report.add(code, title, CheckState::Failed, e),
                     }
+                }
+            }
+            if let Ok(primary) = p {
+                let layout_checked = report.items.iter().all(|item| {
+                    matches!(item.state, CheckState::Passed | CheckState::Warning)
+                });
+                if copies_agree && layout_checked {
+                    gpt_identity = Some(GptIdentity {
+                        disk_guid: primary.guid.try_into().unwrap(),
+                        partitions: primary
+                            .partitions(sector)
+                            .map(|(entry, range)| GptPartitionIdentity {
+                                guid: entry[16..32].try_into().unwrap(),
+                                kind: entry[..16].try_into().unwrap(),
+                                attributes: u64le(entry, 48),
+                                range,
+                            })
+                            .collect(),
+                    });
                 }
             }
         }
@@ -606,6 +645,7 @@ pub fn inspect_image_with_geometry(
     report.finish();
     Ok(ImageInspection {
         mbr_container: disk.as_ref().and(mbr_container),
+        gpt_identity: disk.as_ref().and(gpt_identity),
         disk,
         parse_error,
         report,
@@ -690,6 +730,12 @@ mod tests {
             assert_eq!(i.report.state, CheckState::Passed);
             assert_eq!(i.report.sector_size, Some(sector as u64));
             assert_eq!(state(&i, "gpt-agreement"), CheckState::Passed);
+            let identity = i.gpt_identity.unwrap();
+            assert_eq!(identity.disk_guid, [3; 16]);
+            assert_eq!(identity.partitions.len(), 1);
+            assert_eq!(identity.partitions[0].guid, [2; 16]);
+            assert_eq!(identity.partitions[0].kind, [1; 16]);
+            assert_eq!(identity.partitions[0].range, MIB..3 * MIB);
             assert_eq!(
                 i.disk
                     .unwrap()
@@ -757,20 +803,24 @@ mod tests {
     fn decoded_vhdx_keeps_unicode_basename_and_checks_512_and_4k_gpt() {
         for sector in [512, 4096] {
             let bytes = fixture(sector);
-            let inspected = inspect_image(
-                &bytes[..MIB as usize],
-                &bytes[SIZE - MIB as usize..],
-                SIZE as u64,
-                "备份.磁盘.vhdx",
-            )
-            .unwrap();
-            assert_eq!(inspected.report.state, CheckState::Passed);
-            let disk = inspected.disk.unwrap();
-            assert_eq!(disk.name, "备份.磁盘");
-            assert_eq!(disk.filename, "备份.磁盘.vhdx");
-            assert_eq!(disk.sector_size, sector as u64);
-            assert_eq!(disk.size, SIZE as u64);
-            assert_eq!(disk.kind, "image");
+            for filename in ["备份.磁盘.vhdx", "备份.磁盘.AVHDX"] {
+                let inspected = inspect_image_with_geometry(
+                    &bytes[..MIB as usize],
+                    &bytes[SIZE - MIB as usize..],
+                    SIZE as u64,
+                    filename,
+                    Some(sector as u64),
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(inspected.report.state, CheckState::Passed);
+                let disk = inspected.disk.unwrap();
+                assert_eq!(disk.name, "备份.磁盘");
+                assert_eq!(disk.filename, filename);
+                assert_eq!(disk.sector_size, sector as u64);
+                assert_eq!(disk.size, SIZE as u64);
+                assert_eq!(disk.kind, "image");
+            }
         }
     }
     #[test]
@@ -780,6 +830,7 @@ mod tests {
             "备份.磁盘.VMDK",
             "备份.磁盘.HDD",
             "备份.磁盘.HDS",
+            "DiskDescriptor.xml",
         ] {
             for sector in [512, 4096] {
                 let bytes = fixture(sector);
@@ -796,7 +847,7 @@ mod tests {
                 } else {
                     assert_eq!(inspected.report.state, CheckState::Passed);
                     let disk = inspected.disk.unwrap();
-                    assert_eq!(disk.name, "备份.磁盘");
+                    assert_eq!(disk.name, filename.rsplit_once('.').unwrap().0);
                     assert_eq!(disk.filename, filename);
                     assert_eq!(disk.size, SIZE as u64);
                     assert_eq!(disk.kind, "image");
@@ -823,6 +874,7 @@ mod tests {
         let i = inspect(&bytes);
         assert_eq!(state(&i, "backup-gpt"), CheckState::Passed);
         assert_eq!(state(&i, "gpt-agreement"), CheckState::Failed);
+        assert!(i.gpt_identity.is_none());
         assert!(i.disk.is_none());
     }
     #[test]

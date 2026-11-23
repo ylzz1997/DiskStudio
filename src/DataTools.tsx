@@ -24,7 +24,11 @@ import { native } from "./backend";
 import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
+import { BackupEncodingFields, type BackupCompression } from "./BackupEncodingFields";
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
+import { ImageBackupDialog } from "./ImageBackupDialog";
+import { DeviceImageExportDialog } from "./DeviceImageExportDialog";
+import { BootInspectionDialog, type BootInspectionSource } from "./BootInspectionDialog";
 import { StorageSpacesOpenDialog, StorageSpacesRecoveryPanel, type StorageSpacesView } from "./StorageSpacesRecovery";
 import { SectorCopyPanel } from "./SectorCopyPanel";
 import { ImageLvmDialog, type ImageLvmInfo } from "./ImageLvmDialog";
@@ -33,6 +37,7 @@ import type { ImageBrowseMode, ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
 import { RetainedPartitionSearch, type RetainedSearch } from "./RetainedPartitionSearch";
+import type { RetainedSignatureRequest } from "./RetainedSignatureScan";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
 import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
 import {
@@ -53,10 +58,12 @@ import {
 } from "./signatureModel";
 import {
   progressMatches,
+  retainedProgressMatches,
   settingsFromProgress,
   progressAmount,
   progressMode,
   type RecoveryProgress,
+  type RetainedScanSelection,
 } from "./recoveryProgressModel";
 import type { Candidate, RecoveryLayout } from "./recoveryModel";
 import { defaultExportOptions, type ExportOptions } from "./recoveryModel";
@@ -153,9 +160,7 @@ export function DataTools({
     defaultSignatureSettings,
   );
   const [task, setTask] = useState<"backup" | "restore" | "clone">("backup");
-  const [compression, setCompression] = useState<
-    "none" | "fast" | "balanced" | "high"
-  >("balanced");
+  const [compression, setCompression] = useState<BackupCompression>("balanced");
   const [encryption, setEncryption] = useState(false);
   const [incremental, setIncremental] = useState(false);
   const [hot, setHot] = useState(false);
@@ -178,6 +183,13 @@ export function DataTools({
   const [browsingBackup, setBrowsingBackup] = useState(false);
   const [browsingImage, setBrowsingImage] = useState(false);
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
+  const [imageBackupId, setImageBackupId] = useState("");
+  const [deviceImageExport, setDeviceImageExport] = useState<{
+    source: Selection;
+    title: string;
+    size: number;
+    sector: number;
+  } | null>(null);
   const [spacesView, setSpacesView] = useState<StorageSpacesView | null>(null);
   useEffect(() => {
     const id = spacesView?.id;
@@ -200,6 +212,7 @@ export function DataTools({
   const [backupInfo, setBackupInfo] = useState<BackupInfo | null>(null);
   const [backupRestore, setBackupRestore] = useState<{ id: string; partition: number | null } | null>(null);
   const [pending, setPending] = useState(false);
+  const [bootInspection, setBootInspection] = useState<{ request: BootInspectionSource; label: string } | null>(null);
   const [error, setError] = useState("");
   const [plan, setPlan] = useState<DataPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -238,7 +251,7 @@ export function DataTools({
     const source = { kind, id };
     return (
       <RetainedPartitionSearch
-        key={id}
+        key={`partition-search-${id}`}
         search={search}
         size={size}
         sector={sector}
@@ -267,6 +280,10 @@ export function DataTools({
       : page === "recovery"
         ? (imageInfo?.format === "Storage Spaces" ? (imageInfo.scanId ?? "") : (raidInfo?.scanId ?? scanId))
         : scanId;
+  const retainedProgress = page === "backup" && recoveryProgress?.id === resultsScanId && (
+    (browsingImage && retainedProgressMatches(recoveryProgress, "image", imageInfo)) ||
+    (browsingBackup && retainedProgressMatches(recoveryProgress, "backup", backupInfo))
+  );
   useEffect(() => {
     setSourceExpanded(!resultsScanId);
   }, [resultsScanId, page, browsingBackup, browsingImage]);
@@ -277,6 +294,8 @@ export function DataTools({
     (d) => d.kind === "physical" && d.id !== disk?.id && !d.hardware?.isSystem,
   );
   const selectedPart = parts.find((p) => String(p.number) === partition);
+  const canExportDeviceImage = physical && !!disk?.hardware?.identity && !!disk.hardware.layoutKey &&
+    disk.hardware.layoutAvailable && (partition ? !!selectedPart && !selectedPart.system : !disk.hardware.isSystem);
   const allowMemberSelection =
     physical &&
     !!selectedPart &&
@@ -576,6 +595,29 @@ export function DataTools({
       setOwnJobId(id);
       if (request.type === "partition") setScanId(id);
       setJob(await invoke<Job>("data_status"));
+    });
+  }
+  async function startRetainedSignatures(request: RetainedSignatureRequest) {
+    await action(async () => {
+      setProgressNotice("");
+      const id = await invoke<string>("data_scan_retained_signatures", { request });
+      setOwnJobId(id);
+      await refreshRetainedScan(request.kind);
+    });
+  }
+  async function refreshRetainedScan(kind: RetainedScanSelection["kind"]) {
+    if (kind === "image") setImageInfo(await invoke<ImageBrowseInfo>("data_image_status"));
+    else setBackupInfo(await invoke<BackupInfo>("data_backup_status"));
+    setJob(await invoke<Job>("data_status"));
+  }
+  async function loadRetainedProgress(source: RetainedScanSelection) {
+    await action(async () => {
+      const progress = await invoke<RecoveryProgress | null>("data_recovery_progress_load", { source });
+      if (!progress) return;
+      setProgressNotice("");
+      setRecoveryProgress(progress);
+      setOwnJobId(progress.id);
+      await refreshRetainedScan(source.kind);
     });
   }
   async function loadProgress() {
@@ -998,7 +1040,7 @@ export function DataTools({
                       {
                         id: "complete",
                         title: t("完整恢复"),
-                        body: t("先读文件记录，再按所选类型深扫。两阶段结果保留在同一列表。"),
+                        body: catalogText("读取文件记录和可核对的 Ext4 删除日志，再按所选类型深扫。结果共用一张列表。"),
                       },
                       {
                         id: "reconstruct",
@@ -1118,6 +1160,9 @@ export function DataTools({
         ) : browsingImage ? (
           <ImageBrowserPanel
             info={imageInfo}
+            onBootInspection={() => {
+              if (imageInfo) setBootInspection({ request: { kind: "image", id: imageInfo.id }, label: imageInfo.name });
+            }}
             lostSearch={imageInfo && imageInfo.options.kind !== "partition" && retainedSearch(
               "image", imageInfo.id, imageInfo.size, imageInfo.options.sector, imageInfo.search,
               imageInfo.options.kind === "search" || !!imageInfo.search,
@@ -1125,6 +1170,10 @@ export function DataTools({
             )}
             busy={!!busy}
             available={native}
+            onBackup={() => {
+              setError("");
+              setImageBackupId(imageInfo?.id ?? "");
+            }}
             onCopy={() => {
               if (imageInfo) setImageCopy({ id: imageInfo.id, partition: "" });
             }}
@@ -1170,10 +1219,16 @@ export function DataTools({
             onReconstruct={(partition, mode) => {
               if (imageInfo) void readReconstructed(() => ({ type: "image", id: imageInfo.id, partition }), mode);
             }}
+            onSignatures={(request) => void startRetainedSignatures(request)}
+            onLoadProgress={(source) => void loadRetainedProgress(source)}
+            recoveryProgress={recoveryProgress}
           />
         ) : browsingBackup ? (
           <BackupBrowserPanel
             info={backupInfo}
+            onBootInspection={() => {
+              if (backupInfo) setBootInspection({ request: { kind: "backup", id: backupInfo.id, point: backupInfo.selectedPoint }, label: backupInfo.name });
+            }}
             lostSearch={backupInfo?.kind === "disk" && retainedSearch(
               "backup", backupInfo.id, backupInfo.size, backupInfo.sector, backupInfo.search,
               !!backupInfo.tableIssue || !!backupInfo.search,
@@ -1207,6 +1262,9 @@ export function DataTools({
             onReconstruct={(partition) => {
               if (backupInfo) void readReconstructed(() => ({ type: "backup", id: backupInfo.id, partition }), "allFiles");
             }}
+            onSignatures={(request) => void startRetainedSignatures(request)}
+            onLoadProgress={(source) => void loadRetainedProgress(source)}
+            recoveryProgress={recoveryProgress}
             onPoint={(point) =>
               void action(async () => {
                 if (!backupInfo || point === backupInfo.selectedPoint) return;
@@ -1367,60 +1425,15 @@ export function DataTools({
               )}
               {task === "backup" && (
                 <div className="backup-settings">
-                  <label>
-                    <span>
-                      <strong>{t("备份方式")}</strong>
-                      <small>
-                        {t("增量只保存变化的数据块，还原需要完整依赖链")}
-                      </small>
-                    </span>
-                    <select
-                      aria-label={t("备份方式")}
-                      value={incremental ? "incremental" : "full"}
-                      disabled={busy}
-                      onChange={(e) =>
-                        setIncremental(e.target.value === "incremental")
-                      }
-                    >
-                      <option value="full">{t("完整备份")}</option>
-                      <option value="incremental">{t("增量备份")}</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>
-                      <strong>{t("压缩程度")}</strong>
-                      <small>
-                        {t("压缩使用多个 CPU 线程；高压缩通常需要更长时间")}
-                      </small>
-                    </span>
-                    <select
-                      aria-label={t("压缩程度")}
-                      value={compression}
-                      disabled={busy}
-                      onChange={(e) =>
-                        setCompression(e.target.value as typeof compression)
-                      }
-                    >
-                      <option value="none">{t("不压缩")}</option>
-                      <option value="fast">{t("快速")}</option>
-                      <option value="balanced">{t("均衡")}</option>
-                      <option value="high">{t("高压缩")}</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>
-                      <strong>{t("密码保护")}</strong>
-                      <small>
-                        {t("开始时设置密码，打开和还原备份时需要使用")}
-                      </small>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={encryption}
-                      disabled={busy}
-                      onChange={(e) => setEncryption(e.target.checked)}
-                    />
-                  </label>
+                  <BackupEncodingFields
+                    busy={!!busy}
+                    incremental={incremental}
+                    setIncremental={setIncremental}
+                    compression={compression}
+                    setCompression={setCompression}
+                    encryption={encryption}
+                    setEncryption={setEncryption}
+                  />
                   <label>
                     <span>
                       <strong>{t("VSS 热备份")}</strong>
@@ -1583,6 +1596,24 @@ export function DataTools({
                       ? t("还原要求备份类型、容量及逻辑扇区与目标一致。")
                       : t("目标原有文件系统及数据将被替换，无法撤销。")}
                 </span>
+                {task === "backup" && (
+                  <button
+                    className="button"
+                    disabled={busy || !native || !canExportDeviceImage}
+                    onClick={() => {
+                      if (!disk || !canExportDeviceImage) return;
+                      setError("");
+                      setDeviceImageExport({
+                        source: selection(disk, partition),
+                        title: `${diskTitle(disk, t)}${selectedPart ? ` / ${partitionTitle(selectedPart, catalogText)}` : ""}`,
+                        size: sourceSize,
+                        sector: disk.sectorSize,
+                      });
+                    }}
+                  >
+                    {t("导出磁盘镜像")}
+                  </button>
+                )}
                 <button
                   className="button primary"
                   disabled={
@@ -1613,7 +1644,7 @@ export function DataTools({
           </>
         )}
       </div>
-      {page !== "backup" && recoveryProgress && matchingProgress && (
+      {recoveryProgress && ((page !== "backup" && matchingProgress) || retainedProgress) && (
         <section
           className="data-panel signature-progress"
           aria-label={t("恢复扫描进度")}
@@ -1664,13 +1695,20 @@ export function DataTools({
               disabled={busy || !recoveryProgress.canResume}
               onClick={() =>
                 void action(async () => {
+                  const retained = "kind" in recoveryProgress.source ? recoveryProgress.source : null;
                   const id = await invoke<string>(
                     "data_recovery_progress_resume",
                     {
                       id: recoveryProgress.id,
-                      source: selection(disk, partition),
+                      source: retained ?? selection(disk, partition),
                     },
                   );
+                  if (retained) {
+                    setOwnJobId(id);
+                    setProgressNotice("");
+                    await refreshRetainedScan(retained.kind);
+                    return;
+                  }
                   setMode(
                     recoveryProgress.combined
                       ? "complete"
@@ -1725,7 +1763,7 @@ export function DataTools({
                 <small>{catalogText(job.phase)}</small>
               </span>
               {job.state === "running" &&
-                (recoveryProgress?.id === job.id ? (
+                (recoveryProgress?.id === job.id && recoveryProgress.canPause !== false ? (
                   <button
                     className="button"
                     onClick={() =>
@@ -1900,6 +1938,52 @@ export function DataTools({
             await invoke("data_virtual_raid_close", { id: raidInfo.id });
             setRaidInfo(null);
             setRaidOpen(false);
+          })}
+        />
+      )}
+      {deviceImageExport && page === "backup" && !browsingBackup && !browsingImage && (
+        <DeviceImageExportDialog
+          name={deviceImageExport.title}
+          size={deviceImageExport.size}
+          sector={deviceImageExport.sector}
+          partition={deviceImageExport.source.partition !== null}
+          busy={!!busy}
+          error={error}
+          onClose={() => { setError(""); setDeviceImageExport(null); }}
+          onPrepare={(format, mode) => void action(async () => {
+            const next = await invoke<DataPlan | null>("data_prepare", {
+              request: { type: "exportDeviceImage", source: deviceImageExport.source, format, mode },
+            });
+            if (next) {
+              setDeviceImageExport(null);
+              setConfirmed(false);
+              setPlan(next);
+            }
+          })}
+        />
+      )}
+      {bootInspection && (
+        <BootInspectionDialog
+          {...bootInspection}
+          onBusy={setPending}
+          onClose={() => setBootInspection(null)}
+        />
+      )}
+      {imageInfo && imageBackupId === imageInfo.id && page === "backup" && browsingImage && (
+        <ImageBackupDialog
+          image={imageInfo}
+          busy={!!busy}
+          error={error}
+          onClose={() => { setError(""); setImageBackupId(""); }}
+          onPrepare={(partition, options) => void action(async () => {
+            const next = await invoke<DataPlan | null>("data_prepare", {
+              request: { type: "imageBackup", id: imageInfo.id, partition, options },
+            });
+            if (next) {
+              setImageBackupId("");
+              setConfirmed(false);
+              setPlan(next);
+            }
           })}
         />
       )}

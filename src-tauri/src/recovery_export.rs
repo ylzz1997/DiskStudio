@@ -60,6 +60,8 @@ pub struct ImageSource {
     pub offset: String,
     pub size: String,
     pub sector: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallels_snapshot: Option<uuid::Uuid>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

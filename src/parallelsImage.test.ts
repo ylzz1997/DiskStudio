@@ -1,5 +1,7 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { openParallels } from "./parallelsImage";
+import { makeHds, withDirtyBitmap } from "../tests/fixtures/parallels-bundle";
+import { createHash } from "node:crypto";
 import { memoryFile, MiB } from "../tests/fixtures/vhd-memory";
 import {
   fixture,
@@ -8,6 +10,45 @@ import {
   set32,
   set64,
 } from "../tests/fixtures/parallels-data";
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: async (command: string, frame: Uint8Array) => {
+    expect(command).toBe("image_parallels_extension");
+    const input = Buffer.from(frame);
+    expect(input.readBigUInt64LE(0)).toBe(8192n);
+    expect(input.subarray(16, 32)).toEqual(
+      createHash("md5").update(input.subarray(32)).digest(),
+    );
+    return [Number(input.readBigUInt64LE(88))];
+  },
+}));
+
+it("reserves the extension header and bitmap payload without exposing their bytes", async () => {
+  const cluster = 64 * 1024;
+  const base = makeHds(4 * MiB, cluster, [[0, Buffer.alloc(cluster, 0x69)]]);
+  const source = withDirtyBitmap(base, cluster, 8192);
+  const selected = memoryFile(source);
+  const image = await openParallels(selected.file);
+  expect(image.warnings.some((note) => note.includes("未被索引引用"))).toBe(
+    false,
+  );
+  expect((await image.read(0, 1))[0]).toBe(0x69);
+  expect((await image.read(cluster, 512)).some(Boolean)).toBe(false);
+  await image.verify();
+  const bitmap = base.length,
+    extension = bitmap + cluster;
+  expect(
+    selected.reads.some(([start, end]) => start < extension && end > bitmap),
+  ).toBe(false);
+  source[extension + 24] ^= 1;
+  await expect(image.verify()).rejects.toThrow("发生变化");
+  source[extension + 24] ^= 1;
+  for (const overlap of [bitmap, extension]) {
+    source.writeUInt32LE(overlap / cluster, 68);
+    await expect(openParallels(selected.file)).rejects.toThrow(
+      "其他扩展区重叠",
+    );
+  }
+});
 it("decodes independent QEMU images and repacked legacy addresses into exact raw head/tail/EBRs", async () => {
   const expected = raw();
   for (const kind of ["extended", "small", "legacy"]) {

@@ -40,6 +40,12 @@ pub struct Part {
     pub size: u64,
 }
 #[derive(Clone, Serialize)]
+pub(crate) struct ParallelsPoint {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub current: bool,
+}
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub id: String,
@@ -48,8 +54,12 @@ pub struct Info {
     pub options: Options,
     pub partitions: Vec<Part>,
     pub warning: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub verification_notes: Vec<String>,
     pub format: String,
     pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parallels_snapshot: Option<ParallelsPoint>,
 }
 pub trait ReaderFactory: Send + Sync {
     fn reader(&self) -> Result<Box<dyn Source>, String>;
@@ -94,6 +104,52 @@ impl Seek for SharedReader {
         Ok(self.pos)
     }
 }
+
+pub(crate) struct CheckedLayout {
+    pub disk: disk_core::Disk,
+    pub warning: String,
+    pub head: Vec<u8>,
+    pub gpt_identity: Option<disk_core::table_check::GptIdentity>,
+}
+
+pub(crate) fn checked_layout(
+    source: &mut impl Source,
+    name: &str,
+    size: u64,
+    sector: u64,
+    tick: &mut impl FnMut() -> Result<(), String>,
+) -> Result<CheckedLayout, String> {
+    let count = size.min(disk_core::MIB) as usize;
+    let mut head = vec![0; count];
+    let mut tail = vec![0; count];
+    source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    source.read_exact(&mut head).map_err(|e| e.to_string())?;
+    source.seek(SeekFrom::Start(size - count as u64)).map_err(|e| e.to_string())?;
+    source.read_exact(&mut tail).map_err(|e| e.to_string())?;
+    let ebrs = crate::table_archive::read_ebrs(source, &head, size, sector, tick)?;
+    let inspected = disk_core::table_check::inspect_image_with_geometry(
+        &head, &tail, size, name, Some(sector), &ebrs,
+    )?;
+    use disk_core::table_check::CheckState;
+    if matches!(inspected.report.state, CheckState::Failed | CheckState::Unchecked) {
+        return Err(format!(
+            "镜像分区表未通过检查：{}",
+            inspected.report.items.iter()
+                .filter(|i| matches!(i.state, CheckState::Failed | CheckState::Unchecked))
+                .map(|i| i.detail.as_str()).collect::<Vec<_>>().join("；")
+        ));
+    }
+    let disk = inspected.disk.ok_or_else(|| {
+        inspected.parse_error.unwrap_or("镜像没有可读取的分区表；分区文件请选择“分区镜像”。".into())
+    })?;
+    if disk.sector_size != sector {
+        return Err("所选扇区大小与 GPT 分区表不一致，请重新选择。".into());
+    }
+    let warning = inspected.report.items.iter().filter(|i| i.state == CheckState::Warning)
+        .map(|i| i.detail.as_str()).collect::<Vec<_>>().join("；");
+    Ok(CheckedLayout { disk, warning, head, gpt_identity: inspected.gpt_identity })
+}
+
 impl Browser {
     pub fn open(
         mut source: impl Source + 'static,
@@ -117,67 +173,9 @@ impl Browser {
                 size,
             }],
             Kind::Disk => {
-                let count = size.min(disk_core::MIB) as usize;
-                let mut head = vec![0; count];
-                let mut tail = vec![0; count];
-                source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-                source.read_exact(&mut head).map_err(|e| e.to_string())?;
-                source
-                    .seek(SeekFrom::Start(size - count as u64))
-                    .map_err(|e| e.to_string())?;
-                source.read_exact(&mut tail).map_err(|e| e.to_string())?;
-                let ebrs = crate::table_archive::read_ebrs(
-                    &mut source,
-                    &head,
-                    size,
-                    options.sector,
-                    &mut tick,
-                )?;
-                let inspected = disk_core::table_check::inspect_image_with_geometry(
-                    &head,
-                    &tail,
-                    size,
-                    &name,
-                    Some(options.sector),
-                    &ebrs,
-                )?;
-                use disk_core::table_check::CheckState;
-                if matches!(
-                    inspected.report.state,
-                    CheckState::Failed | CheckState::Unchecked
-                ) {
-                    return Err(format!(
-                        "镜像分区表未通过检查：{}",
-                        inspected
-                            .report
-                            .items
-                            .iter()
-                            .filter(|i| matches!(
-                                i.state,
-                                CheckState::Failed | CheckState::Unchecked
-                            ))
-                            .map(|i| i.detail.as_str())
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    ));
-                }
-                let disk = inspected.disk.ok_or_else(|| {
-                    inspected
-                        .parse_error
-                        .unwrap_or("镜像没有可读取的分区表；分区文件请选择“分区镜像”。".into())
-                })?;
-                if disk.sector_size != options.sector {
-                    return Err("所选扇区大小与 GPT 分区表不一致，请重新选择。".into());
-                }
-                warning = inspected
-                    .report
-                    .items
-                    .iter()
-                    .filter(|i| i.state == CheckState::Warning)
-                    .map(|i| i.detail.as_str())
-                    .collect::<Vec<_>>()
-                    .join("；");
-                disk.partitions
+                let layout = checked_layout(&mut source, &name, size, options.sector, &mut tick)?;
+                warning = layout.warning;
+                layout.disk.partitions
                     .into_iter()
                     .filter(|p| p.color != "free")
                     .enumerate()
@@ -208,6 +206,8 @@ impl Browser {
                 options,
                 partitions,
                 warning,
+                verification_notes: Vec::new(),
+                parallels_snapshot: None,
             },
         })
     }
@@ -281,15 +281,31 @@ impl Browser {
     pub fn label(&self, id: u32) -> Result<String, String> {
         Ok(format!("{} / {}", self.info.name, self.part(id)?.name))
     }
-    pub fn provenance(&self, id: u32) -> Result<crate::recovery_export::ImageSource, String> {
-        let part = self.part(id)?;
+    pub fn scope_label(&self, id: Option<u32>) -> Result<String, String> {
+        match id {
+            Some(id) => self.label(id),
+            None => Ok(format!("{} / {}", self.info.name, crate::native_locale::current().text("整盘镜像"))),
+        }
+    }
+    pub fn scope_provenance(
+        &self,
+        id: Option<u32>,
+    ) -> Result<crate::recovery_export::ImageSource, String> {
+        let (name, start, size) = match id {
+            Some(id) => {
+                let part = self.part(id)?;
+                (part.name.clone(), part.start, part.size)
+            }
+            None => ("整盘镜像".into(), 0, self.info.size),
+        };
         Ok(crate::recovery_export::ImageSource {
             file_name: self.info.name.clone(),
             format: self.info.format.clone(),
-            partition: part.name.clone(),
-            offset: part.start.to_string(),
-            size: part.size.to_string(),
+            partition: name,
+            offset: start.to_string(),
+            size: size.to_string(),
             sector: self.info.options.sector,
+            parallels_snapshot: self.info.parallels_snapshot.as_ref().map(|point| point.id),
         })
     }
 }

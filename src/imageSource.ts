@@ -18,6 +18,7 @@ export interface LogicalImage {
   fileSize?: number;
   fileCount?: number;
   chain?: string[];
+  parallelsSnapshot?: { id: string; name: string; current: boolean };
   sectorSize: 512 | 4096;
   warnings: string[];
   notes: string[];

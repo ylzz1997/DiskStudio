@@ -1,4 +1,5 @@
 import { openContainer } from "./imageReader";
+import { isParallelsDescriptor } from "./parallelsBundle";
 import { logicalLimit, type ImageFile, type LogicalImage } from "./imageSource";
 import type { ImageBrowseOptions } from "./ImageBrowserPanel";
 
@@ -16,16 +17,20 @@ export type SourceRead = (
   length: number,
 ) => Promise<Uint8Array>;
 export type ContainerFormat =
-  "raw" | "vhd" | "vhdx" | "vdi" | "vmdk" | "parallels";
+  "raw" | "vhd" | "vhdx" | "vdi" | "vmdk" | "parallels" | "parallelsBundle";
 export const MiB = 1024 ** 2;
 export function formatForName(name: string): ContainerFormat {
+  if (isParallelsDescriptor(name)) return "parallelsBundle";
   if (/\.(img|raw)$/i.test(name)) return "raw";
   if (/\.a?vhd$/i.test(name)) return "vhd";
-  if (/\.vhdx$/i.test(name)) return "vhdx";
+  if (/\.a?vhdx$/i.test(name)) return "vhdx";
   if (/\.vdi$/i.test(name)) return "vdi";
   if (/\.vmdk$/i.test(name)) return "vmdk";
   if (/\.(hdd|hds)$/i.test(name)) return "parallels";
   throw Error("不支持此镜像文件类型。");
+}
+export function acceptsImageCompanions(format: ContainerFormat): boolean {
+  return ["vhd", "vhdx", "vdi", "vmdk", "parallelsBundle"].includes(format);
 }
 export function retainedImageFile(
   group: string,
@@ -81,6 +86,7 @@ export async function browseReader(
   group: NativeImageGroup,
   options: ImageBrowseOptions,
   read: SourceRead,
+  parallelsSnapshot?: string,
 ): Promise<LogicalImage> {
   if (group.files.length < 1 || group.files.length > 64)
     throw Error("镜像文件数量无效。");
@@ -91,10 +97,10 @@ export async function browseReader(
     retainedImageFile(group.id, f, read),
   );
   const format = formatForName(file.name);
-  if (companions.length && !["vhd", "vmdk"].includes(format))
+  if (companions.length && !acceptsImageCompanions(format))
     throw Error("此镜像格式不接受父盘或分卷。");
   if (format !== "raw") {
-    const image = await openContainer(file, companions, "browse");
+    const image = await openContainer(file, companions, "browse", parallelsSnapshot);
     if (!image) throw Error("镜像容器读取器不可用。");
     await image.verify();
     return image;

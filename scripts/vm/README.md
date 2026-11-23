@@ -130,6 +130,26 @@ Ext4 删除夹具使用 Ubuntu 的 `seed-ext-journal-image` 和 `ext-journal-ima
 
 Ext4 完整恢复使用 `start --4kn --ext-complete` 的独立空白 A/B 盘，以及 `build-guest-checks.ps1 -ExtComplete`。只读光盘包含 `Ext-Complete-4Kn-Prepare.exe` 和 `Ext-Complete-4Kn-Verify.exe`。预检通过后运行一次 Prepare。它在已核对的脱机 B/2 放入 Ext4 日志夹具及最后一个可核对空闲块中的 PDF。进入完整恢复，签名只选 PDF，并开启空闲簇和逻辑扇区对齐。日志阶段完成 2/3 个删除候选时暂停，此时结果应有三个。将第 5 版进度保存到 A 的根目录，重开、载入并继续，应找到一个现存文件、三个删除文件和一个签名 PDF。平面导出至 A 的 `DS-ExtComplete` 后，Verify 核对暂停位置、签名选项、五个文件的 SHA-256、B 的完整源范围及受保护布局。
 
+镜像及备份签名验收使用 `start --4kn --retained-signatures` 和 `build-guest-checks.ps1 -RetainedSignatures`。把 `Retained-Signatures-4Kn-Prepare.exe` 和 `Retained-Signatures-4Kn-Verify.exe` 放入同一份只读工具光盘。预检后运行一次 Prepare，在 B 的 NTFS 测试卷生成 4Kn VHDX 和两层压缩备份。扫描 VHDX 内的 FAT12 分区，只选 PDF、已核对空闲簇及逻辑扇区对齐。应排除已分配和未对齐的对照文件。预览后平面导出至 A 上 `DS-Retained-Signatures\image`。打开 `latest.dsbackup`，补选 `base.dsbackup`，切换到最早还原点，扫描逻辑整盘的 2–3 MiB 范围，仅选 PDF 和逻辑扇区对齐。平面导出至 `DS-Retained-Signatures\backup`。Verify 核对两份 PDF、清单中的镜像偏移及还原点、三个源文件和两盘 GPT 与来宾系统盘布局。
+
+镜像和备份续扫沿用已完成签名验收的 `--4kn --retained-signatures` 盘组，通过 `build-guest-checks.ps1 -RetainedSignatureProgress` 生成 `Retained-Progress-4Kn-Prepare.exe` 与 `Retained-Progress-4Kn-Verify.exe`。Prepare 只在已核对的 A 卷上创建进度和导出目录。暂停 VHDX 的 FAT12 空闲簇扫描时保留一个 PDF 候选，把第 6 版进度保存到 `image-progress`。重开应用和原镜像，加载再续扫，平面导出至 `resume-image`。把最早备份还原点的 2–3 MiB 整盘 PDF 扫描完成进度保存到 `backup-progress`，切到最新还原点尝试加载应被拒绝，选回最早点后加载并平面导出至 `resume-backup`。Verify 核对两个进度文件、两份 PDF、来源和三台设备的受保护布局。
+
+VHDX 差分链验收沿用 `--4kn --retained-signatures`，通过 `build-guest-checks.ps1 -VhdxChain` 生成对应的 Prepare 和 Verify。Prepare 在核对过的 B 卷上复制已有 VHDX，并调用 Windows Virtual Disk API 创建两个普通差分文件。应用选 `latest.avhdx` 时须提示缺少父盘，补选 `base.vhdx` 和 `middle.avhdx` 后打开。用空闲簇和扇区对齐扫描 FAT12 分区的 PDF，平面导出到 A 卷 `DS-Vhdx-Chain\pdf`。使用镜像格式转换将同一链保存到 A 卷 `DS-Vhdx-Chain\merged.img`。Verify 使用原始夹具逐字节核对转存结果、PDF 和导出来源，并检查三个输入文件的 SHA-256 和三台设备布局。
+
+VMDK 快照链验收使用同一 `--4kn --retained-signatures` 盘组。需要时先运行 `node scripts/prepare-image-browse.mjs` 生成普通 NTFS 合成镜像，再运行 `node scripts/vm/build-vmdk-chain.mjs`。QEMU 生成三层 VMDK，写入两层独立覆盖和一处显式清零，并比对独立构造的逻辑内容。用 `build-guest-checks.ps1 -VmdkChain` 构建工具，向只读光盘选入 `Vmdk-Chain-4Kn-Prepare.exe` 和 `Vmdk-Chain-4Kn-Verify.exe`。Prepare 在 B 卷保存四个源文件，A 卷保存基线及输出目录。打开 `latest.vmdk` 时核对缺少的父盘，补选 `middle.vmdk`、`base.vmdk` 和 `latest-s001.vmdk`。从 NTFS 分区平面导出 `file-with-12345` 到 A 卷 `DS-Vmdk-Chain\recovery`，并转存 RAW 到同一批次的 `merged.img`。Verify 复核客体载荷、QEMU 的逻辑摘要、源摘要、导出来源和三个设备布局。
+
+VDI 差分链验收复用 `--4kn --retained-signatures` 及同一普通 NTFS 合成镜像。运行 `node scripts/vm/build-vdi-chain.mjs`，用 QEMU 生成基盘，然后按 VDI 1.1 格式构造两层差分。逻辑对照从原始数据直接构造，覆盖跨层继承、两处覆盖和一处显式清零。构建 `build-guest-checks.ps1 -VdiChain`，把 `Vdi-Chain-4Kn-Prepare.exe` 和 `Vdi-Chain-4Kn-Verify.exe` 放入只读工具光盘。打开 `latest.vdi` 时核对缺失父盘的 UUID，再补选 `base.vdi` 和 `middle.vdi`。平面导出 NTFS 样本 `file-with-12345` 到 A 卷 `DS-Vdi-Chain\recovery`，并把差分链转存为同目录的 `merged.img`。Verify 核对逻辑内容 SHA-256、三个源文件、导出内容与来源，以及两盘 GPT 和来宾系统盘布局。
+
+VHDX 日志验收复用 `--4kn --retained-signatures`。运行 `node scripts/vm/build-vhdx-log.mjs`，从 6 MiB 的 NTFS 合成磁盘生成 `pending.vhdx`。样本的已提交分配表更新跨越日志环尾，QEMU 在独立副本上回放后须与原始镜像逐字节一致。构建 `build-guest-checks.ps1 -VhdxLog`，将 `Vhdx-Log-4Kn-Prepare.exe` 和 `Vhdx-Log-4Kn-Verify.exe` 加入只读工具光盘。来宾打开 `pending.vhdx` 后检查内存回放提示，向 A 卷 `DS-Vhdx-Log\recovery` 导出 `file-with-12345`，并将独立 RAW 保存为 `DS-Vhdx-Log\merged.img`。Verify 核对源文件摘要、导出的文件与来源、RAW 逻辑摘要、两盘 GPT 和来宾系统盘布局。
+
+ESXi VMDK 验收复用 `--4kn --retained-signatures`。运行 `node scripts/vm/build-esxi-chain.mjs`，构造 VMFS 基盘、VMFSSPARSE 中间层及 SESPARSE 最新层，QEMU 分别逐字节比对中间层和最新层的逻辑内容。构建 `build-guest-checks.ps1 -EsxiChain`，将 `Esxi-Chain-4Kn-Prepare.exe` 和 `Esxi-Chain-4Kn-Verify.exe` 放入只读工具光盘。来宾验收工具按文件名区分运行模式，手动输入路径时保留文件名大小写。先选择 `latest.vmdk`，核对缺父盘提示。补选基盘与中间层的四个文件，核对缺最新层数据文件提示，再选入 `latest-sesparse.vmdk`。向 A 卷 `DS-Esxi-Chain\recovery` 导出 `file-with-12345`，并把转存的 RAW 保存为 `DS-Esxi-Chain\merged.img`。Verify 核对文件、来源、RAW 摘要及两盘 GPT 和来宾系统盘布局，并重新比较六个源文件的摘要。
+
+Parallels 目录包沿用 `--4kn --retained-signatures`。运行 `node scripts/vm/build-parallels-bundle.mjs` 生成两个分卷、三层快照的样本。QEMU 逐个比对五个扩展 HDS 的逻辑数据，完整快照的 RAW 预期内容由原始镜像和覆盖范围独立构造。通过 `build-guest-checks.ps1 -ParallelsBundle` 构建 `Parallels-Bundle-4Kn-Prepare.exe` 和 `Parallels-Bundle-4Kn-Verify.exe`，用同一正式程序生成只读工具光盘。选择 `DiskDescriptor.xml` 核对缺少分卷的提示后，补选五个 HDS 和平面基盘。向 A 卷的 `DS-Parallels-Bundle\recovery` 导出 `file-with-12345`，将完整快照转存为 `DS-Parallels-Bundle\merged.img`。验收工具核对全部内容摘要、来源及三个磁盘的布局。
+
+用 `node scripts/vm/build-parallels-bundle.mjs --history` 生成同一分支树的历史快照样本，`build-guest-checks.ps1 -ParallelsHistory` 构建对应准备和验收工具。`lower-historical.hds` 带变更位图扩展，历史快照和当前快照有不同的完整逻辑摘要。打开 `DiskDescriptor.xml`，选择 `lower-historical.hds` 并补齐它的四个数据分卷。向 A 卷的 `DS-Parallels-History\recovery` 导出文件，将所选快照转存为 `DS-Parallels-History\merged.img`。验收工具核对导出清单的快照 UUID、RAW 摘要、全部九个来源文件和来宾布局。
+
+镜像备份验收复用已通过上一步核对的 `DS-Parallels-History`。用 `build-guest-checks.ps1 -ImageArchive` 构建验收器，`make-tools-iso.ps1 -Live -GuestTools Image-Archive-4Kn-Verify.exe` 打包验收器和原始参考清单。核对隔离 VM 和本轮正式载荷后，在「浏览镜像」打开同一条历史分支。在「备份镜像内容」中将整盘逐扇区压缩备份保存为 A 上的 `archive-full.dsbackup`。从相同视图以该归档为父备份生成 `archive-child.dsbackup`，再将 NTFS 分区逐扇区备份为 `archive-ntfs.dsbackup`。来宾验收器重新核对载荷、九份输入、两个 GPT 和来宾系统盘布局，读回三个归档并与历史分支的独立 RAW 逐字节比较，同时核对增量归档的两个块来自基档。
+
 基线要求 A 脱机，B 有在线的 `DS4KMOVEJRN` 卷，并记录 A/B 的 GPT 和客体 OS 布局键。用光盘上的正式程序将 A 的整盘 LBA 0 起 2 扇区、起点为 8704 MiB 的 384 MiB 分区内前 3 扇区，以及整个 A 的当前扇区 0 分别导出到 B 的该卷，保留建议文件名。另从 B 选择同一卷作目标，确认拒绝。核对工具读取限定的 A 盘扇区，与 B 上文件逐字节比较和计算 SHA-256，复核 GPT、布局键、磁盘状态及未完成文件是否存在。Report 入口只读取已保存的核对结果。
 
 如果 QEMU 窗口没收到宿主按键，先聚焦客体的扇区数量框，再用 `node scripts/vm/lab.mjs sector-copy-count-keys 2` 或 `3`。该命令重新预检 4Kn 客体，只发送指定的测试数量。
@@ -664,6 +684,14 @@ Prepare 只接受两块空 RAW 盘和匹配 SHA-256 的来宾载荷。它在 A �
 
 后续 FAT 变体验收使用 `node scripts/vm/lab.mjs start --4kn --fat-restore`。用 `build-guest-checks.ps1 -FatRestore` 和相同桌面程序生成只读工具光盘，选择 `FAT-Restore-4Kn-Prepare.exe` 与 `FAT-Restore-4Kn-Verify.exe`。预检后 Prepare 只在两块专用空 RAW 盘上建立夹具。先在正式界面打开 `Geometry.dsbackup`。其归档记录为 4Kn，里面的 GPT 使用 512 字节扇区。应能校验归档字节并显示扇区大小冲突，界面仅提供整盘还原入口。本用例只检查入口，不确认写入。
 
+实体盘导出复用已完成 FAT 变体验收的 4Kn A/B 夹具。用 `build-guest-checks.ps1 -DeviceImage` 构建 `Device-Image-4Kn-Prepare.exe` 和 `Device-Image-4Kn-Verify.exe`，将二者及同一正式程序放入只读光盘。QMP 预检通过后，来宾准备工具校验 UUID、完整设备身份、B/3 的 64 MiB 偏移和 24 MiB FAT16 范围，将 B 保持脱机，并在 A 的 `DS-Device-Image` 记录基线。由正式界面导出 B 整盘逐扇区动态 VHDX `whole.vhdx`，再导出 B/3 的逐扇区 `partition.img` 和按已用空间 `used.img`。验收器读取 VHDX 的区域表、扇区几何和块分配表，与脱机 B 的 16 GiB 逐字节比较。两份 RAW 分别比对原分区及依据两份 FAT 独立计算的空闲簇归零结果。
+
+启动检查使用同一套 `--4kn --fat-restore` A/B 数据盘。`build-guest-checks.ps1 -BootInspection` 生成准备和后验工具。将 `Boot-UEFI.img`、`Boot-BIOS.dsbackup` 和 `Boot-Dirty.img` 放入 `.vm/payload`，创建包含两份工具及正式程序的只读光盘。前三个样本分别是合成 GPT/FAT32 的 EFI 系统分区、合成 MBR/FAT16 活动分区的旧版归档、以及包含未提交 BCD 的 FAT16 分区镜像。文件来自来宾安装介质中的启动加载器与 BCD 样本。准备工具核对介质与 A/B 设备身份，仅在 A 的 `DS-Boot-Inspection` 写入固定夹具。由正式界面核对三种来源的文件和 BCD，再从磁盘菜单检查保持脱机的 B。后验核对三份夹具散列、两盘 GPT 与来宾系统盘布局。
+
+BCD 设备引用验收使用 `build-guest-checks.ps1 -BootReferences`。只读光盘选择 `Boot-References-4Kn-Prepare.exe` 和 `Boot-References-4Kn-Verify.exe`，加入 `.vm/payload` 中的 `Boot-References-GPT.img` 和 `Boot-References-MBR.dsbackup`。准备工具只在 A 的 `DS-Boot-References` 写入两份合成整盘夹具。分别从正式界面的镜像和旧版备份入口执行启动检查。第一个启动项在另一分区，应匹配启动与系统设备，并显示实际 Windows 安装介质加载器的 x64 PE 和 SHA-256、以及存在的系统目录。其他项覆盖缺失分区或跨盘签名、缺失文件及目录、间接设备和父路径。后验核对夹具和加载器摘要、报告状态、两盘 GPT 与来宾系统盘布局。
+
+BCD 继承与 NTFS 加载器验收使用 `build-guest-checks.ps1 -BootInheritance`。将 `Boot-Inheritance-NTFS.img` 和 `Boot-Inheritance-4Kn-Prepare.exe`、`Boot-Inheritance-4Kn-Verify.exe` 放入只读工具光盘。准备工具只在已核对的 A/2 写入 `DS-Boot-Inheritance`。在正式程序的镜像浏览入口以 512 B 扇区打开整盘镜像，检查启动项的继承来源、启动及工具顺序、缺失对象和循环。首项应在第二个 NTFS 分区找到 `winload.efi`，跨对象冲突项应报告冲突。自引用对象的启动项仍有完整的直接设备和路径，后验核对这些直接值、两份加载器结果、整盘夹具摘要、A/B GPT 和来宾系统盘布局。
+
 依 Prepare 输出的顺序验收 FAT12 8→4 MiB、FAT16 48→24 MiB、FAT32 268→8 MiB 按文件还原，以及 FAT16 48→32 MiB 和 exFAT 8→6 MiB 缩容还原。FAT32 按文件还原到 FAT12。两项缩容预览应各显示搬移一个簇。每次写入后运行 Verify，核对文件、目标格式与容量、卷标识、簇搬移和完整 SHA-256；同时检查源归档、GPT、相邻扇区和来宾系统盘布局。Verify 只在这一次离线读回通过后保存记录，前四次会为下一项单次联机 B，最后一次保持 B 脱机。
 
 正式构建 `f86db157…` 通过全部五项原生还原验收及扇区大小冲突的界面检查。FAT16 将簇 12272 搬到 2，exFAT 将簇 2009 搬到 4。五个目标的独立脱机 SHA-256 均与界面一致，两盘 GPT 和相邻扇区通过复核。记录见 `.vm/fat-restore-status.json`。
@@ -833,5 +861,15 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 2026-11-22 的正式构建 `3e8f0d28…` 在隔离 4Kn Windows 来宾打开 1 GiB 固定镜像并识别 64 MiB FAT16 分区，预览 `WITNESS.BIN`，将它和删除候选 `_RASED.BIN` 从 A 盘镜像导出到 B 盘。两个文件分别为 8,233 字节和 5,709 字节，程序回读和来宾独立复核的完整 SHA-256 均匹配。成员镜像夹具区段复核通过，确认到完成期间 A 盘无新增写入。导出清单记录了两个文件的时间或属性保留提示。证据在 `.vm/storage-spaces-recovery-status.json`。
 
 精简空间采用独立镜像和导出目录。执行 `node scripts/vm/build-storage-spaces-recovery-fixture.mjs <完整校验扇区捕获目录名> <精简缓存捕获目录名> --thin`。生成的 FAT16 夹具中，现存文件跨越直接分配和缓存，删除候选只存于缓存。把 `.vm/storage-spaces-recovery-thin.json` 的绝对路径设为 `DISKSTUDIO_SPACES_THIN_FIXTURE`，执行 `cargo test -p diskstudio --bin diskstudio thin_storage_space_browses_and_extracts_through_a_checkpoint -- --ignored`，用桌面后端核对分区表、文件分类和两份文件摘要。
+
+### Windows UEFI BCD 引用修复
+
+使用含 FAT32 EFI 系统分区、NTFS 加载器和已知过期 BCD 引用的 4Kn 合成镜像 `.vm/payload/Boot-Repair-4096.img`。运行 `node scripts/vm/build-boot-repair-disk.mjs`，生成独立的 16 GiB Test B QCOW2。脚本复核 GPT 主备表和分区边界，在新镜像末端写入备份 GPT，并回读校验。已有夹具盘不被替换。
+
+用 `build-guest-checks.ps1 -BootRepair` 编译来宾准备和回读工具，将它们与同一正式桌面程序放入只读工具 ISO。关闭先前的来宾后，用 `node scripts/vm/lab.mjs start --4kn --boot-repair` 启动独立 A/B，并运行 QMP 预检。来宾只对核对过的 A/B 测试盘操作。以联机 A 的 2 GiB NTFS 分区 A/2 存放备份，B 保持脱机。运行 `Boot-Repair-4Kn-Prepare.exe` 核对 B 上的两个失效设备引用及旧默认项，并记录两盘 GPT、来宾系统盘布局和原始 BCD 摘要。
+
+在正式程序的「Windows 启动检查」中选中 B，预览修复所选 UEFI 启动项的两个设备引用，并设为默认。把原始 BCD 存到 A 的 `DS-Boot-Repair\BCD-before-repair.bcd`，完成修复后运行 `Boot-Repair-4Kn-Verify.exe`。核对原始备份的 SHA-256、修复后两条引用和 Windows 加载器、默认启动项、启动管理器和 GPT。此流程验收修复及回读，实际引导需要有完整 Windows 安装的 UEFI 启动场景。
+
+正式构建 `3110d1b6…` 通过 4Kn 来宾原生验收。A 的备份 SHA-256 与原始 BCD 一致，B 的修复后 BCD SHA-256 与预览一致。两盘 GPT、EFI 启动管理器和来宾系统盘布局一致，B 全程脱机。QMP 显示从预览到独立回读期间 B 只写了两个 4 KiB 块。证据见 `.vm/boot-repair-status.json`。
 
 原生验收复用固定镜像场景中已准备好的 A/B 卷。挂载 `make-tools-iso.ps1 -Live -StorageSpacesThinRecovery` 生成的只读光盘并重新核对 QMP、来宾身份和载荷摘要。在来宾执行一次 `stage-storage-spaces-recovery.ps1 -Thin`。从 `S:\spaces-thin` 打开两个成员镜像，选择精简空间并读取 FAT16 分区，将文件导出到 `R:\thin-out`，再用 `stage-storage-spaces-recovery.ps1 -Thin -Verify` 独立复核。脚本验证两卷身份后只创建测试文件和目录。正式构建 `1cea3f4c…` 通过该流程。预览仅存于缓存的删除候选，将 8,233 字节的现存文件和 3,601 字节的删除候选从 A 跨盘导出到 B。两份完整 SHA-256 通过来宾独立核对，两个源成员区段一致，导出期间 A 无新增写入。证据见 `.vm/storage-spaces-thin-native-status.json`。

@@ -79,6 +79,38 @@ impl Options {
         }
         Ok(())
     }
+
+    fn data_start(&self) -> u64 {
+        let blocks = self.size.div_ceil(self.format.block_size());
+        match self.format {
+            Format::VhdDynamic => align512(1536 + blocks * 4),
+            Format::VdiDynamic | Format::VdiFixed => align512(512 + blocks * 4),
+            Format::VhdxDynamic | Format::VhdxFixed => containers::vhdx_data_start(self),
+            Format::VmdkSparse => containers::vmdk_layout(blocks).data,
+            Format::Parallels => (64 + blocks * 4).div_ceil(CHUNK as u64) * CHUNK as u64,
+            _ => 0,
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn minimum_output_bytes(&self) -> Result<u64, String> {
+        self.validate()?;
+        let payload = match self.format {
+            Format::Raw | Format::VhdFixed => self.size,
+            Format::VdiFixed | Format::VhdxFixed => self.size.next_multiple_of(self.format.block_size()),
+            _ => 0,
+        };
+        let footer = if matches!(self.format, Format::VhdFixed | Format::VhdDynamic) { 512 } else { 0 };
+        Ok(self.data_start() + payload + footer)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn check_filename(&self, name: &str) -> Result<(), String> {
+        if self.format == Format::VmdkSparse {
+            containers::validate_vmdk_name(name)?;
+        }
+        Ok(())
+    }
 }
 #[derive(Clone)]
 pub struct Identity {
@@ -88,6 +120,23 @@ pub struct Identity {
     // Native-selected basename only, used by VMDK's embedded descriptor.
     // Never interpreted as a path by the encoder.
     pub file_name: String,
+}
+#[cfg(windows)]
+impl Identity {
+    pub(crate) fn for_output(file_name: String) -> Result<Self, String> {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(err)?
+            .as_secs()
+            .checked_sub(946684800)
+            .ok_or("系统时间无效")?;
+        Ok(Self {
+            created: *uuid::Uuid::new_v4().as_bytes(),
+            modified: *uuid::Uuid::new_v4().as_bytes(),
+            vhd_timestamp: u32::try_from(seconds).map_err(err)?,
+            file_name,
+        })
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,14 +222,7 @@ impl<W: Read + Write + Seek> Encoder<W> {
         } else {
             vec![]
         };
-        let data_start = match options.format {
-            Format::VhdDynamic => align512(1536 + blocks * 4),
-            Format::VdiDynamic | Format::VdiFixed => align512(512 + blocks * 4),
-            Format::VhdxDynamic | Format::VhdxFixed => containers::vhdx_data_start(&options),
-            Format::VmdkSparse => containers::vmdk_layout(blocks).data,
-            Format::Parallels => (64 + blocks * 4).div_ceil(CHUNK as u64) * CHUNK as u64,
-            _ => 0,
-        };
+        let data_start = options.data_start();
         // Reserve bounded metadata, but do not emit a valid container signature
         // until every logical source byte has arrived. Partial files stay partial.
         let zero = vec![0; CHUNK];

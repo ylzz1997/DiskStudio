@@ -4,6 +4,8 @@ import { FileSearch, FolderOpen, HardDrive, X } from "lucide-react";
 import { useLocale } from "./i18n/LanguageProvider";
 import { formatSize } from "./types";
 import type { RetainedSearch } from "./RetainedPartitionSearch";
+import { RetainedSignatureScan, type RetainedSignatureRequest } from "./RetainedSignatureScan";
+import { retainedProgressMatches, type RecoveryProgress, type RetainedScanSelection } from "./recoveryProgressModel";
 
 export type ImageBrowseOptions = {
   kind: "disk" | "partition" | "search";
@@ -20,9 +22,11 @@ export type ImageBrowseInfo = {
   options: ImageBrowseOptions;
   partitions: { id: number; name: string; start: number; size: number }[];
   warning: string;
+  verificationNotes?: string[];
+  parallelsSnapshot?: { id: string; name: string; current: boolean };
   scanId: string | null;
   scanPartition: number | null;
-  scanMode: ImageBrowseMode | null;
+  scanMode: ImageBrowseMode | "signatures" | null;
   search: RetainedSearch | null;
 };
 export function ImageBrowserPanel({
@@ -31,8 +35,13 @@ export function ImageBrowserPanel({
   available,
   onOpen,
   onClose,
+  onBackup,
+  onBootInspection,
   onRead,
   onReconstruct,
+  onSignatures,
+  onLoadProgress,
+  recoveryProgress,
   onCopy,
   lvmName,
   onLvm,
@@ -45,8 +54,13 @@ export function ImageBrowserPanel({
   available: boolean;
   onOpen: (options: ImageBrowseOptions) => void;
   onClose: () => void;
+  onBackup: () => void;
+  onBootInspection?: () => void;
   onRead: (partition: number, mode: ImageBrowseMode) => void;
   onReconstruct: (partition: number, mode: ImageBrowseMode) => void;
+  onSignatures: (request: RetainedSignatureRequest) => void;
+  onLoadProgress: (source: RetainedScanSelection) => void;
+  recoveryProgress: RecoveryProgress | null;
   onCopy: () => void;
   lvmName?: string;
   onLvm: () => void;
@@ -63,17 +77,27 @@ export function ImageBrowserPanel({
   const [mode, setMode] = useState<ImageBrowseMode>("existing");
   useEffect(() => {
     setPartition(String(info?.scanPartition ?? info?.partitions[0]?.id ?? ""));
-    setMode(info?.scanMode ?? "existing");
+    setMode(info?.scanMode === "signatures" ? "existing" : (info?.scanMode ?? "existing"));
   }, [info?.id, info?.scanPartition, info?.scanMode]);
   return (
     <section className="data-panel backup-browser" aria-label={t("浏览镜像")}>
       <div className="section-heading">
         <h2>{t("浏览镜像文件")}</h2>
         {info && (
-          <button className="button" disabled={busy} onClick={onClose}>
-            <X size={15} />
-            {t("关闭镜像")}
-          </button>
+          <div className="header-actions">
+            {onBootInspection && info.options.kind !== "search" && (
+              <button className="button" disabled={busy || !available} onClick={onBootInspection}>
+                {t("Windows 启动检查")}
+              </button>
+            )}
+            <button className="button" disabled={busy || !available} onClick={onBackup}>
+              {t("备份镜像内容")}
+            </button>
+            <button className="button" disabled={busy} onClick={onClose}>
+              <X size={15} />
+              {t("关闭镜像")}
+            </button>
+          </div>
         )}
       </div>
       {info && (
@@ -87,6 +111,11 @@ export function ImageBrowserPanel({
               {formatSize(info.size)} ·{" "}
               {t("{size} B 扇区", { size: info.options.sector })}
             </span>
+            {info.parallelsSnapshot && (
+              <span title={info.parallelsSnapshot.id}>
+                {info.parallelsSnapshot.current ? t("当前快照") : t("Parallels 快照")} · {info.parallelsSnapshot.name}
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -191,10 +220,20 @@ export function ImageBrowserPanel({
               <option value="deleted">{t("仅删除候选")}</option>
             </select>
           </label>
-          {info.warning && (
+          {(info.warning || !!info.verificationNotes?.length) && (
             <details className="image-source-settings">
               <summary>{t("镜像检查说明")}</summary>
-              <p className="data-footnote">{catalogText(info.warning)}</p>
+              {info.warning && <p className="data-footnote">{catalogText(info.warning)}</p>}
+              {info.verificationNotes?.map((note, index) => {
+                const prefix = "读取顺序：";
+                return (
+                  <p className="data-footnote" key={index}>
+                    {note.startsWith(prefix)
+                      ? `${catalogText("镜像链读取顺序")} · ${note.slice(prefix.length).replace(/。$/, "")}`
+                      : catalogText(note)}
+                  </p>
+                );
+              })}
             </details>
           )}
           <div className="data-action-row">
@@ -219,11 +258,16 @@ export function ImageBrowserPanel({
           </div>
         </>
       )}
+      {info && (info.options.kind !== "partition" || info.partitions.length > 0) && (
+        <RetainedSignatureScan key={`signatures-${info.id}`} kind="image" info={info} whole={info.options.kind !== "partition"}
+          disabled={busy || !available} onStart={onSignatures} onLoad={onLoadProgress}
+          progress={retainedProgressMatches(recoveryProgress, "image", info) ? recoveryProgress : null} />
+      )}
       <details className="image-source-settings">
         <summary>{t("支持范围与读取说明")}</summary>
         <p className="data-footnote">
           {t(
-            "支持 RAW/IMG、VHD/AVHD、VHDX、VDI、VMDK 和独立 Parallels 文件的已实现容器类型；可明确补选 VHD 父链与 VMDK 分卷。脏 VHDX 日志、其他差分链和目录包快照暂不支持。",
+            "支持 RAW/IMG、VHD/AVHD、VHDX/AVHDX、VDI、VMDK 和 Parallels HDD/HDS。请用 DiskDescriptor.xml 打开 Parallels 目录包，并明确选择父盘和数据分卷。",
           )}
         </p>
         <p className="data-footnote">

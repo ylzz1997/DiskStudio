@@ -12,6 +12,7 @@ const HEADER: u64 = 4096;
 pub const CHUNK: usize = 4 * 1024 * 1024;
 const ENTRY: usize = 56;
 const MAX_CHUNKS: u64 = 1_048_576;
+pub(crate) const MAX_SIZE: u64 = MAX_CHUNKS * CHUNK as u64;
 pub const MAX_CHAIN: usize = 16;
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -217,6 +218,11 @@ impl Chain {
     }
     pub fn manifest(&self) -> &str {
         &self.layers[0].manifest
+    }
+    pub(crate) fn manifest_at(&self, layer: usize) -> Result<&str, String> {
+        self.complete()?;
+        self.layers.get(layer).map(|archive| archive.manifest.as_str())
+            .ok_or_else(|| "备份还原点不存在".into())
     }
     pub fn depth(&self) -> usize {
         self.layers.len()
@@ -545,7 +551,7 @@ pub fn create_with_settings<R: Read>(
     mut tick: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<Header, String> {
     if size == 0
-        || size.div_ceil(CHUNK as u64) > MAX_CHUNKS
+        || size > MAX_SIZE
         || !matches!(sector, 512 | 4096)
         || size % sector != 0
         || !matches!(kind, "disk" | "partition")

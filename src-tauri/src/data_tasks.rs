@@ -11,10 +11,22 @@ use crate::{
 use serde::{Deserialize, Serialize};
 #[path = "image_browse_tasks.rs"]
 pub mod image_browse_tasks;
+#[path = "boot_inspection_tasks.rs"]
+pub mod boot_inspection_tasks;
+#[path = "boot_repair_tasks.rs"]
+pub mod boot_repair_tasks;
+#[cfg(windows)]
+#[path = "image_archive_tasks.rs"]
+mod image_archive_tasks;
+#[cfg(windows)]
+#[path = "device_image_tasks.rs"]
+mod device_image_tasks;
 #[path = "recovery_tasks.rs"]
 pub mod recovery_tasks;
 #[path = "retained_partition_tasks.rs"]
 pub mod retained_partition_tasks;
+#[path = "retained_signature_tasks.rs"]
+pub mod retained_signature_tasks;
 #[cfg(windows)]
 #[path = "retained_restore_windows.rs"]
 mod retained_restore;
@@ -58,11 +70,11 @@ pub(crate) enum ScanSource {
     },
     Backup {
         opened: OpenedBackup,
-        partition: u32,
+        partition: Option<u32>,
     },
     Image {
         opened: image_browse_tasks::Opened,
-        partition: u32,
+        partition: Option<u32>,
     },
     ImageLvm(image_browse_tasks::lvm::Source),
     RetainedFound(retained_partition_tasks::Found),
@@ -190,13 +202,21 @@ impl ScanSource {
         if !files.iter().any(free_signature) {
             return Ok(());
         }
-        let (Self::Disk(Selection { partition: Some(_), .. }), [lock]) = (self, locks) else {
-            return Err("仅空闲簇扫描需要已核对的分区分配信息。".into());
+        let (mut reader, size, sector): (Box<dyn backup_archive::Source>, _, _) = match (self, locks) {
+            (Self::Disk(Selection { partition: Some(_), .. }), [lock]) => {
+                let bound = lock.resolved()?;
+                let sector = bound.disk.logical_sector_size.ok_or("逻辑扇区未知")?;
+                (Box::new(platform::reader(&bound)?), bound.size, sector)
+            }
+            (Self::Image { opened, partition: Some(part) }, []) => {
+                (self.reader(cancel)?, opened.browser.part(*part)?.size, opened.browser.info.options.sector)
+            }
+            (Self::Backup { opened, partition: Some(part) }, []) => {
+                (self.reader(cancel)?, opened.browser.restore_size(Some(*part))?, opened.browser.info.sector)
+            }
+            _ => return Err("仅空闲簇扫描需要已核对的分区分配信息。".into()),
         };
-        let bound = lock.resolved()?;
-        let sector = bound.disk.logical_sector_size.ok_or("逻辑扇区未知")?;
-        let mut reader = platform::reader(&bound)?;
-        let plan = crate::used_space::inspect(&mut reader, bound.size, sector, None, cancel)?;
+        let plan = crate::used_space::inspect(&mut reader, size, sector, None, cancel)?;
         crate::signature_scan::verify_free_candidates(&plan, files)
     }
 
@@ -329,11 +349,14 @@ impl ScanSource {
             Self::DynamicDisk(_) => Err("动态卷须使用已核对的磁盘组读取。".into()),
             Self::Backup { opened, partition } => {
                 opened.validate()?;
-                Ok(Box::new(opened.browser.reader(*partition)?))
+                opened.browser.restore_reader(*partition)
             }
             Self::Image { opened, partition } => {
                 opened.validate()?;
-                Ok(Box::new(opened.browser.reader(*partition)?))
+                match partition {
+                    Some(part) => Ok(Box::new(opened.browser.reader(*part)?)),
+                    None => opened.browser.logical_reader(),
+                }
             }
             Self::ImageLvm(source) => source.reader(cancel),
             Self::VirtualRaid(source) => source.reader(&[], cancel),
@@ -398,11 +421,11 @@ impl ScanSource {
             }
             Self::Backup { opened, partition } => {
                 opened.validate()?;
-                opened.browser.source_label(*partition)
+                opened.browser.scope_label(*partition)
             }
             Self::Image { opened, partition } => {
                 opened.validate()?;
-                opened.browser.label(*partition)
+                opened.browser.scope_label(*partition)
             }
             Self::ImageLvm(source) => {
                 source.validate()?;
@@ -794,7 +817,7 @@ pub fn backup_status() -> Option<BackupStatus> {
             ScanSource::Backup {
                 opened: scan,
                 partition,
-            } if scan.browser.info.id == opened.browser.info.id => Some(*partition),
+            } if scan.browser.info.id == opened.browser.info.id => *partition,
             _ => None,
         }),
         search: s.retained_partition_search.as_ref().filter(|search| search.for_backup(&opened.browser.info.id)).map(retained_partition_tasks::Search::read_only),
@@ -829,6 +852,7 @@ fn clear_backup_results(s: &mut State) {
         s.candidates.clear();
         s.directories = Catalog::default();
         s.scan_name.clear();
+        s.recovery_progress = None;
     }
     if s.opened_backup.as_ref().is_some_and(|backup| {
         s.retained_partition_search.as_ref().is_some_and(|search| search.for_backup(&backup.browser.info.id))
@@ -1075,16 +1099,16 @@ pub fn scan_backup(request: BackupScanRequest) -> Result<String, String> {
         }
         ScanSource::Backup {
             opened,
-            partition: request.partition,
+            partition: Some(request.partition),
         }
     };
     let ScanSource::Backup { opened, partition } = &source else {
         unreachable!()
     };
     opened.validate()?;
-    let reader = opened.browser.reader(*partition)?;
-    let label = format!("备份：{}", opened.browser.source_label(*partition)?);
-    scan_source(source, Box::new(reader), label, "读取备份目录", guard)
+    let reader = opened.browser.restore_reader(*partition)?;
+    let label = format!("备份：{}", opened.browser.scope_label(*partition)?);
+    scan_source(source, reader, label, "读取备份目录", guard)
 }
 pub fn scan_lost(request: crate::lost_partition_tasks::BrowseRequest) -> Result<String, String> {
     #[cfg(not(windows))]
@@ -1284,7 +1308,7 @@ pub fn reconstruct_filesystem(
                 let opened = image_browse_tasks::opened(&id)?;
                 let sector = opened.browser.info.options.sector;
                 let label = opened.browser.label(partition)?;
-                (ScanSource::Image { opened, partition }, sector, label)
+                (ScanSource::Image { opened, partition: Some(partition) }, sector, label)
             }
             ReconstructionSource::Backup { id, partition } => {
                 let opened = state()
@@ -1294,8 +1318,8 @@ pub fn reconstruct_filesystem(
                     .cloned()
                     .ok_or("备份浏览会话已失效")?;
                 let sector = opened.browser.info.sector;
-                let label = opened.browser.source_label(partition)?;
-                (ScanSource::Backup { opened, partition }, sector, label)
+                let label = opened.browser.scope_label(Some(partition))?;
+                (ScanSource::Backup { opened, partition: Some(partition) }, sector, label)
             }
         };
         scan_source_input(
@@ -1413,15 +1437,7 @@ fn scan_source_input(
                 mode,
                 cancel.clone(),
                 |done, total| progress(&work_id, &cancel, "读取目录", done, total),
-                |c| {
-                    let mut s = state();
-                    s.directories.add_file(&c);
-                    s.candidates.push(c);
-                    let count = s.candidates.len();
-                    if let Some(j) = &mut s.job {
-                        j.found = count;
-                    }
-                },
+                record_candidate,
                 |d| state().directories.insert(d),
             )?;
             #[cfg(windows)]
@@ -1453,6 +1469,16 @@ fn scan_source_input(
         finish(&work_id, result);
     });
     Ok(id)
+}
+
+fn record_candidate(file: Candidate) {
+    let mut s = state();
+    s.directories.add_file(&file);
+    s.candidates.push(file);
+    let count = s.candidates.len();
+    if let Some(job) = &mut s.job {
+        job.found = count;
+    }
 }
 pub fn cancel(id: String) -> Result<(), String> {
     cancel_in(&state(), &id)?;
@@ -1539,7 +1565,7 @@ pub(crate) fn finish(id: &str, result: Result<(String, Option<String>), String>)
     let canceled = s.cancel.load(Ordering::Relaxed);
     let paused = canceled
         && s.recovery_progress.as_ref().is_some_and(|p| {
-            p.id == id && p.pause_requested && p.cursor.as_ref().is_some_and(|c| !c.sealed())
+            p.id == id && p.pause_requested && p.binding.is_some() && p.cursor.as_ref().is_some_and(|c| !c.sealed())
         });
     if s.scan.as_ref().is_some_and(|(scan_id, _)| scan_id == id) {
         s.scan_completion = if result.is_ok() {
@@ -1942,6 +1968,20 @@ pub enum Request {
         #[serde(default)]
         options: BackupOptions,
     },
+    #[cfg(windows)]
+    ImageBackup {
+        id: String,
+        partition: Option<u32>,
+        #[serde(default)]
+        options: BackupOptions,
+    },
+    #[cfg(windows)]
+    ExportDeviceImage {
+        source: Selection,
+        format: crate::image_convert::Format,
+        #[serde(default)]
+        mode: crate::used_space::Mode,
+    },
     Clone {
         source: Selection,
         destination: Selection,
@@ -2082,6 +2122,10 @@ pub(crate) enum Work {
         options: BackupOptions,
         parent: Option<Chain>,
     },
+    #[cfg(windows)]
+    ImageBackup(Box<image_archive_tasks::Backup>),
+    #[cfg(windows)]
+    ExportDeviceImage(Box<device_image_tasks::Export>),
     ArchiveRestore {
         destination: Selection,
         chain: Chain,
@@ -2216,7 +2260,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                             return Ok(None);
                         };
                         let input = crate::backup_files::Input::open(&path, Some(&source.target))?;
-                        let Some(chain) = choose_chain(input, &source.target)? else {
+                        let Some(chain) = choose_chain(input, std::slice::from_ref(&source.target))? else {
                             return Ok(None);
                         };
                         if chain.header().size != r.size
@@ -2303,6 +2347,34 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                             options,
                             parent,
                         },
+                    )
+                }
+                Request::ImageBackup { id, partition, options } => {
+                    let Some(backup) = image_archive_tasks::Backup::prepare(id, partition, options)? else {
+                        return Ok(None);
+                    };
+                    (
+                        "备份镜像内容",
+                        backup.label()?,
+                        backup.path.display().to_string(),
+                        backup.size(),
+                        backup.warning(&locale),
+                        false,
+                        Work::ImageBackup(Box::new(backup)),
+                    )
+                }
+                Request::ExportDeviceImage { source, format, mode } => {
+                    let Some(export) = device_image_tasks::Export::prepare(source, format, mode)? else {
+                        return Ok(None);
+                    };
+                    (
+                        "导出磁盘镜像",
+                        export.source_label(&locale),
+                        export.destination_label(&locale),
+                        export.size(),
+                        export.warning(&locale),
+                        false,
+                        Work::ExportDeviceImage(Box::new(export)),
                     )
                 }
                 Request::Clone {
@@ -2526,7 +2598,7 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     };
                     let input = crate::backup_files::Input::open(&path, Some(&destination.target))?;
                     if input.chunked() {
-                        let Some(chain) = choose_chain(input, &destination.target)? else {
+                        let Some(chain) = choose_chain(input, std::slice::from_ref(&destination.target))? else {
                             return Ok(None);
                         };
                         let h = chain.header();
@@ -2626,10 +2698,10 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         }
                     }
                     if let ScanSource::Backup { opened, partition } = source.original() {
-                        export.backup_source = Some(opened.browser.provenance(*partition)?);
+                        export.backup_source = Some(opened.browser.scope_provenance(*partition)?);
                     }
                     if let ScanSource::Image { opened, partition } = source.original() {
-                        export.image_source = Some(opened.browser.provenance(*partition)?);
+                        export.image_source = Some(opened.browser.scope_provenance(*partition)?);
                     }
                     if let ScanSource::RetainedFound(found) = source.original() {
                         found.provenance(&mut export)?;
@@ -2778,7 +2850,7 @@ pub fn execute(token: String) -> Result<String, String> {
 #[cfg(windows)]
 fn choose_chain(
     input: crate::backup_files::Input,
-    other_disk: &Target,
+    excluded: &[Target],
 ) -> Result<Option<Chain>, String> {
     let Some(archive) = input.archive(|| Ok(()))? else {
         return Ok(None);
@@ -2798,7 +2870,7 @@ fn choose_chain(
         else {
             return Ok(None);
         };
-        let input = crate::backup_files::Input::open(&path, Some(other_disk))?;
+        let input = crate::backup_files::Input::open_excluding(&path, excluded)?;
         let Some(archive) = input.archive(|| Ok(()))? else {
             return Ok(None);
         };
@@ -2969,18 +3041,9 @@ pub(crate) fn run(
             drop(reader);
             drop(snapshot);
             drop(locks);
-            publication.validate()?;
-            let binding = publication.binding();
-            let archive = file.archive()?.bind_source(move || {
-                platform::FileBinding::validate_all(std::slice::from_ref(&binding))
+            crate::backup_files::verify_output(file, &publication, parent, |n| {
+                progress(id, cancel, "校验备份链", n, r.size)
             })?;
-            let mut chain = if let Some(p) = parent {
-                p.prepend(archive)?
-            } else {
-                Chain::new(archive)
-            };
-            chain.verify(|n| progress(id, cancel, "校验备份链", n, r.size))?;
-            drop(chain);
             progress(id, cancel, "保存已验证备份", r.size, r.size)?;
             publication.publish()?;
             let mut summary = locale.sentences(&[
@@ -3009,6 +3072,8 @@ pub(crate) fn run(
                 Some(header.sha256),
             ))
         }
+        Work::ImageBackup(backup) => backup.execute(id, cancel),
+        Work::ExportDeviceImage(export) => export.execute(id, cancel),
         Work::ArchiveRestore {
             destination,
             mut chain,
@@ -3508,7 +3573,7 @@ mod tests {
             "old-results".into(),
             ScanSource::Backup {
                 opened: old,
-                partition: 0,
+                partition: Some(0),
             },
         ));
         s.scan_name = "old results".into();

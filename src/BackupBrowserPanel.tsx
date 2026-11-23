@@ -6,6 +6,8 @@ import { useLocale } from "./i18n/LanguageProvider";
 import type { Translate } from "./i18n/translate";
 import type { ImageBrowseMode } from "./ImageBrowserPanel";
 import type { RetainedSearch } from "./RetainedPartitionSearch";
+import { RetainedSignatureScan, type RetainedSignatureRequest } from "./RetainedSignatureScan";
+import { retainedProgressMatches, type RecoveryProgress, type RetainedScanSelection } from "./recoveryProgressModel";
 
 export type BackupInfo = {
   id: string;
@@ -30,7 +32,7 @@ export type BackupInfo = {
   sourceDisks: string[];
   scanId: string | null;
   scanPartition: number | null;
-  scanMode: ImageBrowseMode | null;
+  scanMode: ImageBrowseMode | "signatures" | null;
   search: RetainedSearch | null;
 };
 
@@ -50,8 +52,12 @@ export function BackupBrowserPanel({
   available,
   onOpen,
   onClose,
+  onBootInspection,
   onRead,
   onReconstruct,
+  onSignatures,
+  onLoadProgress,
+  recoveryProgress,
   onPoint,
   onRestore,
   lostSearch,
@@ -61,8 +67,12 @@ export function BackupBrowserPanel({
   available: boolean;
   onOpen: () => void;
   onClose: () => void;
+  onBootInspection?: () => void;
   onRead: (partition: number) => void;
   onReconstruct: (partition: number) => void;
+  onSignatures: (request: RetainedSignatureRequest) => void;
+  onLoadProgress: (source: RetainedScanSelection) => void;
+  recoveryProgress: RecoveryProgress | null;
   onPoint: (point: string) => void;
   onRestore?: (partition: number | null) => void;
   lostSearch?: ReactNode;
@@ -77,10 +87,17 @@ export function BackupBrowserPanel({
       <div className="section-heading">
         <h2>{t("浏览备份文件")}</h2>
         {info && (
-          <button className="button" disabled={busy} onClick={onClose}>
-            <X size={15} />
-            {t("关闭备份")}
-          </button>
+          <div className="header-actions">
+            {onBootInspection && (
+              <button className="button" disabled={busy || !available} onClick={onBootInspection}>
+                {t("Windows 启动检查")}
+              </button>
+            )}
+            <button className="button" disabled={busy} onClick={onClose}>
+              <X size={15} />
+              {t("关闭备份")}
+            </button>
+          </div>
         )}
       </div>
       {info ? (
@@ -189,6 +206,11 @@ export function BackupBrowserPanel({
               {t("读取目录")}
             </button>
           </div>
+          {(info.kind === "disk" || info.partitions.length > 0) && (
+            <RetainedSignatureScan key={`signatures-${info.id}`} kind="backup" info={info} whole={info.kind === "disk"}
+              disabled={busy || !available} onStart={onSignatures} onLoad={onLoadProgress}
+              progress={retainedProgressMatches(recoveryProgress, "backup", info) ? recoveryProgress : null} />
+          )}
           {onRestore && (
             <div className="data-action-row">
               <span>{t("使用当前还原点，将所选范围写入另一块物理磁盘。")}</span>
