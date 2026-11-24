@@ -271,7 +271,7 @@ fn launch(
     let label = source.label()?;
     let (options, cursor) = cursor(&saved)?;
     let range = options.range(geometry.size)?;
-    let total = range.end - range.start;
+    let total = options.work(range.end - range.start);
     let options = options.clone();
     let mut cursor = cursor.clone();
     let mut binding = saved.binding.clone();
@@ -291,7 +291,7 @@ fn launch(
         }
         let found = s.candidates.len();
         if let Some(job) = &mut s.job {
-            job.done = cursor.consumed;
+            job.done = cursor.work_done(&options);
             job.total = total;
             job.found = found;
         }
@@ -358,7 +358,7 @@ fn launch(
         .unwrap_or_else(|_| Err("恢复扫描异常结束。".into()));
         {
             let mut s = state();
-            let done = cursor.consumed;
+            let done = cursor.work_done(&options);
             if let Some(saved) = s
                 .recovery_progress
                 .as_mut()
@@ -452,7 +452,7 @@ pub(super) fn load(selection: Selection) -> Result<Option<recovery_tasks::Info>,
     )?;
     let label = source.label()?;
     let range = saved.options.range(geometry.size)?;
-    let total = range.end - range.start;
+    let total = saved.options.work(range.end - range.start);
     let id = uuid::Uuid::new_v4().to_string();
     let sealed = saved.cursor.sealed;
     let mut catalog = Catalog::default();
@@ -464,7 +464,7 @@ pub(super) fn load(selection: Selection) -> Result<Option<recovery_tasks::Info>,
         idle(&s)?;
         s.job = Some(Job {
             id: id.clone(), title: TITLE.into(), state: if sealed { "completed" } else { "paused" }.into(),
-            phase: "已加载进度".into(), done: saved.cursor.consumed, total, found: files.len(),
+            phase: "已加载进度".into(), done: saved.cursor.work_done(&saved.options), total, found: files.len(),
             message: "已核对原镜像或备份还原点、内容特征和续扫边界。结果为历史观察，预览和导出时会复核候选。".into(),
             sha256: None,
         });

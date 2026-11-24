@@ -141,4 +141,15 @@ describe("saved signature scope", () => {
     const p = { ...saved, options: { ...saved.options!, freeOnly: true, sectorAligned: true } };
     expect(signatureRequest(settingsFromProgress(p), 2 ** 43)).toEqual(p.options);
   });
+  it("restores both fragment options and only sends options for selected types", () => {
+    const p: RecoveryProgress = {
+      ...saved,
+      options: { ...saved.options!, kinds: ["docx", "ogg"], zipFragments: true, oggFragments: true },
+    };
+    const settings = settingsFromProgress(p);
+    expect(signatureRequest(settings, 2 ** 43)).toEqual(p.options);
+    const request = signatureRequest({ ...settings, kinds: ["docx"] }, 2 ** 43);
+    expect(request.zipFragments).toBe(true);
+    expect(request).not.toHaveProperty("oggFragments");
+  });
 });

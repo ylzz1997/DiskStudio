@@ -25,6 +25,8 @@ pub(crate) mod maintenance;
 pub(crate) mod partition_attributes;
 #[path = "quick_partition_windows.rs"]
 pub(crate) mod quick;
+#[path = "usb_format_windows.rs"]
+pub(crate) mod usb_format;
 #[path = "partition_reallocation_windows.rs"]
 pub(crate) mod reallocation;
 #[path = "volume_manage.rs"]

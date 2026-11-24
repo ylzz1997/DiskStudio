@@ -23,13 +23,14 @@ use windows_sys::{
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Identity {
     volume: u32,
     high: u32,
     low: u32,
 }
-fn identity(dir: &Dir) -> Result<Identity, String> {
+pub(crate) fn identity(dir: &Dir) -> Result<Identity, String> {
     let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
     if unsafe { GetFileInformationByHandle(dir.as_raw_handle(), info.as_mut_ptr()) } == 0 {
         return Err(err(std::io::Error::last_os_error()));
@@ -46,7 +47,7 @@ fn identity(dir: &Dir) -> Result<Identity, String> {
         low: info.nFileIndexLow,
     })
 }
-fn create(dir: &Dir, name: &str) -> Result<File, String> {
+pub(crate) fn create(dir: &Dir, name: &str) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -58,11 +59,7 @@ fn create(dir: &Dir, name: &str) -> Result<File, String> {
         .map(|f| f.into_std())
         .map_err(err)
 }
-pub(crate) fn finish(file: &File, dir: &Dir, name: &str) -> Result<(), String> {
-    // Rename the exact still-open output handle; no source-path race and no
-    // replacement of an existing destination. RootDirectory stays pinned.
-    // The Win32 wrapper can reinterpret a relative name against the process
-    // directory. Use the documented native relative-root form directly.
+pub(crate) fn validate_output_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -75,6 +72,12 @@ pub(crate) fn finish(file: &File, dir: &Dir, name: &str) -> Result<(), String> {
     {
         return Err("输出文件名必须为普通文件名，不能包含路径或特殊设备名称。".into());
     }
+    Ok(())
+}
+pub(crate) fn finish(file: &File, dir: &Dir, name: &str) -> Result<(), String> {
+    // Rename the exact still-open output handle. RootDirectory stays pinned.
+    // Use the native relative-root form to prevent a cwd-relative rename.
+    validate_output_name(name)?;
     let name: Vec<u16> = name.encode_utf16().collect();
     let length = std::mem::size_of::<FILE_RENAME_INFORMATION>() + name.len() * 2;
     let mut buffer = vec![0u64; length.div_ceil(8)];
@@ -570,15 +573,26 @@ impl Destination {
         validated_parent: &Path,
         validate: impl FnOnce(&Dir) -> Result<(), String>,
     ) -> Result<Self, String> {
+        Self::new_named_checked(
+            validated_parent,
+            &format!("DiskStudio-recovered-{}", uuid::Uuid::new_v4()),
+            validate,
+        )
+    }
+    pub(crate) fn new_named_checked(
+        validated_parent: &Path,
+        name: &str,
+        validate: impl FnOnce(&Dir) -> Result<(), String>,
+    ) -> Result<Self, String> {
+        validate_output_name(name)?;
         let parent =
             Dir::open_ambient_dir(validated_parent, cap_std::ambient_authority()).map_err(err)?;
         identity(&parent)?;
         // Validate the same retained capability used for all subsequent writes,
         // before creating any directory or partial report.
         validate(&parent)?;
-        let name = format!("DiskStudio-recovered-{}", uuid::Uuid::new_v4());
-        parent.create_dir(&name).map_err(err)?;
-        let root = parent.open_dir_nofollow(&name).map_err(err)?;
+        parent.create_dir(name).map_err(err)?;
+        let root = parent.open_dir_nofollow(name).map_err(err)?;
         let root_id = identity(&root)?;
         let report = create(&root, REPORT_PARTIAL)?;
         Ok(Self {

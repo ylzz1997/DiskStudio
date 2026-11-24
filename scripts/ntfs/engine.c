@@ -756,6 +756,30 @@ static int populate(void)
 
 /* Supplied by the pinned, patched upstream source at build time. */
 extern int diskstudio_mkntfs(int argc, char **argv);
+extern int diskstudio_ntfsresize(int argc, char **argv);
+
+static int resize_volume(const unsigned char mode[4])
+{
+    unsigned char geometry[20];
+    if (fread(geometry, 1, sizeof(geometry), stdin) != sizeof(geometry))
+        return 2;
+    sector_size = (uint32_t)get_le(geometry, 4);
+    length = get_le(geometry + 4, 8);
+    uint64_t requested = get_le(geometry + 12, 8);
+    if ((sector_size != 512 && sector_size != 4096) || requested < 16 * 1024 * 1024
+            || requested > length || length > STREAM_LIMIT
+            || length % sector_size || requested % sector_size)
+        return 2;
+    char bytes[32];
+    snprintf(bytes, sizeof(bytes), "%llu", (unsigned long long)requested);
+    char *parameters[] = {
+        "diskstudio-ntfs", "--no-progress-bar", "--size", bytes,
+        !memcmp(mode, "DSRP", 4) ? "--no-action" : "--force",
+        VOLUME_NAME, NULL,
+    };
+    int result = diskstudio_ntfsresize(6, parameters);
+    return result || io_failed ? 1 : 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -763,7 +787,11 @@ int main(int argc, char **argv)
     (void)argv;
     if (argc != 1 || _setmode(_fileno(stdin), _O_BINARY) < 0
             || _setmode(_fileno(stdout), _O_BINARY) < 0
-            || fread(header, 1, sizeof(header), stdin) != sizeof(header)
+            || fread(header, 1, 4, stdin) != 4)
+        return 2;
+    if (!memcmp(header, "DSRP", 4) || !memcmp(header, "DSRW", 4))
+        return resize_volume(header);
+    if (fread(header + 4, 1, sizeof(header) - 4, stdin) != sizeof(header) - 4
             || memcmp(header, "DSN6", 4))
         return 2;
 

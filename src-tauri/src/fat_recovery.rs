@@ -43,6 +43,25 @@ fn at<R: Read + Seek>(r: &mut R, offset: u64, n: usize) -> Result<Vec<u8>, Strin
     r.read_exact(&mut b).map_err(e)?;
     Ok(b)
 }
+
+/// Establish the FAT family from the volume view and verify the logical
+/// sector size before using the result for a partition-type conversion.
+pub(crate) fn table_volume_kind(
+    r: &mut (impl Read + Seek),
+    boot: &[u8],
+    sector: u64,
+) -> Result<u8, String> {
+    let exponent = boot.get(108).copied().ok_or("FAT 引导扇区不完整。")?;
+    let expected = if &boot[3..11] == b"EXFAT   " {
+        1u64.checked_shl(u32::from(exponent))
+    } else {
+        Some(u64::from(u16at(boot, 11)))
+    };
+    if expected != Some(sector) {
+        return Err("FAT 卷引导扇区与镜像逻辑扇区大小不一致。".into());
+    }
+    Ok(Fs::load(r)?.bits)
+}
 #[derive(Clone, Debug)]
 pub struct Location {
     boot: [u8; 32],
@@ -440,7 +459,7 @@ fn candidate(
         locator: Locator::Fat(locator),
     }
 }
-fn fat_name(b: &[u8], long: &[(u64, Vec<u8>)], deleted: bool) -> String {
+fn fat_long_name(b: &[u8], long: &[(u64, Vec<u8>)], deleted: bool) -> Option<String> {
     let checksum = b[..11]
         .iter()
         .fold(0u8, |a, x| a.rotate_right(1).wrapping_add(*x));
@@ -466,8 +485,15 @@ fn fat_name(b: &[u8], long: &[(u64, Vec<u8>)], deleted: bool) -> String {
             .take_while(|c| *c != 0 && *c != 0xffff)
             .collect();
         if !chars.is_empty() {
-            return String::from_utf16_lossy(&chars);
+            return Some(String::from_utf16_lossy(&chars));
         }
+    }
+    None
+}
+
+fn fat_name(b: &[u8], long: &[(u64, Vec<u8>)], deleted: bool) -> String {
+    if let Some(name) = fat_long_name(b, long, deleted) {
+        return name;
     }
     let mut short = b[..11].to_vec();
     if deleted {

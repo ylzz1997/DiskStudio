@@ -16,11 +16,16 @@ export type RetainedSearch = {
     evidence: string;
     warning: string;
     canBrowse: boolean;
+    canRestore: boolean;
   }[];
+};
+export type ImageRegistrationOptions = {
+  form: "auto" | "primary" | "logical";
+  newTable: "mbr" | "gpt";
 };
 
 export function RetainedPartitionSearch({
-  search, size, sector, busy, expanded, canSearchUnallocated, onSearch, onBrowse,
+  search, size, sector, busy, expanded, canSearchUnallocated, table, onSearch, onBrowse, onRegister,
 }: {
   search: RetainedSearch | null;
   size: number;
@@ -28,8 +33,10 @@ export function RetainedPartitionSearch({
   busy: boolean;
   expanded: boolean;
   canSearchUnallocated: boolean;
+  table?: "MBR" | "GPT";
   onSearch: (options: LostSearchOptions) => void;
   onBrowse: (searchId: string, candidate: string, mode: ImageBrowseMode) => void;
+  onRegister?: (searchId: string, candidates: string[], options: ImageRegistrationOptions) => void;
 }) {
   const { t, language, catalogText } = useLocale();
   const [start, setStart] = useState("0");
@@ -37,6 +44,13 @@ export function RetainedPartitionSearch({
   const [mode, setMode] = useState<ImageBrowseMode>("existing");
   const [open, setOpen] = useState(expanded);
   const [all, setAll] = useState(false);
+  const [kept, setKept] = useState<{ searchId: string; ids: string[] }>({ searchId: "", ids: [] });
+  const [form, setForm] = useState<ImageRegistrationOptions["form"]>("auto");
+  const [newTable, setNewTable] = useState<ImageRegistrationOptions["newTable"]>("mbr");
+  const currentIds = kept.searchId === search?.id ? kept.ids : [];
+  const canRegister = !!onRegister && (search?.state === "completed" || search?.state === "canceled")
+    && search.candidates.some((candidate) => candidate.canRestore);
+  const chooseForm = table === "MBR" || (!table && newTable === "mbr");
   let options: LostSearchOptions | undefined;
   try {
     options = all
@@ -93,13 +107,50 @@ export function RetainedPartitionSearch({
                 {candidate.evidence && <small>{catalogText(candidate.evidence)}</small>}
                 {candidate.warning && <small>{catalogText(candidate.warning)}</small>}
               </div>
-              {candidate.canBrowse && (
-                <button className="button" disabled={busy || search.state === "running"} onClick={() => onBrowse(search.id, candidate.id, mode)}>
-                  {t("读取目录")}
-                </button>
-              )}
+              <div className="header-actions">
+                {canRegister && candidate.canRestore && (
+                  <label className="data-confirm">
+                    <input type="checkbox" checked={currentIds.includes(candidate.id)} disabled={busy}
+                      onChange={(event) => setKept({ searchId: search.id, ids: event.target.checked
+                        ? [...currentIds, candidate.id] : currentIds.filter((id) => id !== candidate.id) })} />
+                    {t("登记此候选")}
+                  </label>
+                )}
+                {candidate.canBrowse && (
+                  <button className="button" disabled={busy || search.state === "running"} onClick={() => onBrowse(search.id, candidate.id, mode)}>
+                    {t("读取目录")}
+                  </button>
+                )}
+              </div>
             </article>
           ))}
+          {canRegister && (
+            <div className="image-browser-open-row">
+              {!table && (
+                <label>
+                  {t("缺少分区表时使用")}
+                  <select value={newTable} disabled={busy} onChange={(event) => setNewTable(event.target.value as ImageRegistrationOptions["newTable"])}>
+                    <option value="mbr">MBR</option>
+                    <option value="gpt">GPT</option>
+                  </select>
+                </label>
+              )}
+              {chooseForm && (
+                <label>
+                  {t("MBR 条目形式")}
+                  <select value={form} disabled={busy} onChange={(event) => setForm(event.target.value as ImageRegistrationOptions["form"])}>
+                    <option value="auto">{t("自动")}</option>
+                    <option value="primary">{t("主分区")}</option>
+                    <option value="logical">{t("逻辑分区")}</option>
+                  </select>
+                </label>
+              )}
+              <button className="button primary" disabled={busy || !currentIds.length}
+                onClick={() => onRegister?.(search.id, currentIds, { form: chooseForm ? form : "auto", newTable })}>
+                {t("登记丢失分区到镜像副本")}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </details>

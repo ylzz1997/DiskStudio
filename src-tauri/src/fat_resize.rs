@@ -14,9 +14,19 @@ pub use exfat::prepare_exfat;
 
 const MAX_DIRECTORY_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Validate exclusive live-cluster ownership before an existing file is
-/// patched without changing directory entries or either FAT.
-pub(crate) fn check_boot_fat32<R: Read + Seek>(r: &mut R, sector: u64) -> Result<[u8; 32], String> {
+pub(super) struct CheckedBootFat32 {
+    pub(super) fs: Fs,
+    pub(super) boot: Vec<u8>,
+    pub(super) table: ClassicTable,
+    pub(super) digest: [u8; 32],
+}
+
+/// Validate exclusive live-cluster ownership and both copies of the metadata
+/// used by offline EFI file repairs.
+pub(super) fn checked_boot_fat32<R: Read + Seek>(
+    r: &mut R,
+    sector: u64,
+) -> Result<CheckedBootFat32, String> {
     if !matches!(sector, 512 | 4096) {
         return Err("Invalid EFI FAT sector geometry".into());
     }
@@ -39,7 +49,16 @@ pub(crate) fn check_boot_fat32<R: Read + Seek>(r: &mut R, sector: u64) -> Result
     hash.update(&boot);
     hash.update(table.bytes());
     hash.update(tree.digest);
-    Ok(hash.finalize().into())
+    Ok(CheckedBootFat32 {
+        fs,
+        boot,
+        table,
+        digest: hash.finalize().into(),
+    })
+}
+
+pub(crate) fn check_boot_fat32<R: Read + Seek>(r: &mut R, sector: u64) -> Result<[u8; 32], String> {
+    Ok(checked_boot_fat32(r, sector)?.digest)
 }
 
 #[derive(Debug)]

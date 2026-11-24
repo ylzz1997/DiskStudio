@@ -69,6 +69,7 @@ pub enum Locator {
         footer: Vec<u8>,
         content_hash: Option<[u8; 32]>,
         allocation_digest: Option<String>,
+        fragments: Option<crate::signature_scan::FragmentLayout>,
     },
 }
 fn err(e: impl std::fmt::Display) -> String {
@@ -385,8 +386,28 @@ pub fn extract_with_metadata<R: Read + Seek, W: Write>(
             header,
             footer,
             content_hash,
+            fragments,
             ..
         } => {
+            if let Some(layout) = fragments {
+                use crate::signature_scan::FragmentLayout;
+                let digest = content_hash.as_ref().ok_or("重组候选缺少内容摘要。")?;
+                let bytes = match layout {
+                    FragmentLayout::Zip(layout) => crate::signature_zip::fragments::extract(
+                        reader, layout, *offset, c.size, digest, out, take, tick,
+                    ),
+                    FragmentLayout::Ogg(layout) => crate::signature_scan::ogg_fragments::extract(
+                        reader, layout, *offset, c.size, digest, out, take, tick,
+                    ),
+                    FragmentLayout::Flac(layout) => crate::signature_scan::flac::fragments::extract(
+                        reader, layout, *offset, c.size, digest, out, take, tick,
+                    ),
+                    FragmentLayout::Png(layout) => crate::signature_scan::png::fragments::extract(
+                        reader, layout, *offset, c.size, digest, out, take, tick,
+                    ),
+                }?;
+                return Ok(Extraction { bytes, metadata });
+            }
             if let Some(expected) = content_hash {
                 let actual = crate::signature_zip::hash_range(reader, *offset, c.size, || tick(0))?;
                 if &actual != expected {

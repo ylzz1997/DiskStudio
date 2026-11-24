@@ -51,22 +51,15 @@ pub(crate) fn unallocated(
     windows_layout: Option<(&str, &[crate::used_space::Span])>,
 ) -> Result<Vec<Range>, String> {
     let info = archive.validate()?;
+    if let Some((scheme, spans)) = windows_layout {
+        corroborate_layout(&info, scheme, spans)?;
+    }
     let mut occupied = info
         .layout
         .iter()
         .map(|part| (part.offset, part.offset + part.size))
         .collect::<Vec<_>>();
     occupied.sort_unstable();
-    if let Some((scheme, spans)) = windows_layout {
-        let mut expected = spans
-            .iter()
-            .map(|span| (span.start, span.end))
-            .collect::<Vec<_>>();
-        expected.sort_unstable();
-        if info.scheme != scheme || occupied != expected {
-            return Err("原始分区表与 Windows 分区范围不一致。".into());
-        }
-    }
     let (first, end) = match info.scheme.as_str() {
         "GPT" => {
             let header = &archive
@@ -113,6 +106,28 @@ pub(crate) fn unallocated(
         return Err("没有可搜索的未分配空间。".into());
     }
     Ok(ranges)
+}
+
+pub(crate) fn corroborate_layout(
+    info: &crate::table_archive::Info,
+    scheme: &str,
+    spans: &[crate::used_space::Span],
+) -> Result<(), String> {
+    let mut actual = info
+        .layout
+        .iter()
+        .map(|part| (part.offset, part.offset + part.size))
+        .collect::<Vec<_>>();
+    let mut expected = spans
+        .iter()
+        .map(|span| (span.start, span.end))
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    if info.scheme != scheme || actual != expected {
+        return Err("原始分区表与 Windows 分区范围不一致。".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

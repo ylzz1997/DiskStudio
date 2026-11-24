@@ -53,6 +53,8 @@ pub struct Info {
     pub size: u64,
     pub options: Options,
     pub partitions: Vec<Part>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_table: Option<String>,
     pub warning: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub verification_notes: Vec<String>,
@@ -112,13 +114,14 @@ pub(crate) struct CheckedLayout {
     pub gpt_identity: Option<disk_core::table_check::GptIdentity>,
 }
 
-pub(crate) fn checked_layout(
+pub(crate) fn inspect_layout(
     source: &mut impl Source,
     name: &str,
     size: u64,
     sector: u64,
     tick: &mut impl FnMut() -> Result<(), String>,
-) -> Result<CheckedLayout, String> {
+) -> Result<(disk_core::table_check::ImageInspection, Vec<u8>), String> {
+    tick()?;
     let count = size.min(disk_core::MIB) as usize;
     let mut head = vec![0; count];
     let mut tail = vec![0; count];
@@ -126,10 +129,22 @@ pub(crate) fn checked_layout(
     source.read_exact(&mut head).map_err(|e| e.to_string())?;
     source.seek(SeekFrom::Start(size - count as u64)).map_err(|e| e.to_string())?;
     source.read_exact(&mut tail).map_err(|e| e.to_string())?;
-    let ebrs = crate::table_archive::read_ebrs(source, &head, size, sector, tick)?;
+    let ebrs = crate::table_archive::read_ebrs(source, &head, size, sector, &mut *tick)?;
     let inspected = disk_core::table_check::inspect_image_with_geometry(
         &head, &tail, size, name, Some(sector), &ebrs,
     )?;
+    tick()?;
+    Ok((inspected, head))
+}
+
+pub(crate) fn checked_layout(
+    source: &mut impl Source,
+    name: &str,
+    size: u64,
+    sector: u64,
+    tick: &mut impl FnMut() -> Result<(), String>,
+) -> Result<CheckedLayout, String> {
+    let (inspected, head) = inspect_layout(source, name, size, sector, tick)?;
     use disk_core::table_check::CheckState;
     if matches!(inspected.report.state, CheckState::Failed | CheckState::Unchecked) {
         return Err(format!(
@@ -161,6 +176,7 @@ impl Browser {
         options.validate(size)?;
         tick()?;
         let mut warning = String::new();
+        let mut partition_table = None;
         let partitions = match options.kind {
             Kind::Search => {
                 warning = "已打开整盘镜像以搜索丢失分区。".into();
@@ -175,6 +191,7 @@ impl Browser {
             Kind::Disk => {
                 let layout = checked_layout(&mut source, &name, size, options.sector, &mut tick)?;
                 warning = layout.warning;
+                partition_table = Some(layout.disk.scheme);
                 layout.disk.partitions
                     .into_iter()
                     .filter(|p| p.color != "free")
@@ -205,6 +222,7 @@ impl Browser {
                 size,
                 options,
                 partitions,
+                partition_table,
                 warning,
                 verification_notes: Vec::new(),
                 parallels_snapshot: None,

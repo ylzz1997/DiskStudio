@@ -95,7 +95,7 @@ fn guid(b: &[u8]) -> String {
 fn hash(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
-fn ordinary(e: &Entry) -> bool {
+pub(crate) fn ordinary(e: &Entry) -> bool {
     matches!(
         e.kind.as_str(),
         crate::partitions::policy::BASIC_DATA
@@ -172,6 +172,16 @@ pub fn archive_layout(archive: &Archive) -> Result<Layout, String> {
     decode_layout(&header.bytes, &table.bytes, archive.sector)
 }
 
+pub(crate) fn write_protective_entries(mbr: &mut [u8], last_lba: u64) {
+    mbr[446..510].fill(0);
+    mbr[447..450].copy_from_slice(&[0, 2, 0]);
+    mbr[450] = 0xee;
+    mbr[451..454].fill(0xff);
+    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
+    mbr[458..462].copy_from_slice(&(last_lba.min(u32::MAX as u64) as u32).to_le_bytes());
+    mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+}
+
 /// Construct both copies of a conventional GPT from validated byte ranges.
 /// The caller supplies newly generated identifiers and appends data separately.
 pub(crate) fn new_gpt(
@@ -233,12 +243,7 @@ pub(crate) fn new_gpt(
         }
     }
     let mut mbr = vec![0u8; sector as usize];
-    mbr[447..450].copy_from_slice(&[0, 2, 0]);
-    mbr[450] = 0xee;
-    mbr[451..454].fill(0xff);
-    mbr[454..458].copy_from_slice(&1u32.to_le_bytes());
-    mbr[458..462].copy_from_slice(&(last.min(u32::MAX as u64) as u32).to_le_bytes());
-    mbr[510..512].copy_from_slice(&[0x55, 0xaa]);
+    write_protective_entries(&mut mbr, last);
     let table_crc = crc32fast::hash(&table);
     let header = |at: u64, alternate: u64, array: u64| {
         let mut data = vec![0u8; sector as usize];
@@ -447,7 +452,11 @@ pub fn prepare(
     mut checkpoint: impl FnMut() -> Result<(), String>,
 ) -> Result<Plan, String> {
     let desired = archive_layout(archive)?;
-    if archive.source != stable_identity || archive.size != size || archive.sector != sector {
+    if archive.version != 1
+        || archive.source != stable_identity
+        || archive.size != size
+        || archive.sector != sector
+    {
         return Err("备份来源、容量或逻辑扇区与目标不一致。".into());
     }
     if include_boot && !archive.includes_boot {

@@ -285,6 +285,7 @@ mod tests {
                 footer: vec![],
                 content_hash: None,
                 allocation_digest: None,
+                fragments: None,
             },
         }
     }

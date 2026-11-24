@@ -98,6 +98,9 @@ pub fn discard(token: String) {
     }
 }
 #[cfg(windows)]
+pub(crate) use windows::RetainedRecovery;
+
+#[cfg(windows)]
 mod windows {
     use super::*;
     use crate::{data_windows as device, partitions::platform, table_archive};
@@ -138,6 +141,13 @@ mod windows {
     static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
     fn pending() -> std::sync::MutexGuard<'static, Option<Pending>> {
         PENDING.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn publish(plan: Pending) -> Preview {
+        let preview = plan.preview.clone();
+        if preview.token.is_some() {
+            *pending() = Some(plan);
+        }
+        preview
     }
     pub fn discard(token: String) {
         let mut p = pending();
@@ -319,7 +329,9 @@ mod windows {
         if ctx.fingerprint != initial.fingerprint {
             return Err("选择备份期间磁盘状态已变化。".into());
         }
-        build(request, ctx, guid, protected, input, None, cancel).map(Some)
+        build(request, ctx, guid, protected, input, None, cancel)
+            .map(publish)
+            .map(Some)
     }
     pub fn prepare_repair(request: RepairRequest, cancel: &AtomicBool) -> Result<Preview, String> {
         *pending() = None;
@@ -368,19 +380,66 @@ mod windows {
             Some(&saved.snapshot),
             cancel,
         )
+        .map(publish)
     }
+
+    /// A native preview owns its plan until confirmation or dismissal.
+    /// The desktop continues to use its single-use IPC token instead.
+    pub(crate) struct RetainedRecovery(Pending);
+
+    impl RetainedRecovery {
+        pub(crate) fn prepare(
+            source: Selection,
+            candidates: Vec<(
+                crate::surface_scan::Range,
+                crate::lost_partitions::Candidate,
+            )>,
+            verify_table: impl FnOnce(&table_archive::Archive) -> Result<(), String>,
+            cancel: &AtomicBool,
+        ) -> Result<Self, String> {
+            recovery_plan(source, candidates, verify_table, cancel).map(Self)
+        }
+
+        pub(crate) fn preview(&self) -> &Preview {
+            &self.0.preview
+        }
+
+        pub(crate) fn execute(self, cancel: &AtomicBool) -> Result<Outcome, String> {
+            execute_pending(self.0, cancel)
+        }
+    }
+
     pub fn prepare_recovery(
         request: crate::lost_partition_tasks::RecoverRequest,
         cancel: &AtomicBool,
     ) -> Result<Preview, String> {
         *pending() = None;
         let (source, candidates) = crate::lost_partition_tasks::selected_many(request)?;
+        recovery_plan(source, candidates, |_| Ok(()), cancel).map(publish)
+    }
+
+    fn recovery_plan(
+        source: Selection,
+        candidates: Vec<(
+            crate::surface_scan::Range,
+            crate::lost_partitions::Candidate,
+        )>,
+        verify_table: impl FnOnce(&table_archive::Archive) -> Result<(), String>,
+        cancel: &AtomicBool,
+    ) -> Result<Pending, String> {
+        check(cancel)?;
+        if source.partition.is_some() || candidates.is_empty() || candidates.len() > 128 {
+            return Err("请选择 1–128 个候选，仅恢复分区记录。".into());
+        }
         let (ctx, guid, protected) = platform::table_restore_context(&source, None)?;
         let d = &ctx.resolved.disk;
         let sector = d.logical_sector_size.ok_or("缺少逻辑扇区")?;
         if candidates.iter().any(|(range, _)| {
             range.sector != sector
-                || range.offset.checked_add(range.size).is_none_or(|end| end > d.size)
+                || range
+                    .offset
+                    .checked_add(range.size)
+                    .is_none_or(|end| end > d.size)
         }) {
             return Err("候选搜索范围或设备几何变化。".into());
         }
@@ -396,6 +455,7 @@ mod windows {
         let mut file = device::device(&ctx.resolved, false)?;
         let current =
             table_archive::capture(&mut file, d.size, sector, identity, false, || check(cancel))?;
+        verify_table(&current)?;
         let mut recovered = vec![];
         for (range, candidate) in candidates {
             let extent =
@@ -443,7 +503,7 @@ mod windows {
         input: Input,
         snapshot: Option<&crate::table_diagnostics::Snapshot>,
         cancel: &AtomicBool,
-    ) -> Result<Preview, String> {
+    ) -> Result<Pending, String> {
         let disk = &ctx.resolved.disk;
         let sector = disk.logical_sector_size.ok_or("逻辑扇区未知")?;
         let mut file = device::device(&ctx.resolved, false)?;
@@ -517,22 +577,24 @@ mod windows {
             changes: plan.changes.clone(),
             warnings: plan.warnings.clone(),
         };
-        if preview.token.is_some() {
-            *pending() = Some(Pending {
-                preview: preview.clone(),
-                request,
-                input,
-                plan,
-                fingerprint: ctx.fingerprint,
-                native: fingerprint,
-                expires: Instant::now() + Duration::from_secs(300),
-            });
-        }
-        Ok(preview)
+        Ok(Pending {
+            preview,
+            request,
+            input,
+            plan,
+            fingerprint: ctx.fingerprint,
+            native: fingerprint,
+            expires: Instant::now() + Duration::from_secs(300),
+        })
     }
     pub fn execute(token: String, cancel: &AtomicBool) -> Result<Outcome, String> {
-        let mut pending = take(&token)?;
+        execute_pending(take(&token)?, cancel)
+    }
+    fn execute_pending(mut pending: Pending, cancel: &AtomicBool) -> Result<Outcome, String> {
         check(cancel)?;
+        if pending.preview.token.is_none() || Instant::now() >= pending.expires {
+            return Err("恢复确认已过期或不匹配。".into());
+        }
         let (ctx, guid, _) = platform::table_restore_context(&pending.request.source, None)?;
         if ctx.fingerprint != pending.fingerprint || guid != pending.plan.layout.guid {
             return Err("目标状态与预览不同，请重新预览。".into());

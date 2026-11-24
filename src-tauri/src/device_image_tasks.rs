@@ -3,14 +3,13 @@ use super::{complete_verified, progress, Selection};
 use crate::{
     backup_files,
     data_windows::{self, Resolved},
-    image_convert::{Encoder, Format, Identity, Options, CHUNK},
+    image_convert::{feed, Encoder, Format, Identity, Options, Pass},
     native_locale::{self, Locale},
     partitions::Target,
     used_space::{self, Mode, View},
 };
 use std::{
     fs::File,
-    io::{Read, Seek, Write},
     path::PathBuf,
     sync::atomic::AtomicBool,
 };
@@ -242,43 +241,10 @@ fn reader(bound: &Resolved) -> Result<View<File>, String> {
     .map_err(|e| e.to_string())
 }
 
-#[derive(Clone, Copy)]
-enum Pass {
-    Copy,
-    Check,
-}
-
-fn feed<W: Read + Write + Seek>(
-    reader: &mut impl Read,
-    encoder: &mut Encoder<W>,
-    size: u64,
-    pass: Pass,
-    mut tick: impl FnMut(u64) -> Result<(), String>,
-) -> Result<(), String> {
-    let mut bytes = vec![0; CHUNK];
-    let mut done = 0;
-    while done < size {
-        tick(done)?;
-        let len = (size - done).min(CHUNK as u64) as usize;
-        let bytes = &mut bytes[..len];
-        reader
-            .read_exact(bytes)
-            .map_err(|e| format!("读取失败，未跳过坏扇区：{e}"))?;
-        tick(done)?;
-        match pass {
-            Pass::Copy => encoder.push(done, bytes)?,
-            Pass::Check => {
-                encoder.verify_source(done, bytes)?;
-            }
-        }
-        done += len as u64;
-    }
-    tick(done)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_convert::CHUNK;
     use std::io::Cursor;
 
     #[test]

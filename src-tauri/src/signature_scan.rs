@@ -9,11 +9,17 @@ mod audio;
 #[path = "signature_audiovisual.rs"]
 mod audiovisual;
 #[path = "signature_flac.rs"]
-mod flac;
+pub(crate) mod flac;
+#[path = "signature_fragment_io.rs"]
+pub(crate) mod fragment_io;
 #[path = "signature_images.rs"]
 mod images;
 #[path = "signature_media.rs"]
 mod media;
+#[path = "signature_ogg_fragments.rs"]
+pub(crate) mod ogg_fragments;
+#[path = "signature_png.rs"]
+pub(crate) mod png;
 #[path = "signature_rar.rs"]
 mod rar;
 
@@ -24,6 +30,10 @@ const MAX_FIELDS: usize = 65_536;
 const SEVEN_ZIP_MAGIC: &[u8; 6] = b"7z\xbc\xaf\x27\x1c";
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 const MAX_SEVEN_ZIP_HEADER: u64 = 8 * 1024 * 1024;
+const FRAGMENT_NOTE: &str = "ZIP 碎片候选。每个成员与目录记录唯一匹配，所有条目通过 CRC，预览或导出会复核完整 SHA-256。原名和删除状态未知。";
+const OGG_FRAGMENT_NOTE: &str = "Ogg 逻辑流候选。已核对流序列号、完整页序列、包边界和各页 CRC。预览或导出会复核完整 SHA-256。";
+const FLAC_FRAGMENT_NOTE: &str = "FLAC 碎片候选。已核对帧顺序、CRC 及解码样本的 STREAMINFO MD5。预览与导出会复核完整 SHA-256。";
+const PNG_FRAGMENT_NOTE: &str = "PNG 碎片候选。已核对各块 CRC、完整 zlib 校验和以及扫描行。预览和导出会复核完整 SHA-256。";
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Kind {
@@ -106,6 +116,14 @@ pub struct Options {
     pub free_only: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sector_aligned: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub zip_fragments: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ogg_fragments: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flac_fragments: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub png_fragments: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -115,10 +133,42 @@ impl Default for Options {
             length: None,
             free_only: false,
             sector_aligned: false,
+            zip_fragments: false,
+            ogg_fragments: false,
+            flac_fragments: false,
+            png_fragments: false,
         }
     }
 }
 impl Options {
+    fn fragment_phases(&self) -> impl Iterator<Item = &'static str> {
+        [
+            (self.zip_fragments, "重组 ZIP 碎片"),
+            (self.ogg_fragments, "重组 Ogg 碎片"),
+            (self.flac_fragments, "重组 FLAC 碎片"),
+            (self.png_fragments, "重组 PNG 碎片"),
+        ].into_iter().filter_map(|(enabled, label)| enabled.then_some(label))
+    }
+
+    fn has_fragments(&self) -> bool {
+        self.fragment_phases().next().is_some()
+    }
+
+    pub fn work(&self, bytes: u64) -> u64 {
+        bytes.saturating_mul(1 + self.fragment_phases().count() as u64)
+    }
+
+    pub fn phase(&self, done: u64, size: u64) -> &'static str {
+        if done >= size {
+            let mut end = size;
+            for label in self.fragment_phases() {
+                end = end.saturating_add(size);
+                if done <= end { return label }
+            }
+        }
+        "签名扫描"
+    }
+
     pub fn alignment(&self, sector: u64) -> Result<u64, String> {
         if !self.sector_aligned {
             return Ok(1);
@@ -140,6 +190,18 @@ impl Options {
         {
             return Err("请选择至少一种文件类型，类型不能重复。".into());
         }
+        if self.zip_fragments && !self.kinds.iter().any(|kind| kind.zip_family()) {
+            return Err("重组 ZIP 碎片需要选择 ZIP 或一种文档包类型。".into());
+        }
+        if self.ogg_fragments && !self.kinds.contains(&Kind::Ogg) {
+            return Err("重组 Ogg 碎片需要选择 Ogg 文件类型。".into());
+        }
+        if self.flac_fragments && !self.kinds.contains(&Kind::Flac) {
+            return Err("重组 FLAC 碎片需要选择 FLAC 文件类型。".into());
+        }
+        if self.png_fragments && !self.kinds.contains(&Kind::Png) {
+            return Err("重组 PNG 碎片需要选择 PNG 文件类型。".into());
+        }
         let end = match self.length {
             Some(n) => self.start.checked_add(n).ok_or("扫描范围溢出。")?,
             None => source_size,
@@ -148,6 +210,43 @@ impl Options {
             return Err("扫描范围须位于所选磁盘或分区内，长度必须大于零。".into());
         }
         Ok(self.start..end)
+    }
+}
+/// Preserve the original ZIP record shape in existing scan files.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum FragmentLayout {
+    Zip(crate::signature_zip::fragments::Layout),
+    Ogg(ogg_fragments::Layout),
+    Flac(flac::fragments::Layout),
+    Png(png::fragments::Layout),
+}
+impl FragmentLayout {
+    fn parts(&self) -> &[fragment_io::Part] {
+        match self {
+            Self::Zip(layout) => &layout.parts,
+            Self::Ogg(layout) => &layout.runs,
+            Self::Flac(layout) => &layout.flac_runs,
+            Self::Png(layout) => &layout.png_runs,
+        }
+    }
+
+    fn note(&self) -> &'static str {
+        match self {
+            Self::Zip(_) => FRAGMENT_NOTE,
+            Self::Ogg(_) => OGG_FRAGMENT_NOTE,
+            Self::Flac(_) => FLAC_FRAGMENT_NOTE,
+            Self::Png(_) => PNG_FRAGMENT_NOTE,
+        }
+    }
+
+    fn valid(&self, kind: Kind, start: u64, size: u64, range: &std::ops::Range<u64>, options: &Options) -> bool {
+        match self {
+            Self::Zip(layout) => kind.zip_family() && options.zip_fragments && layout.valid(start, size, range),
+            Self::Ogg(layout) => kind == Kind::Ogg && options.ogg_fragments && layout.valid(start, size, range),
+            Self::Flac(layout) => kind == Kind::Flac && options.flac_fragments && layout.valid(start, size, range),
+            Self::Png(layout) => kind == Kind::Png && options.png_fragments && layout.valid(start, size, range),
+        }
     }
 }
 impl Kind {
@@ -172,6 +271,7 @@ impl Kind {
             || matches!(
                 self,
                 Self::SevenZip
+                    | Self::Png
                     | Self::Sqlite
                     | Self::Mp4
                     | Self::Mov
@@ -192,7 +292,7 @@ impl Kind {
 
     fn starts(self, b: &[u8]) -> bool {
         match self {
-            Self::Png => b.starts_with(b"\x89PNG\r\n\x1a\n"),
+            Self::Png => b.starts_with(png::MAGIC),
             Self::Jpeg => b.starts_with(b"\xff\xd8\xff"),
             Self::Pdf => b.starts_with(b"%PDF-"),
             Self::Gif => b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a"),
@@ -262,7 +362,7 @@ impl Kind {
     }
     fn footer(self) -> Option<&'static [u8]> {
         match self {
-            Self::Png => Some(b"\0\0\0\0IEND\xaeB`\x82"),
+            Self::Png => Some(png::IEND),
             Self::Jpeg => Some(b"\xff\xd9"),
             Self::Pdf => Some(b"%%EOF"),
             _ => None,
@@ -317,6 +417,7 @@ fn candidate(
         deleted: false,
         method: "文件签名".into(),
         note: match kind {
+            Kind::Png => "连续 PNG 候选。已核对图像块顺序和各块 CRC，尚未解码像素。",
             Kind::SevenZip => "连续 7z 候选。已核对起始头和后续头的 CRC，未解压或验证文件内容。",
             Kind::Sqlite => {
                 "连续 SQLite 主数据库候选。已核对文件头和首页结构，未验证其余数据库页或恢复 WAL。"
@@ -351,6 +452,7 @@ fn candidate(
             header,
             footer,
             allocation_digest: None,
+            fragments: None,
         },
     }
 }
@@ -366,8 +468,14 @@ pub struct StoredCandidate {
     header: Vec<u8>,
     footer: Vec<u8>,
     content_hash: Option<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fragments: Option<FragmentLayout>,
 }
 impl StoredCandidate {
+    pub fn fragmented(&self) -> bool {
+        self.fragments.is_some()
+    }
+
     pub fn aligned(&self, alignment: u64) -> bool {
         self.offset & (alignment - 1) == 0
     }
@@ -378,6 +486,7 @@ impl StoredCandidate {
             header,
             footer,
             content_hash,
+            fragments,
             ..
         } = &c.locator
         else {
@@ -395,6 +504,7 @@ impl StoredCandidate {
             header: header.clone(),
             footer: footer.clone(),
             content_hash: *content_hash,
+            fragments: fragments.clone(),
         })
     }
     pub fn candidate(
@@ -408,16 +518,17 @@ impl StoredCandidate {
         if !options.kinds.contains(&self.kind)
             || self.size == 0
             || self.size > MAX_FILE
-            || self.offset < range.start
-            || self
-                .offset
-                .checked_add(self.size)
-                .is_none_or(|end| end > range.end)
+            || match &self.fragments {
+                Some(layout) => !layout.valid(self.kind, self.offset, self.size, &range, options),
+                None => self.offset < range.start || self.offset.checked_add(self.size)
+                    .is_none_or(|end| end > range.end),
+            }
             || self.header.len() as u64 > self.size
             || self.footer.len() as u64 > self.size
             || self.header.len() > 100
             || self.footer.len() > 16
-            || self.kind.requires_digest() != self.content_hash.is_some()
+            || (self.kind.requires_digest() != self.content_hash.is_some()
+                && !(self.kind == Kind::Png && self.fragments.is_none()))
         {
             return Err("保存的签名候选越界或类型不一致。".into());
         }
@@ -461,14 +572,21 @@ impl StoredCandidate {
         if let Locator::Signature {
             content_hash,
             allocation_digest: digest,
+            fragments,
             ..
         } = &mut c.locator
         {
             *content_hash = self.content_hash;
             *digest = allocation_digest.map(str::to_owned);
+            *fragments = self.fragments.clone();
         }
         if archive {
             c.note="连续 ZIP 容器；保存时已检查目录与 CRC，提取前复核内容摘要。加载的结果是历史观察，不保证源内容未改变。".into();
+        }
+        if let Some(layout) = &self.fragments {
+            c.note = layout.note().into();
+        } else if self.kind == Kind::Png && self.content_hash.is_none() {
+            c.note = "历史 PNG 候选仅记录起止签名。请重新扫描以校验图像块。".into();
         }
         Ok(c)
     }
@@ -508,6 +626,8 @@ pub struct Checkpoint {
     pub sealed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     allocation_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fragments_checked: bool,
 }
 impl Default for Checkpoint {
     fn default() -> Self {
@@ -522,16 +642,26 @@ impl Default for Checkpoint {
             archive_remaining: 64 * 1024 * 1024 * 1024,
             sealed: false,
             allocation_digest: None,
+            fragments_checked: false,
         }
     }
 }
 impl Checkpoint {
+    pub fn work_done(&self, options: &Options) -> u64 {
+        if self.fragments_checked {
+            options.work(self.consumed)
+        } else {
+            self.consumed
+        }
+    }
+
     pub fn allocation_digest(&self) -> Option<&str> {
         self.allocation_digest.as_deref()
     }
 
     pub fn validate(&self, size: u64, options: &Options) -> Result<(), String> {
         if self.consumed > size
+            || (self.fragments_checked && (!options.has_fragments() || !self.sealed || self.consumed != size))
             || self.searched > size
             || self.carry.len() > 16
             || self.carry.len() as u64 > self.consumed
@@ -554,9 +684,9 @@ impl Checkpoint {
         }
         if !self.sealed
             && (self.count as usize >= MAX_RESULTS
-                || self.consumed == size
+                || (self.consumed == size && !options.has_fragments())
                 || (!options.free_only
-                    && (self.consumed % CHUNK as u64 != 0
+                    && ((self.consumed != size && self.consumed % CHUNK as u64 != 0)
                         || self.carry.len() as u64 != self.consumed.min(16)))
                 || self.searched < self.consumed.saturating_sub(16))
         {
@@ -671,16 +801,20 @@ pub fn verify_free_candidates<'a>(
         if let Locator::Signature {
             offset,
             allocation_digest: Some(digest),
+            fragments,
             ..
         } = &c.locator
         {
             if digest != &plan.digest {
                 return Err("空闲簇分配信息已变化，请重新扫描。".into());
             }
-            if offset
-                .checked_add(c.size)
-                .is_none_or(|end| !within_free(plan, *offset, end))
-            {
+            let is_free = |start: u64, size| {
+                start.checked_add(size).is_some_and(|end| within_free(plan, start, end))
+            };
+            if !fragments.as_ref().map_or_else(
+                || is_free(*offset, c.size),
+                |layout| layout.parts().iter().all(|part| is_free(part.start, part.length)),
+            ) {
                 return Err("候选文件的范围已不完全位于核对的空闲簇中，请重新扫描。".into());
             }
         }
@@ -700,6 +834,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
 ) -> Result<String, String> {
     let range = options.range(source_size)?;
     let size = range.end - range.start;
+    let total = options.work(size);
     let alignment = options.alignment(sector)?;
     checkpoint.validate(size, options)?;
     if checkpoint.sealed {
@@ -773,6 +908,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
     let (mut count, mut rejected, mut probes) =
         (checkpoint.count, checkpoint.rejected, checkpoint.probes);
     let archives = options.kinds.iter().any(|k| k.zip_family());
+    let png = options.kinds.contains(&Kind::Png);
     let movies = options.kinds.contains(&Kind::Mp4) || options.kinds.contains(&Kind::Mov);
     let ogg = options.kinds.contains(&Kind::Ogg);
     let tiff = options.kinds.contains(&Kind::Tiff);
@@ -794,7 +930,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
     let mut archive_budget = crate::signature_zip::Budget::resume(checkpoint.archive_remaining)?;
     let result = (|| {
         while consumed < size {
-            tick(consumed, size)?;
+            tick(consumed, total)?;
             let mut unpublished = Vec::new();
             macro_rules! stop {
                 ($message:expr,$at:expr) => {{
@@ -809,6 +945,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         archive_remaining: archive_budget.remaining(),
                         sealed: true,
                         allocation_digest: allocation_digest.clone(),
+                        fragments_checked: false,
                     };
                     for candidate in unpublished.drain(..) {
                         publish(candidate);
@@ -820,6 +957,12 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                 let ranges = plan.free_ranges();
                 let index = ranges.partition_point(|f| f.end <= range.start + consumed);
                 let Some(span) = ranges.get(index).filter(|f| f.start < range.end) else {
+                    if options.has_fragments() && consumed != 0 {
+                        consumed = size;
+                        checkpoint.consumed = size;
+                        checkpoint.searched = size;
+                        break;
+                    }
                     let message = if consumed == 0 {
                         "所选范围没有可核对的空闲簇。".into()
                     } else {
@@ -863,7 +1006,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         range.start + at,
                         range.start + span_start..range.start + span_end,
                         &mut archive_budget,
-                        || tick(at.max(consumed), size),
+                        || tick(at.max(consumed), total),
                     )? {
                         if options.kinds.contains(&a.kind) && a.start & (alignment - 1) == 0 {
                             let mut c =
@@ -889,6 +1032,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                 let structured = aligned
                     .then(|| match buffer[i] {
                         b'O' if ogg && media::ogg_start(bytes) => Some(Kind::Ogg),
+                        0x89 if png && bytes.starts_with(png::MAGIC) => Some(Kind::Png),
                         b'R' if rar && rar::starts(bytes) => Some(Kind::Rar),
                         b'f' if flac && Kind::Flac.starts(bytes) => Some(Kind::Flac),
                         b'M' if midi && audio::midi_start(bytes) => Some(Kind::Midi),
@@ -914,7 +1058,27 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         rejected += 1;
                     } else if buffer[i..end].starts_with(footer) {
                         let length = at + footer.len() as u64 - start;
-                        if length <= MAX_FILE {
+                        if length <= MAX_FILE && *kind == Kind::Png {
+                            // Legacy paused cursors can already contain a PNG
+                            // start. Verify its real end through the new parser.
+                            let absolute = range.start + start;
+                            let verified = probe(reader, *kind, absolute, range.start + span_end,
+                                &mut archive_budget, || tick(at.max(consumed), total))?;
+                            let has_verified_end = verified.is_some();
+                            if let Some((parsed, header, footer)) = verified.filter(|(size, _, _)| *size == length) {
+                                let mut c = candidate(count, *kind, absolute, parsed, header, footer);
+                                archive_budget.charge(parsed)?;
+                                let digest = crate::signature_zip::hash_range(reader, absolute, parsed, || tick(at.max(consumed), total))?;
+                                if let Locator::Signature { content_hash, .. } = &mut c.locator { *content_hash = Some(digest); }
+                                unpublished.push(c);
+                                count += 1;
+                            } else if has_verified_end {
+                                i += 1;
+                                continue;
+                            } else {
+                                rejected += 1;
+                            }
+                        } else if length <= MAX_FILE {
                             unpublished.push(candidate(
                                 count,
                                 *kind,
@@ -946,7 +1110,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                         .find(|k| k.starts(&buffer[i..end]))
                 });
                 if let Some(kind) = kind {
-                    if kind.footer().is_some() {
+                    if kind.footer().is_some() && kind != Kind::Png {
                         active = Some((kind, at, buffer[i..i + kind.header_len()].to_vec()));
                     } else {
                         probes += 1;
@@ -958,7 +1122,7 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                             );
                         }
                         let absolute = range.start + at;
-                        let mut check_progress = || tick(at.max(consumed), size);
+                        let mut check_progress = || tick(at.max(consumed), total);
                         let result = probe(
                             reader,
                             kind,
@@ -1015,8 +1179,9 @@ pub fn continue_scan_scoped<R: Read + Seek>(
                 rejected,
                 probes,
                 archive_remaining: archive_budget.remaining(),
-                sealed: consumed == size,
+                sealed: consumed == size && !options.has_fragments(),
                 allocation_digest: allocation_digest.clone(),
+                fragments_checked: false,
             };
             for candidate in unpublished {
                 publish(candidate);
@@ -1025,7 +1190,92 @@ pub fn continue_scan_scoped<R: Read + Seek>(
         if active.is_some() {
             rejected += 1;
         }
-        tick(size, size)?;
+        if options.has_fragments() {
+            let mut candidates = Vec::new();
+            let mut limited = false;
+            let mut add = |kind, start, size, header, footer, layout: FragmentLayout, digest| {
+                let mut c = candidate(count + candidates.len() as u32, kind, start, size, header, footer);
+                c.note = layout.note().into();
+                if let Locator::Signature { content_hash, fragments, .. } = &mut c.locator {
+                    *content_hash = Some(digest);
+                    *fragments = Some(layout);
+                }
+                candidates.push(c);
+            };
+            let mut remaining = MAX_RESULTS - count as usize;
+            if options.zip_fragments {
+                let result = crate::signature_zip::fragments::search(
+                    reader, range.clone(), allocation, alignment, &options.kinds,
+                    remaining, &mut archive_budget,
+                    |done| tick(size.saturating_add(done), total),
+                )?;
+                limited |= result.limited;
+                remaining -= result.hits.len();
+                for hit in result.hits {
+                    let a = hit.archive;
+                    add(a.kind, a.start, a.size, a.header, a.footer, FragmentLayout::Zip(hit.layout), a.digest);
+                }
+            }
+            if options.ogg_fragments && remaining > 0 {
+                let prior = size.saturating_mul(1 + u64::from(options.zip_fragments));
+                let result = ogg_fragments::search(
+                    reader, range.clone(), allocation, alignment, remaining, &mut archive_budget,
+                    |done| tick(prior.saturating_add(done), total),
+                )?;
+                limited |= result.limited;
+                remaining -= result.hits.len();
+                for hit in result.hits {
+                    add(Kind::Ogg, hit.start, hit.size, hit.header, hit.footer, FragmentLayout::Ogg(hit.layout), hit.digest);
+                }
+            }
+            if options.flac_fragments && remaining > 0 {
+                let prior = size.saturating_mul(1 + u64::from(options.zip_fragments) + u64::from(options.ogg_fragments));
+                let result = flac::fragments::search(
+                    reader, range.clone(), allocation, alignment, remaining, &mut archive_budget,
+                    |done| tick(prior.saturating_add(done), total),
+                )?;
+                limited |= result.limited;
+                remaining -= result.hits.len();
+                for hit in result.hits {
+                    add(Kind::Flac, hit.start, hit.size, hit.header, hit.footer, FragmentLayout::Flac(hit.layout), hit.digest);
+                }
+            }
+            if options.png_fragments && remaining > 0 {
+                let prior = size.saturating_mul(1 + u64::from(options.zip_fragments)
+                    + u64::from(options.ogg_fragments) + u64::from(options.flac_fragments));
+                let result = png::fragments::search(
+                    reader, range.clone(), allocation, alignment, remaining, &mut archive_budget,
+                    |done| tick(prior.saturating_add(done), total),
+                )?;
+                limited |= result.limited;
+                for hit in result.hits {
+                    add(Kind::Png, hit.start, hit.size, png::MAGIC.to_vec(), png::IEND.to_vec(),
+                        FragmentLayout::Png(hit.layout), hit.digest);
+                }
+            }
+            tick(total, total)?;
+            let rebuilt = candidates.len() as u32;
+            for c in candidates {
+                publish(c);
+            }
+            count += rebuilt;
+            checkpoint.count = count;
+            checkpoint.sealed = true;
+            checkpoint.fragments_checked = true;
+            return Ok(crate::native_locale::current().format(
+                if (options.ogg_fragments || options.flac_fragments || options.png_fragments) && limited {
+                    "签名扫描找到 {count} 个候选，其中 {rebuilt} 个由碎片重组。碎片检查达到索引、匹配或结果上限，请缩小范围。"
+                } else if options.ogg_fragments || options.flac_fragments || options.png_fragments {
+                    "签名扫描完成，找到 {count} 个候选，其中 {rebuilt} 个由碎片重组。无法唯一匹配并校验的碎片已跳过。"
+                } else if limited {
+                    "签名扫描找到 {count} 个候选，含 {rebuilt} 个重组的 ZIP 容器。碎片检查达到索引、匹配或结果上限，请缩小范围。"
+                } else {
+                    "签名扫描完成，找到 {count} 个候选，含 {rebuilt} 个重组的 ZIP 容器。无法唯一匹配并校验的碎片已跳过。"
+                },
+                &[("count", &count.to_string()), ("rebuilt", &rebuilt.to_string())],
+            ));
+        }
+        tick(size, total)?;
         Ok(complete_message(count, rejected))
     })();
     // Interrupted probes still consume their resource budget, even when their
@@ -1042,6 +1292,7 @@ fn complete_message(count: u32, rejected: usize) -> String {
     )
 }
 
+#[derive(Debug)]
 enum ProbeError {
     Invalid,
     Failed(String),
@@ -1511,6 +1762,7 @@ fn probe<R: Read + Seek>(
     let result = (|| {
         let (length, header) = match kind {
             Kind::Gif => (p.gif()?, p.bytes::<13>(0)?.to_vec()),
+            Kind::Png => return Ok((png::inspect(&mut p, budget)?, png::MAGIC.to_vec(), png::IEND.to_vec())),
             Kind::Bmp => (p.bmp()?, p.bytes::<54>(0)?.to_vec()),
             Kind::Wav | Kind::Webp => (p.riff(kind)?, p.bytes::<12>(0)?.to_vec()),
             Kind::SevenZip => {
@@ -2201,6 +2453,12 @@ mod tests {
     }
     #[test]
     fn mixed_formats_export_exact_ranges_and_type_selection_is_respected() {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = ::png::Encoder::new(&mut png_bytes, 2, 2);
+            encoder.set_color(::png::ColorType::Grayscale);
+            encoder.write_header().unwrap().write_image_data(&[1, 2, 3, 4]).unwrap();
+        }
         let fixtures = [
             gif(),
             bmp(),
@@ -2208,7 +2466,7 @@ mod tests {
             webp(),
             b"%PDF-1.7\nx\n%%EOF".to_vec(),
             b"\xff\xd8\xff\xe0payload\xff\xd9".to_vec(),
-            b"\x89PNG\r\n\x1a\npayload\0\0\0\0IEND\xaeB`\x82".to_vec(),
+            png_bytes,
         ];
         let mut bytes = vec![7; 31];
         let mut starts = vec![];
@@ -2234,6 +2492,42 @@ mod tests {
         let subset = collect(&bytes, vec![Kind::Gif, Kind::Pdf]);
         assert_eq!(subset.len(), 2);
         assert!(subset[0].name.ends_with(".gif") && subset[1].name.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn legacy_paused_png_cursor_checks_structure_before_accepting_the_real_iend() {
+        let mut original = Vec::new();
+        {
+            let mut encoder = ::png::Encoder::new(&mut original, 1, 1);
+            encoder.set_color(::png::ColorType::Grayscale);
+            encoder.write_header().unwrap().write_image_data(&[42]).unwrap();
+        }
+        // A private ancillary chunk can contain an IEND-shaped byte sequence.
+        // The old cursor has already processed the header before the pause.
+        let mut source = original[..33].to_vec();
+        let mut data = vec![0x40; CHUNK + 57];
+        data[CHUNK..CHUNK + png::IEND.len()].copy_from_slice(png::IEND);
+        source.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let begin = source.len();
+        source.extend_from_slice(b"diSt");
+        source.extend_from_slice(&data);
+        source.extend_from_slice(&crc32fast::hash(&source[begin..]).to_be_bytes());
+        source.extend_from_slice(&original[33..]);
+        let size = source.len() as u64;
+        let options = Options { kinds: vec![Kind::Png], ..Options::default() };
+        let mut cursor = Checkpoint {
+            consumed: CHUNK as u64,
+            searched: CHUNK as u64 - 16,
+            carry: source[CHUNK - 16..CHUNK].to_vec(),
+            active: Some((Kind::Png, 0, png::MAGIC.to_vec())),
+            ..Checkpoint::default()
+        };
+        let mut found = Vec::new();
+        continue_scan(&mut Cursor::new(&source), size, &options, &mut cursor,
+            |_, _| Ok(()), |c| found.push(c)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].size, size);
+        assert!(matches!(found[0].locator, Locator::Signature { content_hash: Some(_), .. }));
     }
     #[test]
     fn structured_signatures_cross_every_header_boundary_without_duplicates() {

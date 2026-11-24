@@ -230,6 +230,8 @@ pub(crate) mod policy;
 pub mod quick;
 #[path = "partition_reallocation.rs"]
 pub(crate) mod reallocation;
+#[path = "usb_format.rs"]
+pub(crate) mod usb_format;
 
 pub fn status() -> Status {
     #[cfg(windows)]

@@ -1448,6 +1448,54 @@
   overflow-wrap: anywhere;
   line-height: 1.6;
 }
+.image-table-conversion-preview {
+  max-height: min(34vh, 24rem);
+  overflow: auto;
+  margin-bottom: 1rem;
+}
+.image-table-conversion-preview .partition-table th {
+  width: 33%;
+  white-space: normal;
+}
+.image-table-conversion-preview .partition-table th:first-child {
+  width: 20%;
+}
+.image-table-conversion-preview .partition-table th:nth-child(2) {
+  width: 14%;
+}
+.image-table-conversion-preview .partition-table th:last-child {
+  width: auto;
+}
+.image-table-conversion-preview .partition-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  padding-block: 8px;
+}
+.image-table-conversion-preview .partition-table tr {
+  cursor: default;
+}
+.image-gpt-copies {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  gap: 12px;
+}
+.image-gpt-copies section {
+  min-width: 0;
+}
+.image-gpt-copies code {
+  overflow-wrap: anywhere;
+}
+.image-gpt-entries {
+  max-height: min(38vh, 24rem);
+  overflow: auto;
+}
+.image-gpt-entries .partition-table td {
+  height: auto;
+  padding-block: 8px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .data-plan-warning {
   background: var(--surface);
   border-radius: 8px;
@@ -3136,6 +3184,94 @@ i {
 .partition-plan-details {
   margin: 20px 0;
 }
+.secure-boot-panel {
+  display: grid;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+.secure-boot-panel .partition-action-buttons {
+  align-items: center;
+}
+.secure-boot-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.secure-boot-flags dt,
+.secure-boot-entry dt {
+  color: var(--secondary);
+}
+.secure-boot-flags dd,
+.secure-boot-entry dd {
+  margin: 0;
+}
+.secure-boot-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.secure-boot-fields label {
+  display: grid;
+  flex: 1 1 220px;
+  gap: 6px;
+}
+.secure-boot-fields :is(select, input) {
+  width: 100%;
+  padding: 8px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.secure-boot-panel details {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.secure-boot-panel summary {
+  cursor: pointer;
+}
+.secure-boot-entry {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 3fr);
+  gap: 6px 12px;
+  margin: 10px 0 0 12px;
+}
+.loader-security-result {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+.loader-security-result .secure-boot-entry {
+  margin-bottom: 12px;
+}
+.loader-security-result .loader-dbx-match {
+  font-weight: 700;
+}
+.usb-format-form {
+  display: grid;
+  gap: 12px;
+}
+.usb-format-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.usb-device {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.usb-format-form .usb-device-selection {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
 .partition-ack {
   display: flex;
   align-items: center;
@@ -3702,6 +3838,59 @@ i {
 }
 .disk-clone-sizes input {
   min-width: 0;
+}
+.migration-sizes {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+}
+.migration-sizes > small {
+  grid-column: 1 / -1;
+}
+.migration-partition-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+.migration-selection {
+  display: grid;
+  gap: 0.45rem;
+}
+.migration-selection > label:first-of-type {
+  display: grid;
+  gap: 0.35rem;
+}
+.migration-selection > .migration-partition-option {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+.migration-preview-list {
+  padding-inline-start: 1.1rem;
+  margin: 0;
+}
+.migration-targets,
+.migration-targets > label {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.migration-target,
+.migration-target-preview {
+  min-width: 0;
+  border-block-start: 1px solid var(--border);
+  padding-block: 0.5rem;
+}
+.migration-target-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.migration-target details {
+  margin-block-start: 0.5rem;
+}
+.migration-target details > fieldset {
+  margin-block-start: 0.5rem;
 }
 .copy-mode-options {
   border: 0;
@@ -5159,4 +5348,32 @@ i {
 }
 .quick-progress-steps [data-state="stopped"] .quick-step-status {
   color: #bd3545;
+}
+.winpe-file-plan {
+  margin-block: 12px;
+}
+
+.winpe-file-plan summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.winpe-file-plan ul {
+  max-height: 12rem;
+  overflow: auto;
+  list-style: none;
+  margin-block: 8px 0;
+  padding-inline-start: 0;
+}
+
+.winpe-file-plan li {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 0.8125rem;
+}
+
+.winpe-file-plan code {
+  overflow-wrap: anywhere;
 }

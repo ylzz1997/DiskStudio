@@ -158,6 +158,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_locale_explains_existing_output_in_english() {
+        assert_eq!(
+            Locale::new(Language::En).text("目标已存在；不会覆盖已有文件。"),
+            "That file already exists. Choose a new filename."
+        );
+    }
+
+    #[test]
     fn native_locale_formats_user_data_only_once() {
         let locale = Locale::new(Language::En);
         let path = r"D:\资料\{path}.html";

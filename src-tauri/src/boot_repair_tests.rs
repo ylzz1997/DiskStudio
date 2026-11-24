@@ -1,9 +1,9 @@
 use super::*;
 use std::io::{self, Cursor};
 
-struct SectorImage {
-    bytes: Cursor<Vec<u8>>,
-    sector: u64,
+pub(super) struct SectorImage {
+    pub(super) bytes: Cursor<Vec<u8>>,
+    pub(super) sector: u64,
 }
 
 impl SectorImage {

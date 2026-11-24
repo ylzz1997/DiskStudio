@@ -44,7 +44,7 @@ try {
         Where-Object { $_.Name -notin @('win32_io.c', 'unix_io.c') } |
         Sort-Object Name | ForEach-Object FullName
     )
-    $formatter = @('attrdef.c', 'boot.c', 'mkntfs.c', 'sd.c', 'utils.c') |
+    $formatter = @('attrdef.c', 'boot.c', 'mkntfs.c', 'ntfsresize.c', 'sd.c', 'utils.c') |
         ForEach-Object { Join-Path 'ntfsprogs' $_ }
     $engine = Join-Path $build 'diskstudio-ntfs.exe'
     & $gcc -static -O2 -mno-ms-bitfields -DHAVE_CONFIG_H -D_FILE_OFFSET_BITS=64 -D_WIN32_WINNT=0x0601 -I. -Iinclude/ntfs-3g `

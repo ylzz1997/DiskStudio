@@ -59,57 +59,117 @@ const fn ogg_crc_table() -> [u32; 256] {
 
 const OGG_CRC: [u32; 256] = ogg_crc_table();
 
+#[derive(Clone, Copy)]
+pub(super) struct OggPage {
+    pub length: u64,
+    pub serial: u32,
+    pub sequence: u32,
+    pub first: bool,
+    pub last: bool,
+    continued: bool,
+    continues: bool,
+}
+
+pub(super) fn ogg_page<R, T>(
+    p: &mut Probe<'_, R, T>,
+    budget: &mut Budget,
+    offset: u64,
+    body: &mut Vec<u8>,
+) -> PResult<OggPage>
+where
+    R: Read + Seek,
+    T: FnMut() -> Result<(), String>,
+{
+    let mut header = p.bytes::<27>(offset)?;
+    budget.charge(27).map_err(ProbeError::Failed)?;
+    let flags = header[5];
+    require(header.starts_with(b"OggS\0") && flags & !7 == 0)?;
+    let first = flags & 2 != 0;
+    let last = flags & 4 != 0;
+    let continued = flags & 1 != 0;
+    let segments = usize::from(header[26]);
+    require(segments != 0 || last && !continued && !first)?;
+    let mut lacing = [0; 255];
+    p.read_at(offset + 27, &mut lacing[..segments])?;
+    let bytes: usize = lacing[..segments].iter().map(|&n| usize::from(n)).sum();
+    require(!first || bytes != 0)?;
+    let length = (27 + segments + bytes) as u64;
+    p.bounded(offset + length)?;
+    budget.charge(length - 27).map_err(ProbeError::Failed)?;
+    body.resize(bytes, 0);
+    p.read_at(offset + (27 + segments) as u64, body)?;
+    let checksum = le32(&header, 22);
+    header[22..26].fill(0);
+    let calculated = header
+        .iter()
+        .chain(&lacing[..segments])
+        .chain(body.iter())
+        .fold(0u32, |crc, &byte| {
+            (crc << 8) ^ OGG_CRC[((crc >> 24) as u8 ^ byte) as usize]
+        });
+    let continues = segments != 0 && lacing[segments - 1] == 255;
+    require(calculated == checksum && (!last || !continues))?;
+    Ok(OggPage {
+        length,
+        serial: le32(&header, 14),
+        sequence: le32(&header, 18),
+        first,
+        last,
+        continued,
+        continues,
+    })
+}
+
+pub(super) struct OggOrder {
+    streams: BTreeMap<u32, PageStream>,
+    beginning: bool,
+}
+impl Default for OggOrder {
+    fn default() -> Self {
+        Self {
+            streams: BTreeMap::new(),
+            beginning: true,
+        }
+    }
+}
+impl OggOrder {
+    pub fn push(&mut self, page: OggPage) -> PResult<bool> {
+        if page.first {
+            require(
+                self.beginning
+                    && self.streams.len() < MAX_TRACKS
+                    && !self.streams.contains_key(&page.serial)
+                    && page.sequence == 0
+                    && !page.continued,
+            )?;
+            self.streams.insert(page.serial, PageStream::default());
+        } else {
+            self.beginning = false;
+        }
+        let state = self
+            .streams
+            .get_mut(&page.serial)
+            .ok_or(ProbeError::Invalid)?;
+        require(!state.ended && page.sequence == state.next && state.continuing == page.continued)?;
+        state.continuing = page.continues;
+        state.next = state.next.checked_add(1).ok_or(ProbeError::Invalid)?;
+        state.ended = page.last;
+        Ok(page.last && self.streams.values().all(|stream| stream.ended))
+    }
+}
+
 pub(super) fn ogg<R, T>(p: &mut Probe<'_, R, T>, budget: &mut Budget) -> PResult<u64>
 where
     R: Read + Seek,
     T: FnMut() -> Result<(), String>,
 {
-    let mut streams = BTreeMap::<u32, PageStream>::new();
-    let mut beginning = true;
+    let mut order = OggOrder::default();
     let mut offset = 0;
     let mut body = Vec::new();
     loop {
-        let mut header = p.bytes::<27>(offset)?;
-        let flags = header[5];
-        let bos = flags & 2 != 0;
-        let eos = flags & 4 != 0;
-        let continued = flags & 1 != 0;
-        require(header.starts_with(b"OggS\0") && flags & !7 == 0)?;
-        let serial = le32(&header, 14);
-        if bos {
-            require(beginning && streams.len() < MAX_TRACKS && !streams.contains_key(&serial))?;
-            streams.insert(serial, PageStream::default());
-        } else {
-            beginning = false;
-        }
-        let state = streams.get_mut(&serial).ok_or(ProbeError::Invalid)?;
-        require(!state.ended && le32(&header, 18) == state.next && state.continuing == continued)?;
-        let segments = usize::from(header[26]);
-        // A zero-segment EOS page is allowed only once the last packet ended.
-        require(segments != 0 || eos && !continued && !bos)?;
-        let mut lacing = [0; 255];
-        p.read_at(offset + 27, &mut lacing[..segments])?;
-        let bytes: usize = lacing[..segments].iter().map(|&n| usize::from(n)).sum();
-        require(!bos || bytes != 0)?;
-        let next = p.bounded(offset + (27 + segments + bytes) as u64)?;
-        budget.charge(next - offset).map_err(ProbeError::Failed)?;
-        body.resize(bytes, 0);
-        p.read_at(offset + (27 + segments) as u64, &mut body)?;
-        let checksum = le32(&header, 22);
-        header[22..26].fill(0);
-        let calculated = header
-            .iter()
-            .chain(&lacing[..segments])
-            .chain(&body)
-            .fold(0u32, |crc, &byte| {
-                (crc << 8) ^ OGG_CRC[((crc >> 24) as u8 ^ byte) as usize]
-            });
-        state.continuing = segments != 0 && lacing[segments - 1] == 255;
-        require(calculated == checksum && (!eos || !state.continuing))?;
-        state.next = state.next.checked_add(1).ok_or(ProbeError::Invalid)?;
-        state.ended = eos;
-        offset = next;
-        if eos && streams.values().all(|stream| stream.ended) {
+        let page = ogg_page(p, budget, offset, &mut body)?;
+        offset += page.length;
+        if order.push(page)? {
             return Ok(offset);
         }
     }

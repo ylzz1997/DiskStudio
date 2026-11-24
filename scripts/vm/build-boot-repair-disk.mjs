@@ -8,10 +8,22 @@ import { checkQcowHeader, root, safePath } from './lab.mjs';
 
 const sector = 4096;
 const capacity = 16 * 1024 ** 3;
-const seed = safePath(path.join(root, 'payload/Boot-Repair-4096.img'));
-const destination = safePath(path.join(root, 'windows/test-b-boot-repair-4kn.qcow2'), root, false);
+const flags = process.argv.slice(2);
+const profiles = {
+  '--boot-repair': ['boot-repair', 'Boot-Repair-4096.img'],
+  '--boot-files': ['boot-files', 'Boot-Files-4096.img'],
+  '--boot-store': ['boot-store', 'Boot-Store-4096.img'],
+  '--boot-dirty': ['boot-dirty', 'Boot-Dirty-4096.img'],
+  '--boot-damaged': ['boot-damaged', 'Boot-Damaged-4096.img'],
+};
+if (flags.length > 1 || (flags.length === 1 && !Object.hasOwn(profiles, flags[0]))) {
+  throw new Error('Expected a fixed boot repair fixture option or no options');
+}
+const [fixture, seedName] = profiles[flags[0] ?? '--boot-repair'];
+const seed = safePath(path.join(root, 'payload', seedName));
+const destination = safePath(path.join(root, `windows/test-b-${fixture}-4kn.qcow2`), root, false);
 if (fs.existsSync(destination)) throw new Error('The dedicated Test B already exists');
-const temp = fs.mkdtempSync(safePath(path.join(root, 'boot-repair-seed-'), root, false));
+const temp = fs.mkdtempSync(safePath(path.join(root, `${fixture}-seed-`), root, false));
 const staged = path.join(temp, 'test-b.qcow2');
 const bytes = fs.readFileSync(seed);
 const sourceLast = bytes.length / sector - 1;

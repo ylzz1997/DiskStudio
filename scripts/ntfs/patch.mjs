@@ -16,6 +16,21 @@ async function edit(name, changes) {
   await writeFile(filename, text);
 }
 
+await edit('ntfsprogs/ntfsresize.c', [
+  ['#include "utils.h"', '#include "utils.h"\n#undef vfprintf'],
+  ['int main(int argc, char **argv)', 'int diskstudio_ntfsresize(int argc, char **argv)'],
+  ['if (ntfs_check_if_mounted(opt.volume, &mntflag)) {', `mntflag = 0;
+	if (strcmp(opt.volume, "diskstudio-volume")) {`],
+  [`if (vol->flags & VOLUME_IS_DIRTY)
+		if (opt.force-- <= 0)
+			err_exit`, `if (vol->flags & VOLUME_IS_DIRTY)
+		err_exit`],
+  [/	\/\* Redirect stderr to stdout[^\n]*\*\/\n[\s\S]*?	fflush\(stderr\);\n\n#ifdef DEBUG/, '#ifdef DEBUG'],
+  ['ntfs_log_handler_outerr', 'ntfs_log_handler_stderr'],
+  [/\bstdout\b/g, 'stderr'],
+  [/\bprintf\(/g, 'fprintf(stderr, '],
+]);
+
 await edit('libntfs-3g/acls.c', [['#include <pwd.h>\n#include <grp.h>\n', '']]);
 await edit('libntfs-3g/security.c', [['#include <pwd.h>\n#include <grp.h>\n', '']]);
 await edit('libntfs-3g/ioctl.c', [['#include <syslog.h>\n', '']]);

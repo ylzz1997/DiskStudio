@@ -18,6 +18,9 @@ use uuid::Uuid;
 const EFI: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
 const BASIC: Uuid = Uuid::from_u128(0xebd0a0a2_b9e5_4433_87c0_68b6b72699c7);
 
+#[path = "boot_file_rebuild.rs"]
+pub(crate) mod files;
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Change {
@@ -149,6 +152,71 @@ fn read_block(f: &mut (impl Read + Seek), range: Range) -> Result<Vec<u8>, Strin
     Ok(data)
 }
 
+fn repair_extents(
+    source: &mut impl Source,
+    geometry: Geometry,
+    expected_ranges: &[Span],
+    boot_partition: Uuid,
+    windows_partition: Uuid,
+) -> Result<(GptIdentity, Extent, Extent), String> {
+    if !matches!(geometry.sector, 512 | 4096)
+        || geometry.physical < geometry.sector
+        || boot_partition == windows_partition
+    {
+        return Err(
+            "Repair requires separate EFI and Windows partitions with checked sector geometry"
+                .into(),
+        );
+    }
+    let layout = gpt(source, geometry)?;
+    let mut ordered = layout
+        .partitions
+        .iter()
+        .map(|p| (p.range.start, p.range.end))
+        .collect::<Vec<_>>();
+    ordered.sort_unstable();
+    if ordered.len() != expected_ranges.len()
+        || !ordered
+            .iter()
+            .zip(expected_ranges)
+            .all(|(&(start, end), span)| start == span.start && end == span.end)
+    {
+        return Err("EFI repair layout does not match the verified native partitions".into());
+    }
+    let extent = |id: Uuid, kind: Uuid| -> Result<Extent, String> {
+        let part = layout
+            .partitions
+            .iter()
+            .find(|part| part.guid == id.to_bytes_le() && eligible(part, kind))
+            .ok_or("The selected GPT partition is absent or protected")?;
+        Ok(Extent {
+            start: part.range.start,
+            size: part.range.end - part.range.start,
+        })
+    };
+    let boot = extent(boot_partition, EFI)?;
+    let windows = extent(windows_partition, BASIC)?;
+    Ok((layout, boot, windows))
+}
+
+fn witness_layout(digest: &mut Sha256, layout: &GptIdentity) {
+    digest.update(layout.disk_guid);
+    for part in &layout.partitions {
+        digest.update(part.guid);
+        digest.update(part.kind);
+        digest.update(part.attributes.to_le_bytes());
+        digest.update(part.range.start.to_le_bytes());
+        digest.update(part.range.end.to_le_bytes());
+    }
+}
+
+fn witness_block(digest: &mut Sha256, block: &Block) {
+    digest.update(block.range.offset.to_le_bytes());
+    digest.update((block.before.len() as u64).to_le_bytes());
+    digest.update(&block.before);
+    digest.update(&block.after);
+}
+
 fn changed_blocks(
     source: &mut impl Source,
     geometry: Geometry,
@@ -214,43 +282,13 @@ pub(crate) fn plan(
     expected_ranges: &[Span],
     change: &Change,
 ) -> Result<Plan, String> {
-    if !matches!(geometry.sector, 512 | 4096)
-        || geometry.physical < geometry.sector
-        || change.boot_partition == change.windows_partition
-    {
-        return Err(
-            "Repair requires separate EFI and Windows partitions with checked sector geometry"
-                .into(),
-        );
-    }
-    let layout = gpt(&mut source, geometry)?;
-    let mut ordered = layout
-        .partitions
-        .iter()
-        .map(|p| (p.range.start, p.range.end))
-        .collect::<Vec<_>>();
-    ordered.sort_unstable();
-    if ordered.len() != expected_ranges.len()
-        || !ordered
-            .iter()
-            .zip(expected_ranges)
-            .all(|(&(start, end), span)| start == span.start && end == span.end)
-    {
-        return Err("EFI repair layout does not match the verified native partitions".into());
-    }
-    let extent = |id: Uuid, kind: Uuid| -> Result<Extent, String> {
-        let part = layout
-            .partitions
-            .iter()
-            .find(|part| part.guid == id.to_bytes_le() && eligible(part, kind))
-            .ok_or("The selected GPT partition is absent or protected")?;
-        Ok(Extent {
-            start: part.range.start,
-            size: part.range.end - part.range.start,
-        })
-    };
-    let boot = extent(change.boot_partition, EFI)?;
-    let windows = extent(change.windows_partition, BASIC)?;
+    let (layout, boot, windows) = repair_extents(
+        &mut source,
+        geometry,
+        expected_ranges,
+        change.boot_partition,
+        change.windows_partition,
+    )?;
     let (ownership, mapped) = {
         let mut view = filesystem(&mut source, geometry, boot)?;
         let ownership = fat_recovery::resize::check_boot_fat32(&mut view, geometry.sector)?;
@@ -318,14 +356,7 @@ pub(crate) fn plan(
     let after_sha256 = sector_edit::hash(&corrected.bytes);
     let blocks = changed_blocks(&mut source, geometry, boot, &mapped, &corrected.bytes)?;
     let mut witness = Sha256::new();
-    witness.update(layout.disk_guid);
-    for part in &layout.partitions {
-        witness.update(part.guid);
-        witness.update(part.kind);
-        witness.update(part.attributes.to_le_bytes());
-        witness.update(part.range.start.to_le_bytes());
-        witness.update(part.range.end.to_le_bytes());
-    }
+    witness_layout(&mut witness, &layout);
     witness.update(ownership);
     witness.update(before_sha256.as_bytes());
     witness.update(after_sha256.as_bytes());
@@ -337,10 +368,7 @@ pub(crate) fn plan(
             .as_bytes(),
     );
     for block in &blocks {
-        witness.update(block.range.offset.to_le_bytes());
-        witness.update((block.before.len() as u64).to_le_bytes());
-        witness.update(&block.before);
-        witness.update(&block.after);
+        witness_block(&mut witness, block);
     }
     Ok(Plan {
         summary: Summary {

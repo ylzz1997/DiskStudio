@@ -16,6 +16,7 @@ use std::{
 #[path = "ntfs_clone_target.rs"]
 mod target;
 use target::Target;
+pub(crate) use target::PAGE as TARGET_PAGE;
 
 const TOOL: &str = "diskstudio-ntfs.exe";
 const ASSETS: [(&str, &[u8]); 1] = [(TOOL, include_bytes!("../ntfs-engine/diskstudio-ntfs.exe"))];
@@ -255,7 +256,7 @@ impl Plan {
         mut progress: impl FnMut(&str, u64, u64) -> Result<(), String>,
     ) -> Result<String, String> {
         let target = Target::new(output, self.range.size, sync);
-        let mut pipe = Pipe::spawn(engine, target, cancel)?;
+        let mut pipe = Pipe::spawn(engine, target, cancel, true)?;
         let result = (|| {
             let mut header = Vec::from(*b"DSN6");
             header.extend_from_slice(&(self.range.sector as u32).to_le_bytes());
@@ -444,10 +445,11 @@ struct Pipe<'a, O> {
     target: Target<O>,
     cancel: &'a AtomicBool,
     buffer: Vec<u8>,
+    writable: bool,
 }
 
 impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
-    fn spawn(engine: &Engine, target: Target<O>, cancel: &'a AtomicBool) -> Result<Self, String> {
+    fn spawn(engine: &Engine, target: Target<O>, cancel: &'a AtomicBool, writable: bool) -> Result<Self, String> {
         check(cancel)?;
         let mut child = ChildGuard(
             engine
@@ -472,6 +474,7 @@ impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
             target,
             cancel,
             buffer: vec![0; LIMIT],
+            writable,
         })
     }
 
@@ -532,7 +535,7 @@ impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
                     self.stdin.write_all(&self.buffer[..count]).map_err(err)?;
                     self.stdin.flush().map_err(err)?;
                 }
-                (2, _, 1..=LIMIT) => {
+                (2, _, 1..=LIMIT) if self.writable => {
                     self.stdout
                         .read_exact(&mut self.buffer[..count])
                         .map_err(err)?;
@@ -541,7 +544,9 @@ impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
                     self.answer(&[0])?;
                 }
                 (3, 0, 0) => {
-                    self.target.flush()?;
+                    if self.writable {
+                        self.target.flush()?;
+                    }
                     self.answer(&[0])?;
                 }
                 (4, 0, 1..=LIMIT) if packet.is_some_and(|bytes| bytes.len() == count) => {
@@ -558,6 +563,10 @@ impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
         result: Result<(), String>,
         progress: impl FnMut(&str, u64) -> Result<(), String>,
     ) -> Result<String, String> {
+        self.finish_engine(result)?.finish(progress)
+    }
+
+    fn finish_engine(self, result: Result<(), String>) -> Result<Target<O>, String> {
         let Self {
             mut child,
             stdin,
@@ -580,7 +589,46 @@ impl<'a, O: Read + Write + Seek> Pipe<'a, O> {
                 extfs::tail(&logs)
             ));
         }
-        target.finish(progress)
+        Ok(target)
+    }
+}
+
+/// The device presents the larger of the old and new extents. Reads in growth
+/// space are zero until written; the caller controls where discarded shrink
+/// data is staged. The embedded tool receives geometry and relative offsets.
+pub(crate) fn resize_prepared_volume<R: Read + Write + Seek>(
+    engine: &Engine,
+    device: R,
+    original: Range,
+    resized: Range,
+    cancel: &AtomicBool,
+    sync: fn(&mut R) -> io::Result<()>,
+    dry_run: bool,
+) -> Result<BTreeMap<u64, [u8; 32]>, String> {
+    let size = original.size.max(resized.size);
+    let sector = resized.sector;
+    if !matches!(sector, 512 | 4096)
+        || original.sector != sector
+        || original.offset != resized.offset
+        || original.size == resized.size
+        || [original.size, resized.size].iter().any(|&n| n < 16 * 1024 * 1024 || n % sector != 0)
+        || size > 1 << 43
+    {
+        return Err("NTFS 调容范围或逻辑扇区大小无效。".into());
+    }
+    let target = Target::prefilled(device, size, sync);
+    let mut pipe = Pipe::spawn(engine, target, cancel, !dry_run)?;
+    let mut header = [0; 24];
+    header[..4].copy_from_slice(if dry_run { b"DSRP" } else { b"DSRW" });
+    header[4..8].copy_from_slice(&(sector as u32).to_le_bytes());
+    header[8..16].copy_from_slice(&size.to_le_bytes());
+    header[16..].copy_from_slice(&resized.size.to_le_bytes());
+    let result = pipe.answer(&header).and_then(|()| pipe.request(None));
+    let target = pipe.finish_engine(result)?;
+    if dry_run {
+        Ok(BTreeMap::new())
+    } else {
+        target.verify_changes(|| check(cancel))
     }
 }
 

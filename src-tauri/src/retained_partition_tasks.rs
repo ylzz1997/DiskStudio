@@ -196,6 +196,25 @@ impl Search {
     }
 }
 
+#[cfg(windows)]
+pub(super) fn selected_image(
+    image: &str,
+    search_id: &str,
+    ids: &[String],
+) -> Result<Vec<(surface_scan::Range, lost_partitions::Candidate)>, String> {
+    crate::lost_partition_tasks::checked_ids(ids)?;
+    let s = state();
+    let search = s.retained_partition_search.as_ref().filter(|search| {
+        search.for_image(image) && search.id == search_id && matches!(search.state, "completed" | "canceled")
+    }).ok_or("候选已失效，请重新搜索。")?;
+    ids.iter().map(|id| {
+        let candidate = search.candidates.iter().find(|c| c.id == *id && c.can_restore)
+            .ok_or("该候选仅允许浏览和提取，无法登记分区记录。")?;
+        let range = lost_search_scope::containing(&search.ranges, candidate.offset, candidate.size)?;
+        Ok((range, candidate.clone()))
+    }).collect()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SearchRequest {

@@ -52,7 +52,7 @@ pub struct RecoverRequest {
     pub id: String,
     pub candidates: Vec<String>,
 }
-fn checked_ids(ids: &[String]) -> Result<(), String> {
+pub(crate) fn checked_ids(ids: &[String]) -> Result<(), String> {
     let unique: HashSet<_> = ids.iter().collect();
     if ids.is_empty() || ids.len() > 128 || unique.len() != ids.len() {
         return Err("请选择 1–128 个不重复的已找到候选。".into());

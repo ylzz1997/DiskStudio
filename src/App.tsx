@@ -53,6 +53,8 @@ import { HealthDialog } from "./HealthDialog";
 import { TableBackupDialog } from "./TableBackupDialog";
 import { TableInspectDialog } from "./TableInspectDialog";
 import { BootInspectionDialog } from "./BootInspectionDialog";
+import { FirmwareBootDialog, type WinPeTaskForm } from "./FirmwareBootDialog";
+import { UsbFormatDialog } from "./UsbFormatDialog";
 import { LostPartitionDialog } from "./LostPartitionDialog";
 import { DeviceStateDialog } from "./DeviceStateDialog";
 import { PartitionMoveDialog } from "./PartitionMoveDialog";
@@ -75,6 +77,9 @@ type Modal =
   | "tableBackup"
   | "tableInspect"
   | "bootInspect"
+  | "firmwareBoot"
+  | "winPeTask"
+  | "usbFormat"
   | "lostPartitions"
   | "deviceState"
   | "resumePartitionMove"
@@ -116,6 +121,7 @@ function Workspace() {
   const [partitionId, setPartitionId] = useState("");
   const [browsingPartition, setBrowsingPartition] = useState("");
   const [modal, setModal] = useState<Modal>(null);
+  const [winPeTask, setWinPeTask] = useState<WinPeTaskForm>();
   const [tableReport, setTableReport] = useState<TableReport | null>(null);
   const [partitionOutcome, setPartitionOutcome] =
     useState<PartitionOutcome | null>(null);
@@ -440,6 +446,23 @@ function Workspace() {
                   {t("Windows 启动检查")}
                 </button>
                 <button
+                  disabled={!native}
+                  onClick={() => {
+                    setMenu(false);
+                    setModal("firmwareBoot");
+                  }}
+                >
+                  <Monitor size={16} />
+                  {t("UEFI 固件启动项")}
+                </button>
+                <button disabled={!native || loading} onClick={() => {
+                  setMenu(false);
+                  setModal("usbFormat");
+                }}>
+                  <Database size={16} />
+                  {t("批量格式化 USB 磁盘")}
+                </button>
+                <button
                   disabled={!physical || !disk?.hardware?.identity || loading}
                   onClick={() => {
                     setMenu(false);
@@ -669,6 +692,17 @@ function Workspace() {
           onRefresh={refreshLocal}
         />
       )}
+      {(modal === "firmwareBoot" || modal === "winPeTask") && (
+        <FirmwareBootDialog
+          disks={disks}
+          onClose={() => setModal(null)}
+          onBusy={operationBusy}
+          initialTask={modal === "winPeTask" ? winPeTask : undefined}
+        />
+      )}
+      {modal === "usbFormat" && (
+        <UsbFormatDialog onClose={() => setModal(null)} onBusy={operationBusy} onRefresh={refreshLocal} />
+      )}
       {modal === "bootInspect" && disk?.hardware?.identity && disk.hardware.layoutKey && (
         <BootInspectionDialog
           request={{ kind: "disk", source: { target: disk.hardware.identity, layoutKey: disk.hardware.layoutKey, partition: null } }}
@@ -779,6 +813,10 @@ function Workspace() {
                 disks={disks}
                 onBusy={operationBusy}
                 onRefresh={refreshLocal}
+                onWinPeTask={(task) => {
+                  setWinPeTask(task);
+                  setModal("winPeTask");
+                }}
               />
             ) : !disk ? (
               <>

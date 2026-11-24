@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import type {
   BootDevice,
   BootInspectionSource,
@@ -7,8 +6,8 @@ import type {
 } from "./BootInspectionDialog";
 import { FormError, Hint } from "./components";
 import { useLocale } from "./i18n/LanguageProvider";
-import { errorText } from "./partitionOutcome";
 import { formatSize } from "./types";
+import { useBootRepair } from "./useBootRepair";
 
 type Target = { id: string; name: string; offset: number; size: number };
 type Summary = {
@@ -24,8 +23,6 @@ type Summary = {
   loaderSha256: string;
   blocks: number;
 };
-type Preview = { token: string; summary: Summary };
-type Result = { backupPath: string; summary: Summary };
 type Store = NonNullable<BootVolume["store"]>;
 
 function supportedStores(volumes: BootVolume[]) {
@@ -131,11 +128,15 @@ export function BootRepairForm({
   volumes,
   partitions,
   onBusy,
+  onChanged,
+  reportStale,
 }: {
   source: Extract<BootInspectionSource, { kind: "disk" }>["source"];
   volumes: BootVolume[];
   partitions: Target[];
-  onBusy: (busy: boolean) => void;
+  onBusy: (busy: boolean) => boolean;
+  onChanged: () => void;
+  reportStale: boolean;
 }) {
   const { t, language, catalogText } = useLocale();
   const stores = supportedStores(volumes);
@@ -143,19 +144,8 @@ export function BootRepairForm({
   const [entryId, setEntryId] = useState("");
   const [windowsPartition, setWindowsPartition] = useState("");
   const [makeDefault, setMakeDefault] = useState(false);
-  const [preview, setPreview] = useState<Preview | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
-  const [phase, setPhase] = useState<"preview" | "apply" | null>(null);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const inFlight = useRef(false);
-  const token = preview?.token;
-  useEffect(() => {
-    if (!token) return;
-    return () => {
-      void invoke("data_discard_boot_repair", { token }).catch(() => undefined);
-    };
-  }, [token]);
+  const { preview, result, phase, message, error, prepare, apply, discard } =
+    useBootRepair<Summary>(onBusy, t("已取消 BCD 修复。"), onChanged);
 
   const selected = stores.find((store) => store.id === bootPartition);
   if (!selected) return null;
@@ -170,33 +160,21 @@ export function BootRepairForm({
       ({ field }) => field === "default",
     );
 
-  async function run(kind: "preview" | "apply", action: () => Promise<void>) {
-    if (inFlight.current) return;
-    inFlight.current = true;
-    setPhase(kind);
-    setMessage("");
-    setError("");
-    onBusy(true);
-    try {
-      await action();
-    } catch (error) {
-      setError(errorText(error));
-    } finally {
-      inFlight.current = false;
-      setPhase(null);
-      onBusy(false);
-    }
-  }
-
   return (
-    <details className="boot-repair">
+    <details
+      className="boot-repair"
+      name="diskstudio-boot-repair"
+      onToggle={(event) => {
+        if (!event.currentTarget.open && !phase) discard();
+      }}
+    >
       <summary>{t("修复 BCD 引用")}</summary>
       <Hint>
         {t("仅修复脱机 GPT 磁盘上现有的 Windows UEFI 启动项。目标盘保持脱机。")}
       </Hint>
       <fieldset
         className="boot-repair-fields"
-        disabled={phase !== null || preview !== null || result !== null}
+        disabled={reportStale || phase !== null || preview !== null || result !== null}
       >
         <label>
           {t("EFI 系统分区")}
@@ -289,27 +267,14 @@ export function BootRepairForm({
               <button
                 className="button"
                 disabled={phase !== null}
-                onClick={() => setPreview(null)}
+                onClick={discard}
               >
                 {t("取消预览")}
               </button>
               <button
                 className="button primary"
-                disabled={phase !== null}
-                onClick={() =>
-                  void run("apply", async () => {
-                    try {
-                      const report = await invoke<Result | null>(
-                        "data_apply_boot_repair",
-                        { token: preview.token },
-                      );
-                      if (report) setResult(report);
-                      else setMessage(t("已取消 BCD 修复。"));
-                    } finally {
-                      setPreview(null);
-                    }
-                  })
-                }
+                disabled={reportStale || phase !== null}
+                onClick={() => void apply()}
               >
                 {phase === "apply" ? t("正在备份并修复 BCD…") : t("备份并修复")}
               </button>
@@ -317,23 +282,17 @@ export function BootRepairForm({
           ) : (
             <button
               className="button"
-              disabled={!windowsPartition || phase !== null}
+              disabled={reportStale || !windowsPartition || phase !== null}
               onClick={() =>
-                void run("preview", async () => {
-                  setPreview(
-                    await invoke<Preview>("data_preview_boot_repair", {
-                      request: {
-                        source,
-                        change: {
-                          bootPartition: selected.id,
-                          storeSha256: selected.sha256,
-                          entry: entry.id,
-                          windowsPartition,
-                          makeDefault: defaultAvailable && makeDefault,
-                        },
-                      },
-                    }),
-                  );
+                void prepare("data_preview_boot_repair", {
+                  source,
+                  change: {
+                    bootPartition: selected.id,
+                    storeSha256: selected.sha256,
+                    entry: entry.id,
+                    windowsPartition,
+                    makeDefault: defaultAvailable && makeDefault,
+                  },
                 })
               }
             >

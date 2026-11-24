@@ -462,6 +462,280 @@ fn zip_independent_dotnet_archives_validate_crc_and_export_identical_bytes() {
         assert_eq!(output, bytes);
     }
 }
+
+fn relocate(bytes: &[u8], positions: &[usize], image: &mut [u8]) -> Vec<Range<usize>> {
+    let eocd = bytes.windows(4).rposition(|b| b == b"PK\x05\x06").unwrap() as u64;
+    let mut reader = Cursor::new(bytes);
+    let mut budget = Budget::default();
+    let mut p = Probe {
+        reader: &mut reader,
+        range: 0..bytes.len() as u64,
+        budget: &mut budget,
+        tick: || Ok(()),
+    };
+    let d = directory(&mut p, eocd, false).ok().unwrap();
+    let edges: Vec<_> = d
+        .entries
+        .iter()
+        .map(|e| e.offset as usize)
+        .chain([d.cd_offset as usize, bytes.len()])
+        .collect();
+    assert_eq!(positions.len() + 1, edges.len());
+    edges
+        .windows(2)
+        .zip(positions)
+        .map(|(edge, &at)| {
+            let target = at..at + edge[1] - edge[0];
+            image[target.clone()].copy_from_slice(&bytes[edge[0]..edge[1]]);
+            target
+        })
+        .collect()
+}
+
+fn fragment_scan(image: &[u8], options: &Options) -> Vec<Candidate> {
+    let mut files = Vec::new();
+    signature_scan::scan(
+        &mut Cursor::new(image),
+        image.len() as u64,
+        options,
+        |_, _| Ok(()),
+        |c| files.push(c),
+    )
+    .unwrap();
+    files
+}
+
+#[test]
+fn fragmented_zip_roundtrips_exact_bytes_in_physical_and_directory_disorder() {
+    let test_archives = [
+        include_bytes!("../../tests/fixtures/zip-dotnet-NoCompression.zip").to_vec(),
+        include_bytes!("../../tests/fixtures/zip-dotnet-Optimal.zip").to_vec(),
+        build(
+            &[("first", b"Hello"), ("second", b"World")],
+            true,
+            2,
+            true,
+            true,
+            b"photo archive",
+        ),
+    ];
+    let options = Options {
+        kinds: vec![Kind::Zip],
+        zip_fragments: true,
+        ..Options::default()
+    };
+    for (i, original) in test_archives.into_iter().enumerate() {
+        let mut image = vec![0x6e; 4 << 20];
+        // Split the first magic across scan buffers and place the directory
+        // before the first logical record.
+        let positions = if i < 2 {
+            vec![(1 << 20) - 2, 3 << 20, 2 << 20, 4096]
+        } else {
+            vec![(1 << 20) - 2, 3 << 20, 4096]
+        };
+        let placed = relocate(&original, &positions, &mut image);
+        assert!(scan(&image, vec![Kind::Zip]).is_empty());
+        let candidates = fragment_scan(&image, &options);
+        assert_eq!(candidates.len(), 1);
+        let saved = signature_scan::StoredCandidate::from_candidate(&candidates[0]).unwrap();
+        assert!(saved.fragmented());
+        let stored = serde_json::to_vec(&saved).unwrap();
+        let restored: signature_scan::StoredCandidate = serde_json::from_slice(&stored).unwrap();
+        let range = 0..image.len() as u64;
+        assert!(restored
+            .candidate(0, 0..placed[1].end as u64 - 1, &options, None)
+            .is_err());
+        let ordinary = Options {
+            zip_fragments: false,
+            ..options.clone()
+        };
+        assert!(restored
+            .candidate(0, range.clone(), &ordinary, None)
+            .is_err());
+        let restored = restored.candidate(0, range, &options, None).unwrap();
+        for limit in [9, MAX_FILE] {
+            let mut out = vec![];
+            crate::recovery::extract(&mut Cursor::new(&image), &restored, &mut out, limit, |_| {
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(out, original[..original.len().min(limit as usize)]);
+        }
+        image[placed[1].end - 1] ^= 1;
+        let mut out = vec![];
+        assert!(crate::recovery::extract(
+            &mut Cursor::new(&image),
+            &restored,
+            &mut out,
+            5,
+            |_| Ok(())
+        )
+        .is_err());
+        assert!(out.is_empty());
+        assert!(fragment_scan(&image, &options).is_empty());
+    }
+}
+
+#[test]
+fn fragmented_zip_refuses_duplicate_members_and_does_not_repeat_contiguous_archives() {
+    let original = build(
+        &[("first", b"hello"), ("second", b"world")],
+        false,
+        0,
+        false,
+        false,
+        b"",
+    );
+    let mut image = vec![0; 16384];
+    let parts = relocate(&original, &[4096, 2051, 8192], &mut image);
+    let options = Options {
+        kinds: vec![Kind::Zip],
+        zip_fragments: true,
+        ..Options::default()
+    };
+    image.copy_within(parts[1].clone(), 12288);
+    assert!(fragment_scan(&image, &options).is_empty());
+    assert_eq!(
+        fragment_scan(
+            &image,
+            &Options {
+                length: Some(10240),
+                ..options.clone()
+            }
+        )
+        .len(),
+        1
+    );
+    let contiguous = fragment_scan(&original, &options);
+    assert_eq!(contiguous.len(), 1);
+    assert!(
+        !signature_scan::StoredCandidate::from_candidate(&contiguous[0])
+            .unwrap()
+            .fragmented()
+    );
+}
+
+#[test]
+fn fragmented_document_checks_every_free_extent_and_previews_word_contents() {
+    use crate::used_space::Builder;
+    let original = document_package(Kind::Docx, "word/document.xml", &[
+        ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Separated document</w:t></w:r></w:p></w:body></w:document>"#),
+    ]);
+    let size = 8 * 4096;
+    let mut image = vec![0u8; size];
+    relocate(&original, &[4096, 3 * 4096 + 5, 139, 6 * 4096], &mut image);
+    let make_plan = |allow_middle: bool| {
+        let mut builder = Builder::new(size as u64, 4096).unwrap();
+        builder.free(0, 8192).unwrap();
+        if allow_middle {
+            builder.free(3 * 4096, 4096).unwrap();
+        }
+        builder.free(6 * 4096, 4096).unwrap();
+        builder.finish().unwrap()
+    };
+    let complete = make_plan(true);
+    let incomplete = make_plan(false);
+    let options = Options {
+        kinds: vec![Kind::Docx],
+        zip_fragments: true,
+        free_only: true,
+        sector_aligned: true,
+        ..Options::default()
+    };
+    let run = |plan: &crate::used_space::Plan| {
+        let mut files = Vec::new();
+        signature_scan::continue_scan_scoped(
+            &mut Cursor::new(&image),
+            size as u64,
+            &options,
+            &mut Default::default(),
+            4096,
+            Some(plan),
+            |_, _| Ok(()),
+            |c| files.push(c),
+        )
+        .unwrap();
+        files
+    };
+    assert!(run(&incomplete).is_empty());
+    let files = run(&complete);
+    assert_eq!(files.len(), 1);
+    assert!(files[0].name.ends_with(".docx"));
+    signature_scan::verify_free_candidates(&complete, &files).unwrap();
+    let mut candidate = files[0].clone();
+    if let Locator::Signature {
+        allocation_digest, ..
+    } = &mut candidate.locator
+    {
+        *allocation_digest = Some(incomplete.digest.clone());
+    }
+    assert!(signature_scan::verify_free_candidates(&incomplete, [&candidate]).is_err());
+    let mut output = Vec::new();
+    crate::recovery::extract(
+        &mut Cursor::new(image),
+        &files[0],
+        &mut output,
+        MAX_FILE,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(output, original);
+    assert!(crate::office_preview::read(&output, Kind::Docx).is_some());
+}
+
+#[test]
+fn fragmented_pass_pause_preserves_contiguous_results_and_restarts_atomically() {
+    let contiguous = build(&[("plain", b"test")], false, 0, false, false, b"");
+    let original = build(
+        &[("first", b"hello"), ("second", b"world")],
+        false,
+        0,
+        false,
+        false,
+        b"",
+    );
+    let mut image = vec![0; 16384];
+    image[..contiguous.len()].copy_from_slice(&contiguous);
+    relocate(&original, &[4096, 2048, 8192], &mut image);
+    let options = Options {
+        kinds: vec![Kind::Zip],
+        zip_fragments: true,
+        ..Options::default()
+    };
+    let mut cursor = signature_scan::Checkpoint::default();
+    let size = image.len() as u64;
+    let mut files = Vec::new();
+    assert!(signature_scan::continue_scan(
+        &mut Cursor::new(&image),
+        size,
+        &options,
+        &mut cursor,
+        |done, total| if done == total {
+            Err("pause".into())
+        } else {
+            Ok(())
+        },
+        |c| files.push(c)
+    )
+    .is_err());
+    assert_eq!(files.len(), 1);
+    assert_eq!(cursor.work_done(&options), size);
+    assert!(!cursor.sealed);
+    let mut cursor = serde_json::from_slice(&serde_json::to_vec(&cursor).unwrap()).unwrap();
+    signature_scan::continue_scan(
+        &mut Cursor::new(&image),
+        size,
+        &options,
+        &mut cursor,
+        |_, _| Ok(()),
+        |c| files.push(c),
+    )
+    .unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[1].id, 1);
+    assert_eq!(cursor.work_done(&options), size * 2);
+    assert!(cursor.sealed);
+}
 #[test]
 fn zip_descriptors_zip64_reordered_directory_and_comment_are_supported() {
     for wide in [false, true] {

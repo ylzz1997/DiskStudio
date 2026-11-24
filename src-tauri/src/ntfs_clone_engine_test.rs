@@ -13,6 +13,259 @@ const SERIAL: u64 = 0x0939_44a2_1c2e_0203;
 
 #[test]
 #[ignore = "requires the separately built Windows NTFS formatter"]
+fn system_migration_preserves_windows_files_and_boot_references() {
+    use crate::{
+        boot_configuration, data_io,
+        fat_recovery::boot_files::rebuild::{self, BcdUpdate, Target},
+        partitions::policy::BASIC_DATA,
+        system_migration::{test_partition_numbers, Options, PartitionSelection, PartitionSize, Plan},
+        table_restore::{self, Entry},
+    };
+    use disk_core::{fat_format, MIB};
+    use regf::HiveBuilder;
+    use uuid::Uuid;
+
+    let engine = std::env::var("DISKSTUDIO_TEST_NTFS_ENGINE").unwrap();
+    let disk = Uuid::from_u128(0xa17f08349f2346289213b23099000001);
+    let boot = Uuid::from_u128(0xa17f08349f2346289213b23099000002);
+    let windows = Uuid::from_u128(0xa17f08349f2346289213b23099000003);
+    let mut template = HiveBuilder::new().unwrap();
+    let manager = r"Objects\{9dea862c-5cdd-4e70-acc1-f32b344d4795}";
+    let loader = r"Objects\{536fadc3-59a4-44e0-a98c-4b71129a42b5}";
+    for (object, kind) in [(manager, 0x10100002), (loader, 0x10200003)] {
+        let key = format!("{object}\\Description");
+        template.create_key(&key).unwrap();
+        template.add_value_dword(&key, Some("Type"), kind).unwrap();
+    }
+    for (object, element, value) in [
+        (manager, "12000002", r"\EFI\Microsoft\Boot\bootmgfw.efi"),
+        (loader, "12000002", r"\Windows\System32\winload.efi"),
+        (loader, "22000002", r"\Windows"),
+    ] {
+        let key = format!("{object}\\Elements\\{element}");
+        template.create_key(&key).unwrap();
+        template
+            .add_value_string(&key, Some("Element"), value)
+            .unwrap();
+    }
+    let (bcd, _) =
+        boot_configuration::rebuild::generate(template.build().unwrap(), disk, boot, windows)
+            .unwrap();
+    let mut system = HiveBuilder::new().unwrap();
+    system.create_key("Select").unwrap();
+    system
+        .add_value_dword("Select", Some("Default"), 1)
+        .unwrap();
+    let system = system.build().unwrap();
+    let mut pe = [0; 512];
+    pe[..2].copy_from_slice(b"MZ");
+    pe[60..64].copy_from_slice(&64u32.to_le_bytes());
+    pe[64..68].copy_from_slice(b"PE\0\0");
+    for (at, word) in [
+        (4, 0x8664u16),
+        (6, 1),
+        (20, 112),
+        (22, 2),
+        (24, 0x20b),
+        (92, 10),
+    ] {
+        pe[64 + at..66 + at].copy_from_slice(&word.to_le_bytes());
+    }
+    let mut stream_plan = 5u32.to_le_bytes().to_vec();
+    record(&mut stream_plan, 1, 0, 0, "Windows", 0);
+    record(&mut stream_plan, 1, 1, 0, "System32", 0);
+    record(&mut stream_plan, 1, 2, 0, "config", 0);
+    record(&mut stream_plan, 2, 2, 0, "winload.efi", 1);
+    stream(&mut stream_plan, "", &pe);
+    record(&mut stream_plan, 2, 3, 0, "SYSTEM", 1);
+    stream(&mut stream_plan, "", &system);
+
+    for sector in [512, 4096] {
+        let boot_size = if sector == 512 { 40 * MIB } else { 272 * MIB };
+        let windows_at = 2 * MIB + boot_size;
+        let partition_end = windows_at + SIZE as u64;
+        let source_size = partition_end + 4 * MIB;
+        let target_size = partition_end + 2 * MIB;
+        let entries = [
+            Entry {
+                slot: 1,
+                guid: boot.to_string(),
+                kind: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b".into(),
+                offset: MIB,
+                size: boot_size,
+                attributes: 0,
+                name: "EFI".encode_utf16().collect(),
+            },
+            Entry {
+                slot: 4,
+                guid: windows.to_string(),
+                kind: BASIC_DATA.into(),
+                offset: windows_at,
+                size: SIZE as u64,
+                attributes: 0,
+                name: "Windows".encode_utf16().collect(),
+            },
+        ];
+        let table =
+            table_restore::new_gpt(source_size, sector, "0".repeat(64), disk, &entries).unwrap();
+        let mut source = vec![0; source_size as usize];
+        for extent in table.extents {
+            let at = extent.offset as usize;
+            source[at..at + extent.bytes.len()].copy_from_slice(&extent.bytes);
+        }
+        {
+            let esp = &mut source[MIB as usize..(MIB + boot_size) as usize];
+            let mut view = Cursor::new(esp);
+            fat_format::Plan::new(
+                fat_format::FatType::Fat32,
+                boot_size,
+                sector as u32,
+                sector as u32,
+                "SYSTEM",
+                54841,
+                (MIB / sector) as u32,
+            )
+            .unwrap()
+            .format(&mut view, |_, _| Ok(()))
+            .unwrap();
+            let fixes = rebuild::plan(
+                &mut view,
+                sector,
+                &[(Target::Manager, &pe), (Target::Bcd, &bcd)],
+                BcdUpdate::Create,
+            )
+            .unwrap();
+            for (_, edits) in fixes.phases {
+                for edit in edits {
+                    let at = edit.offset as usize;
+                    view.get_mut()[at..at + edit.bytes.len()].copy_from_slice(&edit.bytes);
+                }
+            }
+        }
+        assert!(
+            serve(
+                &engine,
+                sector as u32,
+                &mut source[windows_at as usize..partition_end as usize],
+                &stream_plan,
+                false
+            )
+            .0
+        );
+        let initial = Sha256::digest(&source);
+        let mut reader = Cursor::new(source.as_slice());
+        let plan = Plan::prepare(&mut reader, source_size, target_size, sector, None).unwrap();
+        assert!(plan.adds_efi_fallback());
+        let mut target = Cursor::new(Vec::new());
+        let digest = data_io::copy_exact(
+            &mut plan.reader(&mut reader).unwrap(),
+            &mut target,
+            target_size,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(digest, format!("{:x}", Sha256::digest(target.get_ref())));
+        assert_eq!(initial, Sha256::digest(&source));
+        plan.verify_output(&mut target).unwrap();
+        assert_eq!(
+            &source[windows_at as usize..partition_end as usize],
+            &target.get_ref()[windows_at as usize..partition_end as usize]
+        );
+        assert!(Plan::prepare(&mut reader, source_size, partition_end, sector, None).is_err());
+        let tool = crate::ntfs_file_clone::Plan::engine().unwrap();
+        let cancel = AtomicBool::new(false);
+        for (start, capacity) in [
+            (windows_at, Some(20 * MIB)),
+            (windows_at, Some(32 * MIB)),
+            (windows_at + MIB, None),
+            (windows_at + 3 * MIB, Some(20 * MIB)),
+            (windows_at - MIB, Some(32 * MIB)),
+        ] {
+            let resized = capacity.unwrap_or(SIZE as u64);
+            let geometry = start + resized + 2 * MIB;
+            let plan = Plan::prepare_resized(
+                &mut reader, source_size, geometry, sector, None,
+                &[PartitionSize { partition: 4, bytes: capacity, start_bytes: Some(start) }],
+            ).unwrap();
+            let mut grown = Cursor::new(Vec::new());
+            data_io::copy_exact(&mut plan.reader(&mut reader).unwrap(), &mut grown, geometry, |_| Ok(())).unwrap();
+            let target = &mut grown.get_mut()[start as usize..(start + resized) as usize];
+            if capacity.is_some() {
+                let mut volume = target.to_vec();
+                if resized < SIZE as u64 {
+                    volume.extend_from_slice(&source[(windows_at + resized) as usize..partition_end as usize]);
+                }
+                let mut volume = Cursor::new(volume);
+                let from = crate::surface_scan::Range { offset: 0, size: SIZE as u64, sector };
+                let to = crate::surface_scan::Range { size: resized, ..from };
+                crate::ntfs_file_clone::resize_prepared_volume(&tool, &mut volume, from, to, &cancel, Write::flush, false).unwrap();
+                target.copy_from_slice(&volume.get_ref()[..resized as usize]);
+            }
+            if start != windows_at {
+                assert_eq!(target[28..32], ((start / sector) as u32).to_le_bytes());
+            }
+            plan.verify_output(&mut grown).unwrap();
+            assert_eq!(initial, Sha256::digest(&source));
+        }
+        assert!(Plan::prepare_resized(&mut reader, source_size, target_size, sector, None,
+            &[PartitionSize { partition: 4, bytes: Some(20 * MIB), start_bytes: Some(2 * MIB) }]).is_err());
+        if let Some(folder) = std::env::var_os("DISKSTUDIO_MIGRATION_FIXTURE_DIR") {
+            let folder = std::path::PathBuf::from(folder);
+            for (label, image) in [
+                ("source", source.as_slice()),
+                ("target", target.get_ref().as_slice()),
+            ] {
+                let file = folder.join(format!("{label}-{sector}.img"));
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(file)
+                    .unwrap()
+                    .write_all(image)
+                    .unwrap();
+            }
+        }
+        let mut entries = entries.to_vec();
+        let skipped = partition_end + 2 * MIB;
+        entries.push(Entry {
+            slot: 5,
+            guid: Uuid::from_u128(0x4453_5350).to_string(),
+            kind: BASIC_DATA.into(),
+            offset: skipped,
+            size: MIB,
+            attributes: 0,
+            name: "Unselected data".encode_utf16().collect(),
+        });
+        let table =
+            table_restore::new_gpt(source_size, sector, "0".repeat(64), disk, &entries).unwrap();
+        for extent in table.extents {
+            let at = extent.offset as usize;
+            source[at..at + extent.bytes.len()].copy_from_slice(&extent.bytes);
+        }
+        source[(MIB / 2) as usize] = 0x42;
+        source[skipped as usize..(skipped + MIB) as usize].fill(0xcd);
+        let options = Options { sizes: Vec::new(), selection: PartitionSelection::Selected { partitions: Vec::new() } };
+        let mut reader = Cursor::new(source.as_slice());
+        for geometry in [target_size, source_size] {
+            let plan = Plan::prepare_layout(&mut reader, source_size, geometry, sector, None, &options,
+                |layout| Ok(test_partition_numbers(layout))).unwrap();
+            let mut selected = Cursor::new(Vec::new());
+            data_io::copy_exact(&mut plan.reader(&mut reader).unwrap(), &mut selected, geometry, |_| Ok(())).unwrap();
+            plan.verify_output(&mut selected).unwrap();
+            let preview = serde_json::to_value(plan.preview()).unwrap();
+            assert_eq!(preview["partitions"], 2);
+            assert_eq!(preview["partitionSelection"]["skipped"][0]["partition"], 5);
+            assert_eq!(selected.get_ref()[(MIB / 2) as usize], 0);
+            if geometry == source_size {
+                assert!(selected.get_ref()[skipped as usize..(skipped + MIB) as usize].iter().all(|byte| *byte == 0));
+            }
+        }
+        println!("Verified {sector}-byte GPT Windows migration {source_size} to {target_size}, target SHA-256 {digest}");
+    }
+}
+
+#[test]
+#[ignore = "requires the separately built Windows NTFS formatter"]
 fn efs_clone_preserves_opaque_keys_and_last_ciphertext_sector() {
     use crate::{
         ntfs_streams,
@@ -396,6 +649,49 @@ fn bounded_format_and_readback() {
         );
         crate::ntfs_allocation::inspect(&mut input, &AtomicBool::new(false)).unwrap();
         assert!(fs.root_directory(&mut input).unwrap().is_directory());
+    }
+}
+
+#[test]
+#[ignore = "requires the embedded Windows NTFS engine"]
+fn end_boundary_resize_preserves_volume_identity_and_files() {
+    use crate::{
+        boot_inspection::ntfs_file,
+        ntfs_file_clone::{resize_prepared_volume, Plan},
+        surface_scan::Range,
+    };
+    let executable = std::env::var("DISKSTUDIO_TEST_NTFS_ENGINE").unwrap();
+    let engine = Plan::engine().unwrap();
+    let cancel = AtomicBool::new(false);
+    let marker = b"Keep the original Windows volume and file contents";
+    let mut records = 1u32.to_le_bytes().to_vec();
+    record(&mut records, 2, 0, 0, "resize.txt", 1);
+    stream(&mut records, "", marker);
+    for sector in [512, 4096] {
+        let mut original = vec![0; SIZE];
+        assert!(serve(&executable, sector, &mut original, &records, false).0);
+        for size in [20 * 1024 * 1024, 32 * 1024 * 1024] {
+            let mut candidate = original.clone();
+            candidate.resize(SIZE.max(size), 0);
+            let mut view = Cursor::new(candidate);
+            let from = Range { offset: 0, size: SIZE as u64, sector: u64::from(sector) };
+            let to = Range { size: size as u64, ..from };
+            resize_prepared_volume(&engine, &mut view, from, to, &cancel, Write::flush, true).unwrap();
+            assert_eq!(&view.get_ref()[..SIZE], &original);
+            assert!(view.get_ref()[SIZE..].iter().all(|&byte| byte == 0));
+            resize_prepared_volume(&engine, &mut view, from, to, &cancel, Write::flush, false).unwrap();
+            let bytes = &view.get_ref()[..size];
+            assert_eq!(&bytes[..sector as usize], &bytes[size - sector as usize..]);
+            let mut reader = Cursor::new(bytes);
+            let mut volume = ntfs::Ntfs::new(&mut reader).unwrap();
+            assert_eq!(volume.serial_number(), SERIAL);
+            assert_eq!(volume.size(), (size as u64 - u64::from(sector)) / 4096 * 4096);
+            volume.read_upcase_table(&mut reader).unwrap();
+            assert_eq!(
+                ntfs_file(&volume, &mut reader, &["resize.txt"], 4096).unwrap().unwrap(),
+                marker
+            );
+        }
     }
 }
 

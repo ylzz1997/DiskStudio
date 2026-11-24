@@ -562,6 +562,7 @@ mod tests {
         signature.locator = Locator::Signature {
             content_hash: None,
             allocation_digest: None,
+            fragments: None,
             offset: 0,
             header: vec![],
             footer: vec![],

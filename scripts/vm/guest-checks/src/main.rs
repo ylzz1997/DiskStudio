@@ -21,8 +21,16 @@ mod bitlocker;
 mod bitlocker_checks;
 #[path = "../../../../src-tauri/src/boot_configuration.rs"]
 mod boot_configuration;
+#[path = "../../../../src-tauri/src/maintenance_iso.rs"]
+mod maintenance_iso;
+#[path = "../../../../src-tauri/src/maintenance_media.rs"]
+mod maintenance_media;
 #[path = "../../../../src-tauri/src/boot_inspection.rs"]
 mod boot_inspection;
+#[path = "../../../../src-tauri/src/system_virtualization.rs"]
+mod system_virtualization;
+#[path = "../../../../src-tauri/src/system_migration.rs"]
+mod system_migration;
 mod btrfs_checks;
 #[path = "../../../../src-tauri/src/btrfs_recovery.rs"]
 mod btrfs_recovery;
@@ -74,6 +82,8 @@ mod free_space_wipe;
 mod image_bridge;
 #[path = "../../../../src-tauri/src/image_browser.rs"]
 mod image_browser;
+#[path = "../../../../src-tauri/src/image_table_conversion.rs"]
+mod image_table_conversion;
 #[path = "../../../../src-tauri/src/image_files.rs"]
 mod image_files;
 #[path = "../../../../src-tauri/src/parallels_descriptor.rs"]
@@ -81,7 +91,6 @@ mod parallels_descriptor;
 mod letter_outcome_checks;
 mod lost_backup_boot_checks;
 mod lost_fixture;
-#[cfg(test)]
 #[path = "../../../../src-tauri/src/lost_partition_restore.rs"]
 mod lost_partition_restore;
 #[path = "../../../../src-tauri/src/lost_partition_tasks.rs"]
@@ -741,6 +750,14 @@ fn main() {
                 | "Boot-Inheritance-4Kn-Verify"
                 | "Boot-Repair-4Kn-Prepare"
                 | "Boot-Repair-4Kn-Verify"
+                | "Boot-Files-4Kn-Prepare"
+                | "Boot-Files-4Kn-Verify"
+                | "Boot-Store-4Kn-Prepare"
+                | "Boot-Store-4Kn-Verify"
+                | "Boot-Dirty-4Kn-Prepare"
+                | "Boot-Dirty-4Kn-Verify"
+                | "Boot-Damaged-4Kn-Prepare"
+                | "Boot-Damaged-4Kn-Verify"
                 | "Table-MBR-4Kn-Prepare"
                 | "Table-MBR-4Kn-Verify"
                 | "Table-MBR-4Kn-Record"
@@ -968,6 +985,14 @@ fn dispatch(mode: Option<&str>) -> Result<String, String> {
         Some("Boot-Inheritance-4Kn-Verify") => boot_inspection_checks::verify_inheritance(),
         Some("Boot-Repair-4Kn-Prepare") => boot_inspection_checks::prepare_repair(),
         Some("Boot-Repair-4Kn-Verify") => boot_inspection_checks::verify_repair(),
+        Some("Boot-Files-4Kn-Prepare") => boot_inspection_checks::prepare_files(),
+        Some("Boot-Files-4Kn-Verify") => boot_inspection_checks::verify_files(),
+        Some("Boot-Store-4Kn-Prepare") => boot_inspection_checks::prepare_store(),
+        Some("Boot-Store-4Kn-Verify") => boot_inspection_checks::verify_store(),
+        Some("Boot-Dirty-4Kn-Prepare") => boot_inspection_checks::prepare_damaged(true),
+        Some("Boot-Dirty-4Kn-Verify") => boot_inspection_checks::verify_damaged(true),
+        Some("Boot-Damaged-4Kn-Prepare") => boot_inspection_checks::prepare_damaged(false),
+        Some("Boot-Damaged-4Kn-Verify") => boot_inspection_checks::verify_damaged(false),
         Some("Table-MBR-4Kn-Prepare") => table_mbr_checks::prepare(),
         Some("Table-MBR-4Kn-Verify") => table_mbr_checks::verify(),
         Some("Table-MBR-4Kn-Record") => table_mbr_checks::record(),

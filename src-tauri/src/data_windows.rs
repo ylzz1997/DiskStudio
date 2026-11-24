@@ -26,6 +26,9 @@ use wmi::WMIConnection;
 #[path = "surface_device_windows.rs"]
 mod surface_device_windows;
 pub(crate) use surface_device_windows::surface_scan_device;
+#[path = "online_boot_source.rs"]
+mod online_boot_source;
+pub(crate) use online_boot_source::{OnlineBootSource, EFI_SYSTEM_TYPE};
 
 const DISKS: &str = "SELECT __PATH,Number,SerialNumber,UniqueId,FriendlyName,Size,LogicalSectorSize,BusType,PartitionStyle,NumberOfPartitions,IsBoot,IsSystem,IsOffline,IsReadOnly,IsClustered FROM MSFT_Disk";
 #[derive(Clone)]
@@ -53,6 +56,25 @@ impl Resolved {
         layout: &disk_core::table_check::GptIdentity,
         boot: uuid::Uuid,
     ) -> Result<(), String> {
+        self.verify_boot_layout(file, layout, boot, true)
+    }
+
+    pub(crate) fn verify_boot_loader_layout(
+        &self,
+        file: &File,
+        layout: &disk_core::table_check::GptIdentity,
+        boot: uuid::Uuid,
+    ) -> Result<(), String> {
+        self.verify_boot_layout(file, layout, boot, false)
+    }
+
+    fn verify_boot_layout(
+        &self,
+        file: &File,
+        layout: &disk_core::table_check::GptIdentity,
+        boot: uuid::Uuid,
+        writing_partition: bool,
+    ) -> Result<(), String> {
         let inventory = Inventory::read()?;
         let proof = self.data_lock_proof.as_ref().ok_or("缺少卷和分区凭据。")?;
         let disk = policy::target_disk(&inventory.disks, &proof.source.target)?;
@@ -60,27 +82,20 @@ impl Resolved {
         let parts = policy::layout(disk, &inventory.parts)?;
         self.verify_partition_snapshot(disk, &parts)?;
         let sector = disk.logical_sector_size.ok_or("逻辑扇区大小未知。")?;
-        let (native, service, _) = crate::extfs::restore_native(file, Some(&parts), sector)?;
-        if native.guid != uuid::Uuid::from_bytes_le(layout.disk_guid).to_string()
-            || native.entries.len() != layout.partitions.len()
-            || layout.partitions.iter().any(|raw| {
-                let id = uuid::Uuid::from_bytes_le(raw.guid).to_string();
-                let kind = uuid::Uuid::from_bytes_le(raw.kind).to_string();
-                !native.entries.iter().any(|part| {
-                    part.guid == id
-                        && part.kind == kind
-                        && part.offset == raw.range.start
-                        && part.size == raw.range.end - raw.range.start
-                        && part.attributes == raw.attributes
-                })
-            })
-        {
-            return Err("原始 GPT 与 Windows 原生布局不一致。".into());
+        let service = verify_boot_gpt(file, layout, &parts, sector)?;
+        let boot = boot.to_string();
+        if !writing_partition {
+            let count = inventory.parts.iter().filter(|part| {
+                part.guid.as_deref().is_some_and(|value| policy::guid(value) == boot)
+            }).count();
+            if count != 1 {
+                return Err("EFI 分区 GUID 缺失或在多个 Windows 磁盘上重复。".into());
+            }
+            return Ok(());
         }
         // The BCD writer corroborates the complete GPT attributes on the
         // verified device handle. Windows can leave WMI's volume-specific
         // flags blank while the disk is offline. Any explicit flag still vetoes.
-        let boot = boot.to_string();
         let entry = parts.iter().find(|part| {
             part.guid.as_deref().is_some_and(|value| policy::guid(value) == boot)
         }).ok_or("EFI 系统分区已变化。")?;
@@ -112,6 +127,38 @@ impl Resolved {
         Ok(())
     }
 
+    pub(crate) fn migration_partition_numbers(
+        &self,
+        selection: &Selection,
+        raw: &crate::table_restore::Layout,
+    ) -> Result<Vec<crate::system_migration::PartitionNumber>, String> {
+        let inventory = Inventory::read()?;
+        let disk = policy::target_disk(&inventory.disks, &selection.target)?;
+        policy::corroborate(disk, &inventory.legacy)?;
+        let parts = policy::layout(disk, &inventory.parts)?;
+        self.verify_partition_snapshot(disk, &parts)?;
+        parts.iter().map(|provider| {
+            let id = provider.guid.as_deref().map(policy::guid).ok_or("迁移分区的 Windows GUID 缺失。")?;
+            let entry = raw.entries.iter().find(|entry| entry.guid == id)
+                .ok_or("迁移分区的原生 GPT 标识缺失。")?;
+            if provider.offset != entry.offset || provider.size != entry.size
+                || provider.gpt_type.as_deref().map(policy::guid).as_deref() != Some(entry.kind.as_str())
+            {
+                return Err("迁移分区的 Windows 标识、范围或保护状态与原生 GPT 不一致。".into());
+            }
+            let protected = provider.is_shadow_copy == Some(true) || provider.is_read_only == Some(true);
+            let linux = matches!(entry.kind.as_str(), policy::LINUX_DATA | policy::LINUX_SWAP);
+            Ok(crate::system_migration::PartitionNumber {
+                number: provider.partition_number,
+                slot: entry.slot,
+                can_resize: !protected && provider.is_hidden != Some(true),
+                // Storage reports Linux data/swap as hidden by type. The
+                // raw GPT attributes are independently checked for all types.
+                can_omit: !protected && (linux || provider.is_hidden != Some(true)),
+            })
+        }).collect()
+    }
+
     pub(crate) fn partition_filesystem(&self, number: u32) -> Option<&str> {
         self.partition_volume(number)?.file_system.as_deref()
     }
@@ -128,6 +175,32 @@ impl Resolved {
             .find(|(partition, _)| *partition == number)
             .map(|(_, volume)| volume)
     }
+}
+
+fn verify_boot_gpt(
+    file: &File,
+    layout: &disk_core::table_check::GptIdentity,
+    parts: &[&Partition],
+    sector: u64,
+) -> Result<Vec<String>, String> {
+    let (native, service, _) = crate::extfs::restore_native(file, Some(parts), sector)?;
+    if native.guid != uuid::Uuid::from_bytes_le(layout.disk_guid).to_string()
+        || native.entries.len() != layout.partitions.len()
+        || layout.partitions.iter().any(|raw| {
+            let id = uuid::Uuid::from_bytes_le(raw.guid).to_string();
+            let kind = uuid::Uuid::from_bytes_le(raw.kind).to_string();
+            !native.entries.iter().any(|part| {
+                part.guid == id
+                    && part.kind == kind
+                    && part.offset == raw.range.start
+                    && part.size == raw.range.end - raw.range.start
+                    && part.attributes == raw.attributes
+            })
+        })
+    {
+        return Err("原始 GPT 与 Windows 原生布局不一致。".into());
+    }
+    Ok(service)
 }
 #[derive(Clone)]
 pub(crate) struct DataLockProof {
@@ -190,6 +263,66 @@ impl Inventory {
 pub fn resolve(s: &Selection, stable: bool, writing: bool) -> Result<Resolved, String> {
     resolve_impl(s, stable, writing, None)
 }
+
+/// Resolve a mounted FAT32 destination for ordinary WinPE file creation only.
+/// The file job separately binds the retained root to the native volume extent.
+pub(crate) fn winpe_media_target(s: &Selection, usb_only: bool) -> Result<Resolved, String> {
+    let number = s.partition.ok_or("请选择 WinPE 的 FAT32 数据分区。")?;
+    let r = resolve(s, true, false)?;
+    if r.volumes.len() != 1
+        || !r.partition_filesystem(number).is_some_and(|fs| fs.eq_ignore_ascii_case("FAT32"))
+    {
+        return Err("所选分区没有唯一可核对的 FAT32 卷。".into());
+    }
+    let inventory = Inventory::read()?;
+    let disk = policy::target_disk(&inventory.disks, &s.target)?;
+    policy::corroborate(disk, &inventory.legacy)?;
+    let parts = policy::layout(disk, &inventory.parts)?;
+    r.verify_partition_snapshot(disk, &parts)?;
+    let selected = parts.iter().find(|p| p.partition_number == number)
+        .ok_or("所选 WinPE 分区已不存在。")?;
+    check_winpe_media_partition(disk, selected, usb_only)?;
+    for part in parts.iter().filter(|p| p.partition_number != number) {
+        let extents = partition_volumes(&inventory, part)?;
+        if !usb_only && extents.is_empty()
+            && part.gpt_type.as_deref().is_some_and(|kind|
+                policy::guid(kind) == crate::ldm_basic::MICROSOFT_RESERVED)
+            && part.is_boot == Some(false) && part.is_system == Some(false)
+        {
+            continue;
+        }
+        if !matches!(extents.as_slice(), [volume]
+            if volume.file_system.as_deref().is_some_and(|fs|
+                fs.eq_ignore_ascii_case("NTFS") || fs.eq_ignore_ascii_case("exFAT")))
+            || part.is_boot != Some(false) || part.is_system != Some(false)
+            || part.gpt_type.as_deref().is_some_and(|kind|
+                uuid::Uuid::parse_str(&policy::guid(kind)).ok() == Some(EFI_SYSTEM_TYPE))
+            || matches!(part.mbr_type, Some(0x01 | 0x04 | 0x06 | 0x0b | 0x0c | 0x0e | 0xef))
+        {
+            return Err("目标磁盘上有其他启动卷或状态不明确的分区。".into());
+        }
+    }
+    Ok(r)
+}
+
+fn check_winpe_media_partition(disk: &Disk, part: &Partition, usb_only: bool) -> Result<(), String> {
+    let data = match disk.partition_style {
+        Some(1) => usb_only && matches!(part.mbr_type, Some(0x0b | 0x0c)),
+        Some(2) => part.gpt_type.as_deref().is_some_and(|kind| policy::guid(kind) == policy::BASIC_DATA),
+        _ => false,
+    };
+    if !data || (usb_only && disk.bus_type != Some(7)) || disk.bus_type.is_none() || disk.is_clustered != Some(false)
+        || disk.is_boot != Some(false) || disk.is_system != Some(false)
+        || disk.is_offline != Some(false) || disk.is_read_only != Some(false)
+        || part.is_boot != Some(false) || part.is_system != Some(false)
+        || part.is_offline != Some(false) || part.is_read_only != Some(false)
+        || part.is_hidden != Some(false) || part.is_shadow_copy != Some(false)
+    {
+        return Err("WinPE 启动分区必须联机、可写且为普通无保护数据分区。".into());
+    }
+    Ok(())
+}
+
 /// Missing WMI associations may be retained only while the exact previously
 /// acquired native locks remain held. Conflicts, errors and changed metadata
 /// are never replaced by retained information.
@@ -237,6 +370,27 @@ fn retained_association(
         }
     }
     Ok(fresh.or_else(|| previous.cloned()))
+}
+
+fn partition_volumes(inv: &Inventory, p: &Partition) -> Result<Vec<Volume>, String> {
+    let volumes: Vec<Volume> = inv
+        .con
+        .associators::<Volume, Association>(&p.path)
+        .map_err(err)?;
+    for volume in &volumes {
+        let reverse: Vec<Partition> = inv
+            .con
+            .associators::<Partition, Association>(&volume.path)
+            .map_err(err)?;
+        if reverse.len() != 1
+            || reverse[0].path != p.path
+            || reverse[0].size != p.size
+            || reverse[0].offset != p.offset
+        {
+            return Err("卷与分区关联改变。".into());
+        }
+    }
+    Ok(volumes)
 }
 fn lock_scope(s: &Selection, writing: bool, partition: u32) -> bool {
     writing || s.partition.is_none() || s.partition == Some(partition)
@@ -349,25 +503,9 @@ fn resolve_impl(
             if !lock_scope(s, writing, p.partition_number) {
                 continue;
             }
-            let vs: Vec<Volume> = inv
-                .con
-                .associators::<Volume, Association>(&p.path)
-                .map_err(err)?;
             // Validate every currently returned reverse association before any
             // missing-association fallback. A query failure propagates above.
-            for v in &vs {
-                let reverse: Vec<Partition> = inv
-                    .con
-                    .associators::<Partition, Association>(&v.path)
-                    .map_err(err)?;
-                if reverse.len() != 1
-                    || reverse[0].path != p.path
-                    || reverse[0].size != p.size
-                    || reverse[0].offset != p.offset
-                {
-                    return Err("卷与分区关联改变。".into());
-                }
-            }
+            let vs = partition_volumes(&inv, p)?;
             let previous = retained.and_then(|old| {
                 old.associations
                     .iter()
@@ -482,6 +620,9 @@ pub fn device(r: &Resolved, write: bool) -> Result<File, String> {
 }
 pub fn exclusive_device(r: &Resolved) -> Result<File, String> {
     open_device(r, true, FILE_SHARE_READ)
+}
+pub(crate) fn exclusive_reader(r: &Resolved) -> Result<File, String> {
+    open_device(r, false, FILE_SHARE_READ)
 }
 fn open_device(r: &Resolved, write: bool, sharing: u32) -> Result<File, String> {
     open_device_flags(r, write, sharing, 0)
@@ -928,6 +1069,21 @@ pub(crate) fn verify_offline_handle(r: &Resolved, file: &File) -> Result<(), Str
     let n = control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)?;
     validate_offline_attributes(&r.disk, &bytes[..n.min(bytes.len())])
 }
+pub(crate) fn verify_read_state(r: &Resolved, file: &File) -> Result<(), String> {
+    let mut bytes = [0; 16];
+    let n = control(file, IOCTL_DISK_GET_DISK_ATTRIBUTES, &[], &mut bytes)?;
+    if n != bytes.len() || u32::from_le_bytes(bytes[..4].try_into().unwrap()) != 16 {
+        return Err("原生设备状态返回不完整。".into());
+    }
+    let flags = u64::from_le_bytes(bytes[8..].try_into().unwrap());
+    if flags & !3 != 0
+        || r.disk.is_offline != Some(flags & 1 != 0)
+        || r.disk.is_read_only != Some(flags & 2 != 0)
+    {
+        return Err("源盘原生属性与已核对的状态不同。".into());
+    }
+    Ok(())
+}
 fn validate_offline_attributes(disk: &Disk, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() < 16 || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) < 16 {
         return Err("原生设备状态返回不完整。".into());
@@ -1034,6 +1190,23 @@ impl FileLocation {
         self.extent.0
     }
 
+    pub(crate) fn portable_file_selection(&self, writable: bool) -> Result<Selection, String> {
+        let inv = Inventory::read()?;
+        let disk = policy::target_disk(&inv.disks, &self.target)?;
+        let parts = policy::layout(disk, &inv.parts)?;
+        let part = parts.iter().find(|part| (part.offset, part.size) == (self.extent.1, self.extent.2))
+            .ok_or("找不到备份输出分区。")?;
+        let found = Selection {
+            target: self.target.clone(),
+            layout_key: self.layout.clone(),
+            partition: Some(part.partition_number),
+        };
+        let (resolved, _, volume) = portable_file_volume(&found, writable)?;
+        self.confirm_partition(&found.target, &found.layout_key, &volume,
+            (resolved.disk.number, resolved.offset, resolved.size))?;
+        Ok(found)
+    }
+
     /// Compare a retained ordinary handle's observed location to an already
     /// validated partition. This grants no device access or write authority.
     pub(crate) fn confirm_partition(
@@ -1052,6 +1225,92 @@ impl FileLocation {
         }
         Ok(())
     }
+}
+
+/// Resolve the current spelling of an ordinary volume named by a handoff.
+/// Directory and file handles are checked against its observed native extent.
+pub(crate) fn portable_file_volume(selection: &Selection, writable: bool) -> Result<(Resolved, String, String), String> {
+    let number = selection.partition.ok_or("请选择备份输出分区。")?;
+    let resolved = resolve(selection, writable, false)?;
+    let inv = Inventory::read()?;
+    let disk = policy::target_disk(&inv.disks, &selection.target)?;
+    policy::corroborate(disk, &inv.legacy)?;
+    let parts = policy::layout(disk, &inv.parts)?;
+    verify_handoff_metadata(selection, &resolved, disk, &parts)?;
+    let part = parts.iter().find(|part| part.partition_number == number)
+        .ok_or("找不到备份输出分区。")?;
+    if disk.partition_style != Some(2)
+        || !matches!(disk.bus_type, Some(1..=13 | 17..=19))
+        || disk.is_offline != Some(false) || (writable && disk.is_read_only != Some(false))
+        || part.is_offline != Some(false) || (writable && part.is_read_only != Some(false))
+        || part.is_hidden != Some(false) || part.is_shadow_copy != Some(false)
+        || part.gpt_type.as_deref().map(policy::guid).as_deref() != Some(policy::BASIC_DATA)
+    {
+        return Err("WinPE 续接文件需要有盘符的普通 GPT 数据分区。".into());
+    }
+    let volumes = partition_volumes(&inv, part)?;
+    let [volume] = volumes.as_slice() else { return Err("WinPE 续接文件所在的卷关联不唯一。".into()) };
+    let fs = volume.file_system.as_deref().unwrap_or_default().to_ascii_uppercase();
+    if (writable && fs != "NTFS") || (!writable && !matches!(fs.as_str(), "NTFS" | "FAT32" | "EXFAT")) {
+        return Err("WinPE 续接文件所在的文件系统不受支持。".into());
+    }
+    let volume = volume_root(volume.unique_id.as_deref().ok_or("卷标识缺失")?.trim_end_matches('\\'))?;
+    if writable && resolved.volumes.as_slice() != [volume.as_str()] {
+        return Err("WinPE 续接文件所在的卷关联不唯一。".into());
+    }
+    let letter = part.drive_letter.as_deref()
+        .filter(|letter| letter.len() == 1 && letter.as_bytes()[0].is_ascii_alphabetic())
+        .ok_or("WinPE 备份输出分区没有可核对的盘符。")?;
+    Ok((resolved, format!("{letter}:\\"), volume))
+}
+
+/// Stable evidence for the destructive target, even when it is the running
+/// Windows disk at scheduling time. Execution still uses the full write gate.
+pub(crate) fn restore_layout_fingerprint(selection: &Selection, resolved: &Resolved) -> Result<String, String> {
+    handoff_layout_fingerprint(selection, resolved, true)
+}
+
+pub(crate) fn handoff_layout_fingerprint(selection: &Selection, resolved: &Resolved, writing: bool) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let inv = Inventory::read()?;
+    let disk = policy::target_disk(&inv.disks, &selection.target)?;
+    policy::corroborate(disk, &inv.legacy)?;
+    let parts = policy::layout(disk, &inv.parts)?;
+    verify_handoff_metadata(selection, resolved, disk, &parts)?;
+    if writing && (disk.is_read_only != Some(false) || disk.is_offline != Some(false)) {
+        return Err("还原目标必须联机且可写。".into());
+    }
+    if let Some(number) = selection.partition.filter(|_| writing) {
+        let part = parts.iter().find(|p| p.partition_number == number)
+            .ok_or("目标分区已变化。")?;
+        if part.gpt_type.as_deref().map(policy::guid).as_deref() != Some(policy::BASIC_DATA)
+            || part.is_hidden != Some(false) || part.is_shadow_copy != Some(false)
+            || part.is_read_only != Some(false) || part.is_offline != Some(false)
+        {
+            return Err("还原/克隆目标必须为普通 GPT 数据分区。".into());
+        }
+    }
+    let mut rows: Vec<_> = parts.iter().map(|p| (
+        p.partition_number, p.offset, p.size, p.guid.as_deref().map(policy::guid),
+        p.gpt_type.as_deref().map(policy::guid), p.mbr_type,
+    )).collect();
+    rows.sort_unstable();
+    let digest = serde_json::to_vec(&(selection, disk.partition_style, disk.size, disk.logical_sector_size, rows)).map_err(err)?;
+    Ok(format!("{:x}", Sha256::digest(digest)))
+}
+
+fn verify_handoff_metadata(selection: &Selection, resolved: &Resolved, disk: &Disk, parts: &[&Partition]) -> Result<(), String> {
+    if resolved.disk.number != disk.number || resolved.disk.size != disk.size
+        || resolved.disk.logical_sector_size != disk.logical_sector_size
+        || selection.layout_key != disk_identity::layout_key(disk.partition_style, parts.iter()
+            .map(|p| (p.partition_number, p.offset, p.size, p.guid.clone())).collect())
+    {
+        return Err("磁盘布局已变化，请刷新并重新选择。".into());
+    }
+    if resolved.data_lock_proof.is_some() {
+        resolved.verify_partition_snapshot(disk, parts)?;
+    }
+    Ok(())
 }
 pub(crate) fn volume_root(path: &str) -> Result<String, String> {
     let tail = path
@@ -1223,6 +1482,13 @@ impl FileBinding {
         &self.location.target
     }
 
+    pub(crate) fn verify_same_volume(&self, member: &impl AsRawHandle) -> Result<(), String> {
+        if file_volume(member)? != self.location.volume {
+            return Err("打开的来源文件与核对过的目录不在同一卷。".into());
+        }
+        Ok(())
+    }
+
     pub fn new(file: &File, expected: &Target) -> Result<Self, String> {
         let location = file_location(file)?;
         if &location.target != expected {
@@ -1232,6 +1498,13 @@ impl FileBinding {
             file: std::sync::Arc::new(file.try_clone().map_err(err)?),
             location,
         })
+    }
+    pub(crate) fn exact(file: &File, expected: &FileLocation) -> Result<Self, String> {
+        let binding = Self::new(file, &expected.target)?;
+        if &binding.location != expected {
+            return Err("文件所在卷或完整磁盘布局已变化。".into());
+        }
+        Ok(binding)
     }
     pub fn validate_all(bindings: &[Self]) -> Result<(), String> {
         let expected: Vec<_> = bindings.iter().map(|b| &b.location).collect();

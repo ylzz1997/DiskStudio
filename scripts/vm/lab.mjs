@@ -18,15 +18,19 @@ export const disks = Object.freeze([
 const fourKnDisks = Object.freeze(disks.map(disk => disk.bus === 'nvme' ? {
   ...disk, name: disk.name.replace('.qcow2', '-4kn.qcow2'), controller: `${disk.id}_4kn`,
 } : disk));
-const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'retained-signatures', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery', 'boot-repair'];
-function profileDisks(fourKn, fixture) {
-  const base = fourKn ? fourKnDisks : disks;
+const fixtureProfiles = ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'ext-copy', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'retained-signatures', 'table-mbr', 'ldm', 'storage-spaces', 'storage-spaces-recovery', 'boot-repair', 'boot-files', 'boot-store', 'boot-dirty', 'boot-damaged', 'boot-windows'];
+function profileDisks(fourKn, fixture, bootWindows) {
+  let base = fourKn ? fourKnDisks : disks;
+  if (bootWindows === 'verify') base = base.filter(disk => disk.id === 'test_b');
   return fixture ? base.map(disk => disk.bus === 'nvme' ? {
     ...disk, name: disk.name.replace(/(?:-4kn)?\.qcow2$/, `-${fixture}${fourKn ? '-4kn' : ''}.qcow2`),
   } : disk) : base;
 }
 const stateFixture = state => state.fixture ?? (state.wholeClone === true ? 'whole-clone' : undefined);
-function validateFixtureProfile(fourKn, sectorFault, fixture) {
+function validateFixtureProfile(fourKn, sectorFault, fixture, bootWindows) {
+  if (bootWindows !== undefined && (fixture !== 'boot-windows' || !['stage', 'verify'].includes(bootWindows))) {
+    throw new Error('Choose a phase of the dedicated Windows boot fixture');
+  }
   if (fixture === 'ldm') {
     if (sectorFault) throw new Error('LDM fixtures require unmodified disk I/O');
     return;
@@ -45,6 +49,19 @@ const qemu = path.join(root, 'tools/qemu/qemu-system-x86_64.exe');
 const qemuWindow = path.join(root, 'tools/qemu/qemu-system-x86_64w.exe');
 const img = path.join(root, 'tools/qemu/qemu-img.exe');
 const bios = path.join(root, 'tools/qemu/share/bios-256k.bin');
+const uefiCode = path.join(root, 'tools/qemu/share/edk2-x86_64-code.fd');
+const uefiTemplate = path.join(root, 'tools/qemu/share/edk2-i386-vars.fd');
+const uefiVars = path.join(root, 'windows/boot-windows-vars.fd');
+const bootFlash = Object.freeze([
+  { name: 'boot_uefi_code', file: uefiCode, readonly: true, size: 3653632 },
+  { name: 'boot_uefi_vars', file: uefiVars, readonly: false, size: 540672 },
+]);
+const bootToolsUsb = 'firmware_tools_usb';
+const bootToolsCd = 'firmware_tools_cd';
+const bootToolsIsoNode = 'firmware_tools_iso';
+const bootToolsFileNode = 'firmware_tools_file';
+const bootToolsUsbPath = `/machine/peripheral/${bootToolsUsb}`;
+const bootToolsCdPath = `/machine/peripheral/${bootToolsCd}`;
 const statePath = path.join(root, 'run.json');
 const installIso = path.join(root, 'media/windows-server-2025-zh-cn.iso');
 const payloadIso = path.join(root, 'media/diskstudio-tools.iso');
@@ -56,11 +73,13 @@ const faultBaseNode = 'test_a_sector_copy_source';
 
 function readToolsManifest(name) {
   const filename = safePath(path.join(root, name));
-  const value = JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, ''));
-  if (!/^diskstudio-tools-[0-9a-f-]{36}\.iso$/.test(value.file ?? '') || !/^[0-9a-f]{64}$/.test(value.sha256 ?? '')) {
+  return resolveToolsManifest(JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, '')));
+}
+function resolveToolsManifest(value) {
+  if (!/^diskstudio-tools-[0-9a-f-]{36}\.iso$/.test(value?.file ?? '') || !/^[0-9a-f]{64}$/.test(value?.sha256 ?? '')) {
     throw new Error('Invalid immutable tools ISO manifest');
   }
-  return { ...value, filename: safePath(path.join(root, 'media', value.file)) };
+  return { file: value.file, sha256: value.sha256, filename: safePath(path.join(root, 'media', value.file)) };
 }
 function currentToolsIso() {
   return fs.existsSync(path.join(root, 'current-tools.json')) ? readToolsManifest('current-tools.json').filename : payloadIso;
@@ -156,18 +175,21 @@ function checkIso(filename) {
   if (magic.toString() !== 'CD001') throw new Error(`Invalid ISO 9660 media: ${filename}`);
 }
 
-export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, repairFault = false, fixture } = {}) {
+export function buildArgs({ accelerator = 'tcg', setup = false, headless = false, paused = false, network = false, fourKn = false, sectorFault = false, repairFault = false, fixture, bootWindows } = {}) {
   if (!['whpx', 'tcg'].includes(accelerator)) throw new Error('Unsupported accelerator');
   if (fourKn && (setup || network)) throw new Error('4Kn acceptance uses the installed offline guest');
   if (fixture && (setup || network)) throw new Error('Dedicated fixtures use the installed offline guest');
   if (repairFault && !sectorFault) throw new Error('Repair fault requires the fixed sector fault profile');
   if (sectorFault && (!fourKn || accelerator !== 'tcg')) throw new Error('Sector fault fixture requires 4Kn TCG');
-  validateFixtureProfile(fourKn, sectorFault, fixture);
+  validateFixtureProfile(fourKn, sectorFault, fixture, bootWindows);
+  if (fixture === 'boot-windows' && accelerator !== 'tcg') throw new Error('Windows boot verification requires TCG');
+  const bootOnly = bootWindows === 'verify';
+  const machine = bootOnly ? 'q35,vmport=off,pflash0=boot_uefi_code,pflash1=boot_uefi_vars' : 'q35,vmport=off';
   const args = [
     '-name', vmName, '-uuid', uuid,
     '-smbios', 'type=1,manufacturer=DiskStudio,product=DiskStudio-Test,serial=DS-VM-0001',
     '-L', path.join(root, 'tools/qemu/share'),
-    '-machine', 'q35,vmport=off', '-accel', accelerator === 'whpx' ? 'whpx,kernel-irqchip=off' : accelerator,
+    '-machine', machine, '-accel', accelerator === 'whpx' ? 'whpx,kernel-irqchip=off' : accelerator,
     '-cpu', accelerator === 'whpx' ? 'Nehalem,-x2apic' : 'max',
     '-boot', 'menu=on', '-rtc', 'base=localtime',
     '-smp', accelerator === 'whpx' ? '1' : '4', '-m', '8192', '-nodefaults', '-no-user-config',
@@ -175,9 +197,13 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
     '-device', 'qemu-xhci', '-device', 'usb-tablet',
     '-monitor', 'none', '-serial', 'none', '-parallel', 'none',
     '-qmp', `tcp:127.0.0.1:${port},server=on,wait=off`,
-    '-bios', bios,
   ];
-  for (const disk of profileDisks(fourKn, fixture)) {
+  if (bootOnly) {
+    for (const flash of bootFlash) {
+      args.push('-blockdev', JSON.stringify({ driver: 'raw', 'node-name': flash.name, 'read-only': flash.readonly, file: { driver: 'file', filename: flash.file } }));
+    }
+  } else args.push('-bios', bios);
+  for (const disk of profileDisks(fourKn, fixture, bootWindows)) {
     // During Windows Setup, expose only the OS disk. Test disks are attached later.
     if (setup && disk.id !== 'os') continue;
     const image = { driver: 'qcow2', 'node-name': disk.id, file: { driver: 'file', filename: diskPath(disk) } };
@@ -201,12 +227,12 @@ export function buildArgs({ accelerator = 'tcg', setup = false, headless = false
       ? `nvme,drive=${disk.id},serial=${disk.serial}${fourKn ? `,id=${disk.controller},logical_block_size=4096,physical_block_size=4096` : ''}`
       : `ide-hd,bus=ide.0,drive=${disk.id},serial=${disk.serial},model=${disk.model},bootindex=2`);
   }
-  if (setup) {
+  if (setup || bootWindows === 'stage') {
     args.push('-blockdev', JSON.stringify({ driver: 'raw', 'node-name': 'installer', 'read-only': true, file: { driver: 'file', filename: installIso } }));
-    args.push('-device', 'ide-cd,bus=ide.1,drive=installer,bootindex=1');
+    args.push('-device', `ide-cd,bus=ide.1,drive=installer${setup ? ',bootindex=1' : ''}`);
   }
-  const toolsIso = currentToolsIso();
-  if (fs.existsSync(toolsIso)) {
+  const toolsIso = bootOnly ? null : currentToolsIso();
+  if (toolsIso && fs.existsSync(toolsIso)) {
     args.push('-blockdev', JSON.stringify({ driver: 'raw', 'node-name': 'tools', 'read-only': true, file: { driver: 'file', filename: toolsIso } }));
     args.push('-device', 'ide-cd,bus=ide.2,drive=tools');
   }
@@ -304,14 +330,18 @@ function init() {
 
 async function start(options) {
   assertStopped();
-  safePath(qemu); safePath(bios);
+  safePath(qemu);
   // Validate the fixed profile before creating its two independent images.
   const args = buildArgs(options);
-  for (const disk of profileDisks(options.fourKn, options.fixture)) {
+  const bootOnly = options.bootWindows === 'verify';
+  for (const disk of profileDisks(options.fourKn, options.fixture, options.bootWindows)) {
     if (disk.controller || (options.fixture && disk.bus === 'nvme')) {
       const filename = safePath(diskPath(disk), root, false);
       if (!fs.existsSync(filename)) {
-        if (options.fixture === 'boot-repair' && disk.id === 'test_b') {
+        if (options.fixture === 'boot-windows' && options.bootWindows !== 'stage') {
+          throw new Error('Stage the two Windows boot fixture disks first');
+        }
+        if (['boot-repair', 'boot-files', 'boot-store', 'boot-dirty', 'boot-damaged'].includes(options.fixture) && disk.id === 'test_b') {
           throw new Error('Prepare the offline Test B seed with build-boot-repair-disk.mjs');
         }
         tool(img, ['create', '-f', 'qcow2', filename, `${disk.size}G`]);
@@ -319,14 +349,31 @@ async function start(options) {
     }
     checkDisk(disk);
   }
-  if (options.setup) checkIso(installIso);
-  if (fs.existsSync(currentToolsIso())) checkIso(currentToolsIso());
+  if (options.setup || options.bootWindows === 'stage') checkIso(installIso);
+  if (bootOnly) {
+    if (fs.statSync(safePath(uefiCode)).size !== bootFlash[0].size ||
+        fs.statSync(safePath(uefiTemplate)).size !== bootFlash[1].size) {
+      throw new Error('Unexpected EDK2 firmware image sizes');
+    }
+  } else {
+    safePath(bios);
+    const tools = currentToolsIso();
+    if (options.fixture || fs.existsSync(tools)) checkIso(tools);
+  }
   // Refuse to start if another service or VM owns our loopback QMP port.
   await new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => server.close(resolve));
   });
+  if (bootOnly) {
+    const vars = safePath(uefiVars, root, false);
+    if (fs.existsSync(vars)) {
+      const previous = safePath(path.join(root, 'windows', `boot-windows-vars-${crypto.randomUUID()}.fd`), root, false);
+      fs.renameSync(vars, previous);
+    }
+    fs.copyFileSync(uefiTemplate, vars, fs.constants.COPYFILE_EXCL);
+  }
   const out = fs.openSync(safePath(path.join(mkdir('logs'), 'qemu.out.log'), root, false), 'a');
   const err = fs.openSync(safePath(path.join(root, 'logs/qemu.err.log'), root, false), 'a');
   const started = new Date().toISOString();
@@ -346,7 +393,7 @@ async function start(options) {
   try {
     const blocks = await qmp.execute('query-block');
     if (options.sectorFault || options.fixture) {
-      await validateProfile(qmp, blocks, options.fourKn, options.sectorFault, options.fixture);
+      await validateProfile(qmp, blocks, options.fourKn, options.sectorFault, options.fixture, options.bootWindows);
       await qmp.execute('cont');
     }
     const status = await qmp.execute('query-status');
@@ -408,15 +455,16 @@ async function doctor() {
 async function refreshTools() {
   const state = readState();
   if (!isAlive(state?.pid)) throw new Error('Start the test VM before hot-swapping its tools CD');
+  if (state.bootWindows === 'verify') throw new Error('Use boot-attach-tools for the EDK2 boot-only fixture');
   const next = readToolsManifest('pending-tools.json');
   checkIso(next.filename);
   if (await hashFile(next.filename) !== next.sha256) throw new Error('Tools ISO hash mismatch');
   const qmp = await connectQmp();
   try {
     const blocks = await qmp.execute('query-block');
-    await validateProfile(qmp, blocks, state.fourKn === true, state.sectorFault === true, stateFixture(state));
-    const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw');
-    if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso()) || !optical[0].qdev?.startsWith('/machine/')) throw new Error('Unable to identify the tools CD');
+    await validateProfile(qmp, blocks, state.fourKn === true, state.sectorFault === true, stateFixture(state), state.bootWindows);
+    const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw' && same(b.inserted.file, currentToolsIso()));
+    if (optical.length !== 1 || !optical[0].qdev?.startsWith('/machine/')) throw new Error('Unable to identify the tools CD');
     await qmp.execute('blockdev-change-medium', { id: optical[0].qdev, filename: next.filename, format: 'raw', 'read-only-mode': 'read-only', force: false });
     const after = (await qmp.execute('query-block')).find(b => b.qdev === optical[0].qdev);
     if (!after?.inserted?.ro || after.inserted.drv !== 'raw' || !same(after.inserted.file, next.filename)) throw new Error('Tools CD change was not verified; inspect before retrying');
@@ -425,13 +473,76 @@ async function refreshTools() {
   } finally { qmp.close(); }
 }
 
+async function attachBootTools() {
+  const state = readState();
+  if (!isAlive(state?.pid) || state.bootWindows !== 'verify' || stateFixture(state) !== 'boot-windows'
+      || state.fourKn !== true || state.network !== false || state.sectorFault === true) {
+    throw new Error('Start the isolated 4Kn EDK2 boot-only fixture first');
+  }
+  const next = readToolsManifest('pending-tools.json');
+  checkIso(next.filename);
+  if (await hashFile(next.filename) !== next.sha256) throw new Error('Tools ISO hash mismatch');
+  const qmp = await connectQmp();
+  try {
+    const before = await qmp.execute('query-block');
+    const current = state.bootTools ? resolveToolsManifest(state.bootTools) : null;
+    if (current && (current.file !== next.file || current.sha256 !== next.sha256)) {
+      throw new Error('The boot-only fixture already has a different verified tools CD');
+    }
+    if (before.some(block => block.inserted?.['node-name'] === bootToolsIsoNode)) {
+      // Reuse the exact staged CD if an earlier command ended before publishing run.json.
+      const connected = await qmp.execute('qom-get', { path: bootToolsUsbPath, property: 'attached' });
+      if (typeof connected !== 'boolean') throw new Error('Cannot read the EDK2 tools CD connection state');
+      await validateProfile(qmp, before, true, false, 'boot-windows', 'verify', next, connected);
+      if (!connected) {
+        await qmp.execute('qom-set', { path: bootToolsUsbPath, property: 'attached', value: true });
+        await validateProfile(qmp, await qmp.execute('query-block'), true, false, 'boot-windows', 'verify', next);
+      }
+    } else {
+      if (current) throw new Error('The recorded tools CD is missing from the running fixture');
+      await validateProfile(qmp, before, true, false, 'boot-windows', 'verify');
+      await qmp.execute('blockdev-add', {
+        'node-name': bootToolsIsoNode, driver: 'raw', 'read-only': true,
+        file: { 'node-name': bootToolsFileNode, driver: 'file', filename: next.filename, 'read-only': true },
+      });
+      await qmp.execute('device_add', { driver: 'usb-bot', id: bootToolsUsb });
+      await qmp.execute('device_add', {
+        driver: 'scsi-cd', id: bootToolsCd, bus: `${bootToolsUsb}.0`, channel: 0,
+        'scsi-id': 0, lun: 0, drive: bootToolsIsoNode,
+      });
+      // QEMU keeps a hot-plugged usb-bot detached until the whole drive is present.
+      await validateProfile(qmp, await qmp.execute('query-block'), true, false, 'boot-windows', 'verify', next, false);
+      await qmp.execute('qom-set', { path: bootToolsUsbPath, property: 'attached', value: true });
+      await validateProfile(qmp, await qmp.execute('query-block'), true, false, 'boot-windows', 'verify', next);
+    }
+    if (!current) writeJson(statePath, { ...state, bootTools: { file: next.file, sha256: next.sha256 } });
+    console.log(`Verified read-only EDK2 tools CD: ${next.file}`);
+  } finally { qmp.close(); }
+}
+
+export function validateBootOpticalBlock(block, filename) {
+  const media = block?.inserted;
+  if (block?.removable !== true || media?.ro !== true || media.drv !== 'raw'
+      || media['node-name'] !== bootToolsIsoNode || ![bootToolsCd, bootToolsCdPath].includes(block.qdev)
+      || media.backing_file_depth !== 0 || typeof media.file !== 'string' || !same(media.file, filename)) {
+    throw new Error('Unexpected EDK2 optical backend');
+  }
+}
+
 // Test-only isolation check. The production application has no VM identity,
 // disk serial allowlist or special build. This harness owns the lab boundary.
-export function validateTestBlocks(blocks, fourKn = false, sectorFault = false, fixture) {
-  if (blocks.length !== 4) throw new Error('Unexpected test VM block inventory');
+export function validateTestBlocks(blocks, fourKn = false, sectorFault = false, fixture, bootWindows, bootTools) {
   if (sectorFault && !fourKn) throw new Error('Sector fault fixture requires the 4Kn inventory');
-  validateFixtureProfile(fourKn, sectorFault, fixture);
-  for (const disk of profileDisks(fourKn, fixture)) {
+  validateFixtureProfile(fourKn, sectorFault, fixture, bootWindows);
+  const bootOnly = bootWindows === 'verify';
+  if (bootTools && !bootOnly) throw new Error('Additional tools media requires the EDK2 boot-only fixture');
+  const expected = profileDisks(fourKn, fixture, bootWindows);
+  const flashNames = new Set(bootFlash.map(flash => flash.name));
+  const inventory = bootOnly ? blocks.filter(block => !flashNames.has(block.inserted?.['node-name'])) : blocks;
+  const media = bootOnly ? (bootTools ? [safePath(bootTools.filename)] : []) : [currentToolsIso()];
+  if (bootWindows === 'stage') media.push(installIso);
+  if (inventory.length !== expected.length + media.length) throw new Error('Unexpected test VM block inventory');
+  for (const disk of expected) {
     const found = blocks.filter(b => b.inserted?.['node-name'] === disk.id);
     const info = found[0]?.inserted;
     const injected = sectorFault && disk.id === 'test_a';
@@ -444,12 +555,45 @@ export function validateTestBlocks(blocks, fourKn = false, sectorFault = false, 
       throw new Error('A test disk is missing, replaced, or has an unexpected capacity');
     }
   }
-  const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw');
-  if (optical.length !== 1 || !same(optical[0].inserted.file, currentToolsIso())) throw new Error('Unexpected optical media');
+  for (const file of media) {
+    const optical = blocks.filter(b => b.removable && b.inserted?.ro === true && b.inserted.drv === 'raw' &&
+      typeof b.inserted.file === 'string' && same(b.inserted.file, file));
+    if (optical.length !== 1) throw new Error('Unexpected optical media');
+    if (bootTools) validateBootOpticalBlock(optical[0], file);
+  }
 }
 
-async function validateProfile(qmp, blocks, fourKn, sectorFault = false, fixture) {
-  validateTestBlocks(blocks, fourKn, sectorFault, fixture);
+async function validateProfile(qmp, blocks, fourKn, sectorFault = false, fixture, bootWindows, bootTools, attached = true) {
+  validateTestBlocks(blocks, fourKn, sectorFault, fixture, bootWindows, bootTools);
+  if (bootWindows === 'verify') {
+    const nodes = await qmp.execute('query-named-block-nodes');
+    for (const flash of bootFlash) {
+      const matches = nodes.filter(node => node['node-name'] === flash.name);
+      const info = matches[0];
+      if (matches.length !== 1 || info.drv !== 'raw' || info.ro !== flash.readonly ||
+          info.image?.['virtual-size'] !== flash.size || typeof info.file !== 'string' ||
+          !same(info.file, safePath(flash.file)) || info.backing_file_depth !== 0) {
+        throw new Error('Unexpected UEFI code or variable store');
+      }
+    }
+    const opticalNodes = nodes.filter(node => [bootToolsIsoNode, bootToolsFileNode].includes(node['node-name']));
+    if (!bootTools && opticalNodes.length) throw new Error('Unexpected detached EDK2 tools media');
+    if (bootTools) {
+      const length = fs.statSync(bootTools.filename).size;
+      for (const [name, driver] of [[bootToolsIsoNode, 'raw'], [bootToolsFileNode, 'file']]) {
+        const matching = opticalNodes.filter(node => node['node-name'] === name);
+        const node = matching[0];
+        if (matching.length !== 1 || node.drv !== driver || node.ro !== true || node.backing_file_depth !== 0
+            || typeof node.file !== 'string' || !same(node.file, bootTools.filename)
+            || node.image?.['virtual-size'] !== length) {
+          throw new Error('Unexpected EDK2 tools media block graph');
+        }
+      }
+      if (await qmp.execute('qom-get', { path: bootToolsUsbPath, property: 'attached' }) !== attached) {
+        throw new Error('Unexpected EDK2 tools CD connection state');
+      }
+    }
+  }
   if (sectorFault) {
     const nodes = await qmp.execute('query-named-block-nodes');
     const top = nodes.find(node => node['node-name'] === 'test_a');
@@ -464,7 +608,7 @@ async function validateProfile(qmp, blocks, fourKn, sectorFault = false, fixture
     }
   }
   if (!fourKn) return;
-  for (const disk of fourKnDisks.filter(d => d.controller)) {
+  for (const disk of profileDisks(fourKn, fixture, bootWindows).filter(d => d.controller)) {
     const controller = `/machine/peripheral/${disk.controller}`;
     const block = blocks.find(b => b.inserted?.['node-name'] === disk.id);
     if (block.qdev !== disk.controller && block.qdev !== controller && !block.qdev?.startsWith(`${controller}/`)) {
@@ -477,13 +621,26 @@ async function validateProfile(qmp, blocks, fourKn, sectorFault = false, fixture
   }
 }
 
+async function validateRunProfile(qmp, blocks, state) {
+  const bootTools = state.bootTools ? resolveToolsManifest(state.bootTools) : undefined;
+  if (bootTools && await hashFile(bootTools.filename) !== bootTools.sha256) throw new Error('Tools ISO hash mismatch');
+  await validateProfile(qmp, blocks, state.fourKn === true, state.sectorFault === true,
+    stateFixture(state), state.bootWindows, bootTools);
+}
+
 async function preflight() {
   const state = readState();
   if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp(); // Checks the fixed VM name and UUID.
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
+    await validateRunProfile(qmp, await qmp.execute('query-block'), state);
+    if (state.bootWindows === 'verify') {
+      console.log('PASS: DiskStudio-Test identity, EDK2 firmware and only the isolated 16 GiB 4Kn Test B verified.');
+      if (state.bootTools) console.log('The verified read-only EDK2 tools CD is connected.');
+      return;
+    }
     console.log('PASS: DiskStudio-Test identity, three isolated QCOW2 disks, capacities and read-only tools CD verified.');
+    if (state.bootWindows === 'stage') console.log('The original Windows installer is attached as an additional read-only disc.');
     if (state.fourKn) console.log('Both disposable NVMe controllers expose 4096-byte logical and physical sectors.');
     if (state.sectorFault) console.log(`Read fault restricted to Test A 4Kn LBA ${state.repairFault ? surfaceRepairFaultLba : sectorCopyFaultLba}.`);
     if (state.repairFault) console.log('Surface repair fixture clears the injected error on Test A write completion.');
@@ -518,7 +675,7 @@ async function ioStats() {
   if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
   const qmp = await connectQmp();
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
+    await validateRunProfile(qmp, await qmp.execute('query-block'), state);
     const stats = await qmp.execute('query-blockstats');
     console.log(stats.filter(s => disks.some(d => d.id === s['node-name'])).map(s => ({
       disk: s['node-name'], readBytes: s.stats.rd_bytes, writtenBytes: s.stats.wr_bytes,
@@ -527,12 +684,32 @@ async function ioStats() {
   } finally { qmp.close(); }
 }
 
+async function bootScreenshot(wakeDisplay) {
+  const state = readState();
+  if (!isAlive(state?.pid) || stateFixture(state) !== 'boot-windows' || state.network !== false) {
+    throw new Error('Start the isolated Windows boot fixture first');
+  }
+  const qmp = await connectQmp();
+  try {
+    const blocks = await qmp.execute('query-block');
+    await validateRunProfile(qmp, blocks, state);
+    if (wakeDisplay) {
+      await qmp.execute('send-key', { keys: [{ type: 'qcode', data: 'shift' }], 'hold-time': 80 });
+      await delay(700);
+    }
+    const phase = state.bootWindows ?? 'repair';
+    const filename = safePath(path.join(mkdir('boot-windows-screens'), `${phase}-${Date.now()}-${crypto.randomUUID()}.png`), root, false);
+    await qmp.execute('screendump', { filename, format: 'png' });
+    console.log(filename);
+  } finally { qmp.close(); }
+}
+
 async function fixtureNumberKeys(value) {
   const state = readState();
   if (!isAlive(state?.pid) || state.fourKn !== true) throw new Error('Start the 4Kn test VM first');
   const qmp = await connectQmp();
   try {
-    await validateProfile(qmp, await qmp.execute('query-block'), true, state.sectorFault === true, stateFixture(state));
+    await validateProfile(qmp, await qmp.execute('query-block'), true, state.sectorFault === true, stateFixture(state), state.bootWindows);
     const send = async keys => {
       await qmp.execute('send-key', { keys: keys.map(data => ({ type: 'qcode', data })), 'hold-time': 100 });
       await new Promise(resolve => setTimeout(resolve, 160));
@@ -638,7 +815,7 @@ async function main() {
     if (args.length !== 1 || !['2', '3'].includes(args[0])) throw new Error('Choose the 4Kn fixture sector count of 2 or 3');
     return fixtureNumberKeys(args[0]);
   }
-  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'preflight', 'io-stats', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear', 'surface-read-window', 'surface-read-clear', 'surface-parallel-window', 'surface-parallel-clear'].includes(command)) {
+  if (!['init', 'doctor', 'smoke', 'start', 'install', 'status', 'shutdown', 'poweroff', 'login-keys', 'checkpoint', 'restore', 'refresh-tools', 'boot-attach-tools', 'preflight', 'io-stats', 'boot-screenshot', 'pause-vm', 'resume-vm', 'move-stop-window', 'move-stop-clear', 'surface-read-window', 'surface-read-clear', 'surface-parallel-window', 'surface-parallel-clear'].includes(command)) {
     console.log('Usage: node scripts/vm/lab.mjs init|doctor|smoke|start|install|status|shutdown|poweroff|login-keys|refresh-tools|preflight|io-stats|pause-vm|resume-vm|move-stop-window|move-stop-clear|checkpoint NAME|restore NAME');
     console.log('start/install: TCG by default. Optional --whpx (experimental; reboot exits), --network (user-mode NAT, no shares/forwarding)');
     console.log('start --4kn: use the separate offline pair of 4096-byte NVMe fixtures');
@@ -669,6 +846,12 @@ async function main() {
     console.log('start --4kn --ext-journal: use the dedicated 4Kn Ext4 journal fixture');
     console.log('start --4kn --table-mbr: use the dedicated 4Kn MBR partition table fixtures');
     console.log('start --4kn --boot-repair: use the dedicated 4Kn Windows boot repair fixtures');
+    console.log('start --4kn --boot-files: use the dedicated 4Kn Windows EFI file restore fixtures');
+    console.log('start --4kn --boot-store: use the dedicated 4Kn Windows BCD reconstruction fixtures');
+    console.log('start --4kn --boot-dirty or --boot-damaged: use the dedicated BCD log replay or replacement fixtures');
+    console.log('start --4kn --boot-windows [--boot-stage|--boot-verify]: stage or repair the Windows fixture, then boot only Test B under EDK2');
+    console.log('boot-screenshot [--wake-display]: capture the validated Windows boot fixture in .vm');
+    console.log('boot-attach-tools: connect the verified read-only tools ISO to the running EDK2 boot-only fixture');
     console.log('reallocation-capacity-keys 32|64: enter the 4Kn fixture capacity into the focused guest field');
     console.log('sector-copy-count-keys 2|3: enter the 4Kn fixture sector count into the focused guest field');
     console.log('surface-read-window|surface-read-clear: set or clear the fixed Test A 4Kn read limit');
@@ -676,13 +859,15 @@ async function main() {
     process.exitCode = command ? 1 : 0; return;
   }
   const allowed = ['start', 'install', 'smoke'].includes(command) ? ['--tcg', '--whpx', '--network'] : [];
-  if (command === 'start') allowed.push('--4kn', '--sector-copy-fault', '--surface-repair-fault', ...fixtureProfiles.map(name => `--${name}`));
+  if (command === 'boot-screenshot') allowed.push('--wake-display');
+  if (command === 'start') allowed.push('--4kn', '--sector-copy-fault', '--surface-repair-fault', '--boot-stage', '--boot-verify', ...fixtureProfiles.map(name => `--${name}`));
   if (!['checkpoint', 'restore'].includes(command) && args.some(a => !allowed.includes(a))) throw new Error('Unsupported option; arbitrary paths/QEMU arguments are not accepted');
   if (['checkpoint', 'restore'].includes(command) && args.length !== 1) throw new Error('Provide exactly one checkpoint name');
   if (args.includes('--tcg') && args.includes('--whpx')) throw new Error('Choose only one accelerator');
   if (command === 'doctor') return doctor();
   if (command === 'preflight') return preflight();
   if (command === 'io-stats') return ioStats();
+  if (command === 'boot-screenshot') return bootScreenshot(args.includes('--wake-display'));
   if (['move-stop-window', 'move-stop-clear'].includes(command)) return moveStopWindow(command === 'move-stop-window');
   if (['surface-read-window', 'surface-read-clear'].includes(command)) return surfaceReadWindow(command === 'surface-read-window');
   if (['surface-parallel-window', 'surface-parallel-clear'].includes(command)) return surfaceReadWindow(command === 'surface-parallel-window', true);
@@ -691,7 +876,7 @@ async function main() {
     if (!isAlive(state?.pid)) throw new Error('Start the test VM first');
     const qmp = await connectQmp();
     try {
-      await validateProfile(qmp, await qmp.execute('query-block'), state.fourKn === true, state.sectorFault === true, stateFixture(state));
+      await validateRunProfile(qmp, await qmp.execute('query-block'), state);
       await qmp.execute(command === 'pause-vm' ? 'stop' : 'cont');
       console.log(await qmp.execute('query-status'));
     } finally { qmp.close(); }
@@ -715,6 +900,7 @@ async function main() {
   }
   return withLock(async () => {
     if (command === 'refresh-tools') return refreshTools();
+    if (command === 'boot-attach-tools') return attachBootTools();
     if (command === 'init') return init();
     if (command === 'checkpoint') return checkpoint(args[0]);
     if (command === 'restore') return restore(args[0]);
@@ -722,7 +908,9 @@ async function main() {
     if (fixtures.length > 1) throw new Error('Choose one clone fixture');
     const repairFault = args.includes('--surface-repair-fault');
     if (repairFault && args.includes('--sector-copy-fault')) throw new Error('Choose one sector fault mode');
-    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn'), sectorFault: repairFault || args.includes('--sector-copy-fault'), repairFault, fixture: fixtures[0] };
+    const bootPhases = ['stage', 'verify'].filter(phase => args.includes(`--boot-${phase}`));
+    if (bootPhases.length > 1) throw new Error('Choose one Windows boot fixture phase');
+    const options = { accelerator: args.includes('--whpx') ? 'whpx' : 'tcg', setup: command === 'install', network: args.includes('--network'), fourKn: args.includes('--4kn'), sectorFault: repairFault || args.includes('--sector-copy-fault'), repairFault, fixture: fixtures[0], bootWindows: bootPhases[0] };
     if (options.accelerator === 'whpx') console.warn('Experimental WHPX: Windows startup/reset was unreliable on this host. Guest reboot exits QEMU; use start again.');
     if (command === 'smoke') {
       assertStopped();

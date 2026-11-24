@@ -70,36 +70,7 @@ pub fn inspect(r: &mut (impl Read + Seek), cancel: &AtomicBool) -> Result<Alloca
     if at(r, fs.size(), 512)? != boot {
         return Err("NTFS 主备引导扇区不一致。".into());
     }
-    let volume = fs.file(r, 3).map_err(err)?;
-    let mut attrs = volume.attributes();
-    let mut found = false;
-    while let Some(item) = attrs.next(r) {
-        let item = item.map_err(err)?;
-        let attr = item.to_attribute().map_err(err)?;
-        if attr.ty().map_err(err)? != NtfsAttributeType::VolumeInformation {
-            continue;
-        }
-        if found || !attr.is_resident() || attr.value_length() != 12 {
-            return Err("NTFS 卷状态不唯一或无效".into());
-        }
-        found = true;
-        let mut data = [0; 12];
-        attr.value(r)
-            .map_err(err)?
-            .attach(r)
-            .read_exact(&mut data)
-            .map_err(err)?;
-        let flags = u16at(&data, 10);
-        if data[8] != 3 || data[9] != 1 || flags & !SHORT_NAMES_DISABLED != 0 {
-            return Err(format!(
-                "按已用空间处理要求干净的 NTFS 3.1 卷，当前版本 {}.{}、状态 0x{flags:04X} 有待处理或不受支持。",
-                data[8], data[9]
-            ));
-        }
-    }
-    if !found {
-        return Err("NTFS 卷状态缺失。".into());
-    }
+    require_clean(&fs, r)?;
     let mut map = Allocation::new("NTFS", size);
     map.require(0, cluster)?;
     map.require(fs.size(), sector)?;
@@ -158,4 +129,47 @@ pub fn inspect(r: &mut (impl Read + Seek), cancel: &AtomicBool) -> Result<Alloca
     }
     map.validate()?;
     Ok(map)
+}
+
+pub(crate) fn require_clean(fs: &Ntfs, r: &mut (impl Read + Seek)) -> Result<(), String> {
+    check_volume_flags(fs, r, SHORT_NAMES_DISABLED)
+}
+
+pub(crate) fn require_resize_result(fs: &Ntfs, r: &mut (impl Read + Seek)) -> Result<(), String> {
+    // The resizing tool deliberately schedules the Windows filesystem check.
+    check_volume_flags(fs, r, SHORT_NAMES_DISABLED | 1)
+}
+
+fn check_volume_flags(fs: &Ntfs, r: &mut (impl Read + Seek), allowed: u16) -> Result<(), String> {
+    let volume = fs.file(r, 3).map_err(err)?;
+    let mut attrs = volume.attributes();
+    let mut found = false;
+    while let Some(item) = attrs.next(r) {
+        let item = item.map_err(err)?;
+        let attr = item.to_attribute().map_err(err)?;
+        if attr.ty().map_err(err)? != NtfsAttributeType::VolumeInformation {
+            continue;
+        }
+        if found || !attr.is_resident() || attr.value_length() != 12 {
+            return Err("NTFS 卷状态不唯一或无效".into());
+        }
+        found = true;
+        let mut data = [0; 12];
+        attr.value(r)
+            .map_err(err)?
+            .attach(r)
+            .read_exact(&mut data)
+            .map_err(err)?;
+        let flags = u16at(&data, 10);
+        if data[8] != 3 || data[9] != 1 || flags & !allowed != 0 {
+            return Err(format!(
+                "按已用空间处理要求干净的 NTFS 3.1 卷，当前版本 {}.{}、状态 0x{flags:04X} 有待处理或不受支持。",
+                data[8], data[9]
+            ));
+        }
+    }
+    if !found {
+        return Err("NTFS 卷状态缺失。".into());
+    }
+    Ok(())
 }

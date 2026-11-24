@@ -35,6 +35,52 @@ fn volume() -> Volume {
         file_system: Some("NTFS".into()),
     }
 }
+
+#[test]
+fn winpe_usb_file_target_requires_a_known_online_writable_data_partition() {
+    let mut disk = Disk {
+        bus_type: Some(7),
+        partition_style: Some(1),
+        is_boot: Some(false),
+        is_system: Some(false),
+        is_offline: Some(false),
+        is_read_only: Some(false),
+        is_clustered: Some(false),
+        ..Disk::default()
+    };
+    let mut part = Partition {
+        mbr_type: Some(0x0c),
+        is_boot: Some(false),
+        is_system: Some(false),
+        is_offline: Some(false),
+        is_read_only: Some(false),
+        is_hidden: Some(false),
+        is_shadow_copy: Some(false),
+        ..Partition::default()
+    };
+    assert!(check_winpe_media_partition(&disk, &part, true).is_ok());
+    disk.bus_type = Some(17);
+    assert!(check_winpe_media_partition(&disk, &part, true).is_err());
+    assert!(check_winpe_media_partition(&disk, &part, false).is_err());
+    disk.bus_type = Some(7);
+    disk.is_system = None;
+    assert!(check_winpe_media_partition(&disk, &part, true).is_err());
+    disk.is_system = Some(false);
+    part.is_hidden = Some(true);
+    assert!(check_winpe_media_partition(&disk, &part, true).is_err());
+    part.is_hidden = Some(false);
+    disk.partition_style = Some(2);
+    part.mbr_type = None;
+    part.gpt_type = Some(EFI_SYSTEM_TYPE.to_string());
+    assert!(check_winpe_media_partition(&disk, &part, true).is_err());
+    assert!(check_winpe_media_partition(&disk, &part, false).is_err());
+    part.gpt_type = Some(policy::BASIC_DATA.into());
+    assert!(check_winpe_media_partition(&disk, &part, true).is_ok());
+    disk.bus_type = Some(17);
+    assert!(check_winpe_media_partition(&disk, &part, false).is_ok());
+    part.is_shadow_copy = None;
+    assert!(check_winpe_media_partition(&disk, &part, false).is_err());
+}
 fn extent(number: u32, offset: u64, size: u64) -> [u8; 32] {
     let mut b = [0; 32];
     b[0] = 1;

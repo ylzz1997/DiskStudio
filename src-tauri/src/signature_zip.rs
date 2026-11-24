@@ -209,11 +209,22 @@ pub fn probe<R: Read + Seek>(
         Err(Error::Failed(e)) => Err(e),
     }
 }
-fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
+#[path = "signature_zip_fragments.rs"]
+pub(crate) mod fragments;
+
+struct Directory {
+    cd_start: u64,
+    cd_offset: u64,
+    end: u64,
+    entries: Vec<Entry>,
+    names: BTreeSet<Vec<u8>>,
+}
+
+fn directory<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
     p: &mut Probe<'_, R, T>,
     eocd: u64,
     preview: bool,
-) -> Result<(Archive, Option<OfficePackage>)> {
+) -> Result<Directory> {
     let h = p.read(eocd, 22)?;
     require(
         &h[..4] == b"PK\x05\x06"
@@ -269,15 +280,14 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
             && cd_offset <= MAX_FILE
             && cd_size <= MAX_FILE,
     )?;
-    let start = cd_end
-        .checked_sub(cd_size + cd_offset)
+    let cd_start = cd_end.checked_sub(cd_size).ok_or(Error::Invalid)?;
+    let length = cd_offset
+        .checked_add(end - cd_start)
         .ok_or(Error::Invalid)?;
-    require(start >= p.range.start && end >= start && end - start <= MAX_FILE)?;
+    require(cd_start >= p.range.start && length <= MAX_FILE)?;
     if let Some(at) = zip64_offset {
-        require(start.checked_add(at) == Some(cd_end))?;
+        require(cd_offset.checked_add(cd_size) == Some(at))?;
     }
-    p.range = start..end;
-    let cd_start = start + cd_offset;
     let mut at = cd_start;
     let mut entries = Vec::new();
     let mut names = BTreeSet::new();
@@ -350,67 +360,45 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
     if let Some(first) = entries.first() {
         require(first.offset == 0)?;
     }
+    Ok(Directory {
+        cd_start,
+        cd_offset,
+        end,
+        entries,
+        names,
+    })
+}
+
+fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
+    p: &mut Probe<'_, R, T>,
+    eocd: u64,
+    preview: bool,
+) -> Result<(Archive, Option<OfficePackage>)> {
+    let directory = directory(p, eocd, preview)?;
+    inspect_directory(p, directory, preview)
+}
+
+fn inspect_directory<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
+    p: &mut Probe<'_, R, T>,
+    directory: Directory,
+    preview: bool,
+) -> Result<(Archive, Option<OfficePackage>)> {
+    let Directory {
+        cd_start,
+        cd_offset,
+        end,
+        entries,
+        names,
+    } = directory;
+    let start = cd_start.checked_sub(cd_offset).ok_or(Error::Invalid)?;
+    require(start >= p.range.start)?;
+    p.range = start..end;
     let mut xml = BTreeMap::new();
     let mut preview_xml = 0;
     for (i, e) in entries.iter().enumerate() {
         let next = entries.get(i + 1).map_or(cd_start, |e| start + e.offset);
         let local = start + e.offset;
-        require(local.checked_add(30).is_some_and(|n| n <= next))?;
-        let l = p.read(local, 30)?;
-        require(
-            &l[..4] == b"PK\x03\x04"
-                && le16(&l, 4) == e.version
-                && le16(&l, 6) == e.flags
-                && le16(&l, 8) == e.method
-                && le32(&l, 10) == e.dos_time,
-        )?;
-        let (n, x) = (usize::from(le16(&l, 26)), usize::from(le16(&l, 28)));
-        let data = local
-            .checked_add(30 + (n + x) as u64)
-            .ok_or(Error::Invalid)?;
-        require(n == e.name.len() && data <= next && p.read(local + 30, n)? == e.name)?;
-        let extra = p.read(local + 30 + n as u64, x)?;
-        let required = [
-            le32(&l, 22) == u32::MAX,
-            le32(&l, 18) == u32::MAX,
-            false,
-            false,
-        ];
-        require(required[0] == required[1] && (!required[0] || e.version >= 45))?;
-        let z = zip64(&extra, required)?;
-        let (unpacked, packed) = (
-            z[0].unwrap_or(le32(&l, 22).into()),
-            z[1].unwrap_or(le32(&l, 18).into()),
-        );
-        let descriptor = e.flags & 8 != 0;
-        require(
-            (unpacked == e.unpacked || descriptor && unpacked == 0)
-                && (packed == e.packed || descriptor && packed == 0)
-                && (le32(&l, 14) == e.crc || descriptor && le32(&l, 14) == 0),
-        )?;
-        let data_end = data.checked_add(e.packed).ok_or(Error::Invalid)?;
-        require(data_end <= next)?;
-        if descriptor {
-            let width = if required[0] { 8 } else { 4 };
-            let plain = 4 + width * 2;
-            let len = usize::try_from(next - data_end).map_err(|_| Error::Invalid)?;
-            require(len == plain || len == plain + 4)?;
-            let d = p.read(data_end, len)?;
-            let skip = if len == plain + 4 {
-                require(&d[..4] == b"PK\x07\x08")?;
-                4
-            } else {
-                0
-            };
-            let sizes = if width == 8 {
-                (le64(&d, skip + 4), le64(&d, skip + 12))
-            } else {
-                (le32(&d, skip + 4).into(), le32(&d, skip + 8).into())
-            };
-            require(le32(&d, skip) == e.crc && sizes == (e.packed, e.unpacked))?;
-        } else {
-            require(data_end == next)?;
-        }
+        let (data, x) = local_record(p, e, local, next)?;
         let odf_mime =
             i == 0 && e.name == b"mimetype" && e.method == 0 && x == 0 && e.unpacked <= 127;
         let metadata = e.name == b"[Content_Types].xml"
@@ -452,6 +440,71 @@ fn inspect<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
         },
         package,
     ))
+}
+
+fn local_record<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(
+    p: &mut Probe<'_, R, T>,
+    e: &Entry,
+    local: u64,
+    next: u64,
+) -> Result<(u64, usize)> {
+    require(local.checked_add(30).is_some_and(|n| n <= next))?;
+    let l = p.read(local, 30)?;
+    require(
+        &l[..4] == b"PK\x03\x04"
+            && le16(&l, 4) == e.version
+            && le16(&l, 6) == e.flags
+            && le16(&l, 8) == e.method
+            && le32(&l, 10) == e.dos_time,
+    )?;
+    let (n, x) = (usize::from(le16(&l, 26)), usize::from(le16(&l, 28)));
+    let data = local
+        .checked_add(30 + (n + x) as u64)
+        .ok_or(Error::Invalid)?;
+    require(n == e.name.len() && data <= next && p.read(local + 30, n)? == e.name)?;
+    let extra = p.read(local + 30 + n as u64, x)?;
+    let required = [
+        le32(&l, 22) == u32::MAX,
+        le32(&l, 18) == u32::MAX,
+        false,
+        false,
+    ];
+    require(required[0] == required[1] && (!required[0] || e.version >= 45))?;
+    let z = zip64(&extra, required)?;
+    let (unpacked, packed) = (
+        z[0].unwrap_or(le32(&l, 22).into()),
+        z[1].unwrap_or(le32(&l, 18).into()),
+    );
+    let descriptor = e.flags & 8 != 0;
+    require(
+        (unpacked == e.unpacked || descriptor && unpacked == 0)
+            && (packed == e.packed || descriptor && packed == 0)
+            && (le32(&l, 14) == e.crc || descriptor && le32(&l, 14) == 0),
+    )?;
+    let data_end = data.checked_add(e.packed).ok_or(Error::Invalid)?;
+    require(data_end <= next)?;
+    if descriptor {
+        let width = if required[0] { 8 } else { 4 };
+        let plain = 4 + width * 2;
+        let len = usize::try_from(next - data_end).map_err(|_| Error::Invalid)?;
+        require(len == plain || len == plain + 4)?;
+        let d = p.read(data_end, len)?;
+        let skip = if len == plain + 4 {
+            require(&d[..4] == b"PK\x07\x08")?;
+            4
+        } else {
+            0
+        };
+        let sizes = if width == 8 {
+            (le64(&d, skip + 4), le64(&d, skip + 12))
+        } else {
+            (le32(&d, skip + 4).into(), le32(&d, skip + 8).into())
+        };
+        require(le32(&d, skip) == e.crc && sizes == (e.packed, e.unpacked))?;
+    } else {
+        require(data_end == next)?;
+    }
+    Ok((data, x))
 }
 
 fn content<R: Read + Seek, T: FnMut() -> std::result::Result<(), String>>(

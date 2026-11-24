@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { root, safePath, checkQcowHeader, buildArgs, disks, validateTestBlocks } from './lab.mjs';
+import { root, safePath, checkQcowHeader, buildArgs, disks, validateTestBlocks, validateBootOpticalBlock } from './lab.mjs';
 
 fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
 const folder = fs.mkdtempSync(path.join(root, 'tests', 'guard-'));
@@ -63,6 +63,46 @@ test('Windows installer sees one OS disk and read-only optical media', () => {
   assert.equal(blocks.find(b => b['node-name'] === 'installer')['read-only'], true);
   assert.doesNotMatch(args.join(' '), /DS-TEST/);
 });
+test('Windows boot fixture stages with read-only installation media and verifies from Test B alone', () => {
+  const options = { fourKn: true, fixture: 'boot-windows' };
+  const blocks = args => args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
+  const stage = buildArgs({ ...options, bootWindows: 'stage' });
+  assert.deepEqual(blocks(stage).filter(block => block.driver === 'qcow2').map(block => path.basename(block.file.filename)),
+    ['system.qcow2', 'test-a-boot-windows-4kn.qcow2', 'test-b-boot-windows-4kn.qcow2']);
+  assert.equal(blocks(stage).find(block => block['node-name'] === 'installer')['read-only'], true);
+  assert.ok(stage.includes('ide-cd,bus=ide.1,drive=installer'));
+
+  const verify = buildArgs({ ...options, bootWindows: 'verify' });
+  const devices = blocks(verify);
+  assert.deepEqual(devices.map(block => block['node-name']), ['boot_uefi_code', 'boot_uefi_vars', 'test_b']);
+  assert.equal(devices[0]['read-only'], true);
+  assert.equal(devices[1]['read-only'], false);
+  assert.equal(devices[2].file.filename, path.join(root, 'windows', 'test-b-boot-windows-4kn.qcow2'));
+  assert.ok(verify.includes('-S'));
+  assert.ok(verify.includes('q35,vmport=off,pflash0=boot_uefi_code,pflash1=boot_uefi_vars'));
+  assert.doesNotMatch(verify.join(' '), /ide-cd|DS-OS-0001|DS-TEST-A-0001|PhysicalDrive|GLOBALROOT|clipboard|hostfwd/i);
+  assert.throws(() => buildArgs({ fourKn: true, bootWindows: 'verify' }), /dedicated Windows boot fixture/);
+  assert.throws(() => buildArgs({ ...options, fourKn: false, bootWindows: 'verify' }), /4Kn profile/);
+  assert.throws(() => buildArgs({ ...options, network: true, bootWindows: 'stage' }), /installed offline guest/);
+  assert.throws(() => validateTestBlocks([{}, {}], true, false, 'boot-windows', 'verify'), /inventory/);
+});
+test('EDK2 accepts only the identified read-only optical backend', () => {
+  const filename = path.join(root, 'media', 'diskstudio-tools-00000000-0000-4000-8000-000000000000.iso');
+  const media = {
+    'node-name': 'firmware_tools_iso', file: filename, drv: 'raw', ro: true, backing_file_depth: 0,
+  };
+  const block = { removable: true, qdev: '/machine/peripheral/firmware_tools_cd', inserted: media };
+  assert.doesNotThrow(() => validateBootOpticalBlock(block, filename));
+  for (const changes of [
+    { file: path.join(root, 'media', 'different.iso') },
+    { 'node-name': 'test_b' }, { ro: false }, { drv: 'qcow2' }, { backing_file_depth: 1 },
+  ]) {
+    assert.throws(() => validateBootOpticalBlock({ ...block, inserted: { ...media, ...changes } }, filename), /optical backend/);
+  }
+  assert.throws(() => validateBootOpticalBlock({ ...block, removable: false }, filename), /optical backend/);
+  assert.throws(() => validateBootOpticalBlock({ ...block, qdev: '/machine/peripheral/test_b_4kn' }, filename), /optical backend/);
+  assert.throws(() => validateTestBlocks([], true, false, 'boot-windows', 'stage', { filename }), /boot-only fixture/);
+});
 test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () => {
   const args = buildArgs({ fourKn: true });
   const blocks = args.flatMap((value, i) => value === '-blockdev' ? [JSON.parse(args[i + 1])] : []);
@@ -77,7 +117,7 @@ test('4Kn profile keeps the OS and substitutes only the isolated NVMe pair', () 
 });
 test('clone and restore fixtures use independent NVMe images and start paused', () => {
   assert.throws(() => buildArgs({ fourKn: true, fixture: '../other' }), /separate 4Kn/);
-  for (const fixture of ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'retained-signatures', 'table-mbr', 'storage-spaces', 'boot-repair']) {
+  for (const fixture of ['whole-clone', 'btrfs-clone', 'btrfs-exact-clone', 'mixed-clone', 'btrfs-restore', 'archive-restore', 'capacity-restore', 'fat-restore', 'signature-scope', 'signature-formats', 'signature-media', 'signature-images', 'signature-containers', 'signature-audio', 'signature-documents', 'ext-journal', 'ext-journal-tree', 'ext-journal-resume', 'ext-complete', 'retained-signatures', 'table-mbr', 'storage-spaces', 'boot-repair', 'boot-files', 'boot-store', 'boot-dirty', 'boot-damaged']) {
     assert.throws(() => buildArgs({ fixture }), /separate 4Kn/);
     assert.throws(() => buildArgs({ fourKn: true, fixture, sectorFault: true }), /separate 4Kn/);
     const args = buildArgs({ fourKn: true, fixture });

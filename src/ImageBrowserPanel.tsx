@@ -21,6 +21,7 @@ export type ImageBrowseInfo = {
   sourceDisks: string[];
   options: ImageBrowseOptions;
   partitions: { id: number; name: string; start: number; size: number }[];
+  partitionTable?: "MBR" | "GPT";
   warning: string;
   verificationNotes?: string[];
   parallelsSnapshot?: { id: string; name: string; current: boolean };
@@ -37,6 +38,12 @@ export function ImageBrowserPanel({
   onClose,
   onBackup,
   onBootInspection,
+  onConvertTable,
+  onConvertPlacement,
+  onBackupTable,
+  onRestoreTable,
+  onInspectGpt,
+  onVirtualize,
   onRead,
   onReconstruct,
   onSignatures,
@@ -56,6 +63,12 @@ export function ImageBrowserPanel({
   onClose: () => void;
   onBackup: () => void;
   onBootInspection?: () => void;
+  onConvertTable?: (table: "mbr" | "gpt") => void;
+  onConvertPlacement?: (partition: number) => void;
+  onBackupTable: () => void;
+  onRestoreTable: () => void;
+  onInspectGpt: () => void;
+  onVirtualize: () => void;
   onRead: (partition: number, mode: ImageBrowseMode) => void;
   onReconstruct: (partition: number, mode: ImageBrowseMode) => void;
   onSignatures: (request: RetainedSignatureRequest) => void;
@@ -90,6 +103,12 @@ export function ImageBrowserPanel({
                 {t("Windows 启动检查")}
               </button>
             )}
+            {onConvertTable && info.partitionTable && info.options.kind === "disk" && (
+              <button className="button" disabled={busy || !available}
+                onClick={() => onConvertTable(info.partitionTable === "MBR" ? "gpt" : "mbr")}>
+                {t("生成 {style} 镜像副本", { style: info.partitionTable === "MBR" ? "GPT" : "MBR" })}
+              </button>
+            )}
             <button className="button" disabled={busy || !available} onClick={onBackup}>
               {t("备份镜像内容")}
             </button>
@@ -110,6 +129,7 @@ export function ImageBrowserPanel({
               {info.options.kind === "partition" ? t("分区镜像") : t("整盘镜像")} ·{" "}
               {formatSize(info.size)} ·{" "}
               {t("{size} B 扇区", { size: info.options.sector })}
+              {info.partitionTable && ` · ${info.partitionTable}`}
             </span>
             {info.parallelsSnapshot && (
               <span title={info.parallelsSnapshot.id}>
@@ -174,6 +194,28 @@ export function ImageBrowserPanel({
         </div>
         {info && <p className="data-footnote">{info.files.join(" · ")}</p>}
       </details>
+      {info && info.options.kind !== "partition" && (
+        <div className="data-action-row">
+          {info.options.kind === "disk" && info.partitionTable && (
+            <button className="button" disabled={busy || !available} onClick={onBackupTable}>
+              {t("备份镜像分区表")}
+            </button>
+          )}
+          <button className="button" disabled={busy || !available} onClick={onRestoreTable}>
+            {t("恢复镜像分区表")}
+          </button>
+          {(info.partitionTable === "GPT" || info.options.kind === "search") && (
+            <button className="button" disabled={busy || !available} onClick={onInspectGpt}>
+              {t("检查并修复镜像 GPT")}
+            </button>
+          )}
+          {info.options.kind === "disk" && (
+            <button className="button" disabled={busy || !available} onClick={onVirtualize}>
+              {t("导出 Windows 虚拟机")}
+            </button>
+          )}
+        </div>
+      )}
       <div className="data-action-row">
         {lvmName && <span>{lvmName}</span>}
         <button className="button" disabled={busy || !available} onClick={onLvm}>
@@ -238,6 +280,12 @@ export function ImageBrowserPanel({
           )}
           <div className="data-action-row">
             <span>{t("读取后可预览、搜索并提取文件或整个目录。")}</span>
+            {onConvertPlacement && info.partitionTable === "MBR" && (
+              <button className="button" disabled={busy || !available || partition === ""}
+                onClick={() => onConvertPlacement(Number(partition))}>
+                {t("转换选中分区的主/逻辑形式")}
+              </button>
+            )}
             <button className="button" disabled={busy || !available} onClick={onCopy}>
               {t("复制镜像扇区")}
             </button>

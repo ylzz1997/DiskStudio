@@ -1,5 +1,5 @@
 {
-  "reviewedAt": "2026-11-22",
+  "reviewedAt": "2026-11-23",
   "target": "补齐 DiskGenius 的用户功能；不是任选一组。逐项实现与验收，不发布空入口。",
   "sources": [
     "https://www.diskgenius.cn/help/",
@@ -12,7 +12,25 @@
     "https://www.diskgenius.com/manual/verify-or-repair-bad-sectors.php",
     "https://www.diskgenius.com/manual/copy-sectors.php",
     "https://www.diskgenius.com/manual/construct-virtual-raid.php",
-    "https://www.diskgenius.com/manual/operate-mss.php"
+    "https://www.diskgenius.com/manual/operate-mss.php",
+    "https://www.diskgenius.com/manual/set-uefi-bios-boot-entries.php",
+    "https://www.diskgenius.cn/resource/uefi-secure-boot-certificate.html",
+    "https://uefi.org/specs/UEFI/2.11/32_Secure_Boot_and_Driver_Signing.html",
+    "https://www.diskgenius.cn/help/batch-format-usb-disk.php",
+    "https://www.rfc-editor.org/rfc/rfc3533",
+    "https://www.rfc-editor.org/rfc/rfc9639.html",
+    "https://www.w3.org/TR/png-3/",
+    "https://www.diskgenius.com/manual/convert-partition-table-style.php",
+    "https://www.diskgenius.com/manual/convert-partition-type.php",
+    "https://uefi.org/specs/UEFI/2.11/05_GUID_Partition_Table_Format.html",
+    "https://www.diskgenius.com/how-to/convert-physical-windows-pc-to-vmware-virtual-machine.php",
+    "https://www.diskgenius.com/manual/virtualize-system-into-virtualbox.php",
+    "https://www.diskgenius.com/manual/system-migration.php",
+    "https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/hard-drives-and-partitions?view=windows-11",
+    "https://www.diskgenius.com/manual/create-winpe-bootable-disk-for-diskgenius.php",
+    "https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-create-usb-bootable-drive?view=windows-11",
+    "https://ecma-international.org/publications-and-standards/standards/ecma-119/",
+    "https://uefi.org/specs/UEFI/2.11/13_Protocols_Media_Access.html"
   ],
   "rules": [
     "一份正式程序；宿主仅查看 UI 和固定 WMI SELECT 元数据。",
@@ -211,7 +229,11 @@
     {
       "id": "mbr-management",
       "status": "in-progress",
-      "detail": "RAW/IMG 只读支持 MBR 主分区、单个扩展容器及最多 64 个常规 EBR 的逻辑分区，检查循环、边界、数据/表重叠；内存合成数据通过。实际设备管理、创建/删除/转换尚待实现；本轮 UI 与构建证据见 .vm/ebr-image-status.json 已明确支持 512 B 和 4 KiB 逻辑扇区的 MBR/EBR 读取。设备按已核对的几何读取，虚拟容器与整盘备份依照记录的扇区大小，明确选择扇区的 RAW 读取走同一校验。常规 EBR 链要求边界完整且无重叠或循环。"
+      "detail": "RAW/IMG 只读支持 MBR 主分区、单个扩展容器及最多 64 个常规 EBR 的逻辑分区，检查循环、边界、数据/表重叠；内存合成数据通过。实体盘管理、创建、删除和转换尚待实现。已明确支持 512 B 和 4 KiB 逻辑扇区的 MBR/EBR 读取。设备按已核对的几何读取，虚拟容器与整盘备份依照记录的扇区大小，明确选择扇区的 RAW 读取走同一校验。常规 EBR 链要求边界完整且无重叠或循环。镜像可在新 RAW 副本加入已验证的丢失主分区和逻辑分区。保留原主分区槽位、数据范围、原 EBR 数据条目与非表字节，并核对新 EBR 扇区全零。支持在现有扩展链基址前后添加候选，新增或调整容器时不得跨过主分区。首逻辑扇区全零时可重建 MBR，单独缺失 55AA 签名时须独立检查其余条目和扩展链。镜像原文件保持只读。",
+      "evidence": [
+        ".vm/ebr-image-status.json",
+        ".vm/image-partition-registration-status.json"
+      ]
     },
     {
       "id": "drive-letter",
@@ -275,25 +297,35 @@
     },
     {
       "id": "partition-table-convert",
-      "status": "planned",
-      "detail": "MBR/GPT 保留数据转换"
+      "status": "in-progress",
+      "detail": "已接入整盘数据镜像的 MBR/GPT 双向转换，输出到另一块物理磁盘上的新 RAW 镜像。保留逻辑扇区大小、分区起点、容量及数据。普通数据分区映射依据原表类型及受支持的文件系统证据，拒绝活动 MBR 分区、无法表达的 GPT 属性、未知类型和必要表扇区中的非零数据。保留 MBR 逻辑分区。GPT 超过四项时在空闲区布置扩展链，前三项转为主分区。生成新磁盘标识，确认前显示类型、范围和改写的表扇区。执行前再次比对表、引导扇区与必要空闲区；原始逻辑数据读取两遍，输出经完整 SHA-256 回读和独立分区表重解析后发布。512 B 和 4 KiB 合成六分区双向往返、FAT12 类型映射、源变化和冲突空间拒绝均通过。正式构建 1d22c810… 通过 1711 项集中检查，原生界面用合成 IPC 核验预览、取消与确认。只读验收 ISO 已核对同一程序、两份 4Kn 镜像和独立验收工具。隔离 A/B 实盘验收、物理盘原地转换与启动方式转换仍待完成。",
+      "evidence": [
+        ".vm/image-table-convert-status.json"
+      ]
     },
     {
       "id": "primary-logical-convert",
-      "status": "planned",
-      "detail": "MBR 主分区/逻辑分区转换"
+      "status": "in-progress",
+      "detail": "已接入 MBR 整盘数据镜像的主分区/逻辑分区双向转换，选择具体分区后生成跨盘 RAW 副本。保留所有分区的类型代码、起点、长度和数据，预览显示转换方向和改写量。检查可用主表项、全零 EBR 扇区和扩展容器范围，拒绝活动分区、未知目标类型及需要移动数据的布局。保留可复用的 EBR 和其非表数据，逐项重新解析输出并复核完整逻辑 SHA-256。512 B 与 4 KiB 的四主分区往返、扩展链向两端调整、受保护类型、槽位冲突及 EBR 空闲区变动已通过合成检查。正式构建 767fd971… 通过 1717 项集中检查，30 项按配置跳过。原生界面使用合成 IPC 核对两个方向的预览、取消和确认。已从只读验收光盘提取并核对同一正式程序、4Kn 六分区镜像和独立回读工具。隔离 A/B 验收与物理盘原地转换待完成。",
+      "evidence": ".vm/mbr-placement-status.json"
     },
     {
       "id": "partition-table-backup",
       "status": "in-progress",
-      "detail": "已实现常规 GPT 主备表、512 字节 MBR/EBR 和可选分区首扇区的 .dspt 备份及独立文件验证；历史 A/B 保存验收见 .vm/table-backup-status.json。新增原磁盘、相同几何/身份的有限 GPT 恢复：不可变备份句柄、实际文件卷定位、跨提供者/原生布局及保护检查、5 分钟单次令牌、锁卷后脱机、备份表先于主表、逐范围 SHA-256 回读、完整保护窗口及 Windows 原生布局复验。392 项检查通过；同一正式构建 3ff9a 在 VM A 完成无差异不写入，以及新建第 20 个分区后恢复原 19 分区布局，4 范围/33792 字节校验通过，A 保持脱机，B 仍脱机且写入计数未变。MBR/EBR 恢复、双 GPT 同时损坏、其他磁盘/几何、复杂类型与保护条目变更尚不支持。GPT 恢复的 4Kn、首扇区和故障场景有合成验收。4Kn MBR/EBR 归档保留完整逻辑扇区和可选的分区首扇区，历史 512 B 备份继续可读。隔离 Windows 来宾用正式构建 ce90ffe7 将 B 的 1 个 MBR、2 个 EBR 和 3 个分区首扇区保存到 A。应用回读和独立逐字节核对均通过。源盘保持脱机且无新增写入。见 .vm/table-mbr-status.json。",
-      "evidence": ".vm/table-restore-status.json"
+      "detail": "已实现常规 GPT 主备表、512 字节 MBR/EBR 和可选分区首扇区的 .dspt 备份及独立文件验证；历史 A/B 保存验收见 .vm/table-backup-status.json。新增原磁盘、相同几何/身份的有限 GPT 恢复：不可变备份句柄、实际文件卷定位、跨提供者/原生布局及保护检查、5 分钟单次令牌、锁卷后脱机、备份表先于主表、逐范围 SHA-256 回读、完整保护窗口及 Windows 原生布局复验。392 项检查通过；同一正式构建 3ff9a 在 VM A 完成无差异不写入，以及新建第 20 个分区后恢复原 19 分区布局，4 范围/33792 字节校验通过，A 保持脱机，B 仍脱机且写入计数未变。GPT 恢复的 4Kn、首扇区和故障场景有合成验收。4Kn MBR/EBR 归档保留完整逻辑扇区和可选的分区首扇区，历史 512 B 备份继续可读。隔离 Windows 来宾用正式构建 ce90ffe7 将 B 的 1 个 MBR、2 个 EBR 和 3 个分区首扇区保存到 A。应用回读和独立逐字节核对均通过。源盘保持脱机且无新增写入。见 .vm/table-mbr-status.json。已新增整盘镜像的 .dspt 备份和恢复。v2 镜像备份记录分区表、分区首扇区及整镜像逻辑 SHA-256；保留既有 v1 物理盘备份。可将主备 GPT 或 MBR/EBR 损坏的镜像以搜索模式打开，确认后核对表区以外的全部数据，再跨盘输出 RAW。原磁盘标识和布局随表恢复，分区首扇区作为核对依据。完整回读摘要与备份记录相同时才发布。正式构建 aaa6936b… 通过 1721 项集中检查，30 项按配置跳过。512 B 与 4 KiB 合成用例均逐字节恢复 GPT 双表和 MBR 扩展链，并验证表外数据变化、过时预览、错误几何及 v1 备份拒绝。只读光盘匹配正式程序、六份 4Kn 夹具和独立验收工具。隔离 A/B 实际备份、恢复和拒绝用例待验收。物理盘 MBR/EBR、双 GPT 同时损坏、不同几何及复杂类型恢复待实现。",
+      "evidence": [
+        ".vm/table-restore-status.json",
+        ".vm/image-table-recovery-status.json"
+      ]
     },
     {
       "id": "partition-table-check",
       "status": "in-progress",
-      "detail": "已实现镜像及设备的显式 GPT/512 字节 MBR/常规 EBR 有界检查，设备检查重复核验身份、布局、原生句柄和首尾快照。新增常规 GPT 单份表修复：有效副本必须与 Windows 原生布局一致，保留 PMBR、有效副本及全部分区条目，复用单次令牌、锁卷、脱机、逐范围 SHA-256 回读与完整保护窗口校验。398 项项目检查和 1 项隔离夹具检查通过。同一正式构建 a2a06f3b 在脱机 B 上完成健康无写入检查、受控备份头 CRC 错误诊断、1 范围/512 字节修复和复查；B 保持 9 分区及脱机，A 读写计数不变且仍为脱机 19 分区。GPT 主表和条目表损坏、4Kn 修复有合成检查。双表损坏、两份有效表冲突、MBR 重建与更广泛保留扇区修复仍未实现。正式构建 ce90ffe7 在隔离 Windows 来宾的脱机 B 上完成 4Kn MBR 检查，识别 1 个主分区、2 个逻辑分区和 2 个 EBR，并与 Windows 布局一致。检查和跨盘备份期间 B 无新增写入。见 .vm/table-mbr-status.json。",
-      "evidence": ".vm/table-diagnostics-status.json"
+      "detail": "已实现镜像及设备的显式 GPT/512 字节 MBR/常规 EBR 有界检查，设备检查重复核验身份、布局、原生句柄和首尾快照。新增常规 GPT 单份表修复：有效副本必须与 Windows 原生布局一致，保留 PMBR、有效副本及全部分区条目，复用单次令牌、锁卷、脱机、逐范围 SHA-256 回读与完整保护窗口校验。398 项项目检查和 1 项隔离夹具检查通过。同一正式构建 a2a06f3b 在脱机 B 上完成健康无写入检查、受控备份头 CRC 错误诊断、1 范围/512 字节修复和复查；B 保持 9 分区及脱机，A 读写计数不变且仍为脱机 19 分区。GPT 主表和条目表损坏、4Kn 修复有合成检查。正式构建 ce90ffe7 在隔离 Windows 来宾的脱机 B 上完成 4Kn MBR 检查，识别 1 个主分区、2 个逻辑分区和 2 个 EBR，并与 Windows 布局一致。检查和跨盘备份期间 B 无新增写入。见 .vm/table-mbr-status.json。新增镜像无备份 GPT 修复，可从任一通过独立 CRC32 和布局校验的表重建另一份。两份有效表冲突时比较两份磁盘标识和分区范围、类型及属性，明确选择依据后预览改写范围。只在可核对的 GPT 保留区域内重建，保留对方布局的数据范围和未使用的非零字节。支持由有效 GPT 重建缺失或损坏的普通保护性 MBR。拒绝混合 MBR、两表均损坏、超出核验范围的另一份表及已变化的检查快照。输出跨盘 RAW，并重新解析检查两份表和完整 SHA-256。正式构建 af213d62… 通过 1731 项集中检查，30 项按配置跳过。原生界面使用合成数据完成双表布局比较、选择备份 GPT 和单次确认；只读光盘与正式程序及五份 4Kn 夹具的 SHA-256 一致。隔离 A/B 实际修复待验收。物理盘双表损坏、两份有效表冲突、保护性 MBR 重建与更广泛保留扇区修复待实现。",
+      "evidence": [
+        ".vm/table-diagnostics-status.json",
+        ".vm/image-gpt-repair-status.json"
+      ]
     },
     {
       "id": "file-recovery",
@@ -423,9 +455,10 @@
     {
       "id": "lost-partitions",
       "status": "in-progress",
-      "detail": "已接入整盘/指定 LBA/未分配/现有分区范围的只读搜索，核对 NTFS、FAT12/16/32、exFAT、Ext2/3/4 和 Btrfs 的引导扇区或超级块及附加证据；候选明确区分现有/重叠/未登记，停止或失败保留已检查结果。浏览/预览/提取绑定源身份、布局与候选证据，缓存前限定原始读取范围。新增完整一致 GPT 中的未登记范围恢复：1–128 个普通数据条目、全零空槽、保留全部现有条目、重叠拒绝、重复候选核验、五分钟单次令牌、锁卷后脱机、备份表先写、SHA-256 回读及原生布局复验。fb26559e 正式构建通过 459 项检查；VM B 完整搜索末段 3.36 GiB，找到已准备的 2 MiB 未登记 NTFS，读取 4 文件并预览 12345；原生预览确认后新增第 10 条记录，4 段/33792 字节写入回读通过。独立只读工具确认 B/10、脱机、原生/原始 GPT 一致及整个文件系统逐字节未变；A/19 写入计数未变。早先 d35560fc 的搜索停止、现有大 NTFS 浏览证据独立保留。4ca200e3 正式构建在 4Kn Windows VM A 的 768 MiB 未登记范围发现两个 Btrfs 候选。备用超级块候选可读并保留目录导出两个文件到 B，搜索、浏览和导出期间 A 无新增写入。仅主超级块完整的候选登记为 A/42，主备 GPT 四个范围共 40,960 字节回读通过。独立复核两个完整源镜像、导出文件 SHA-256、A 脱机和 A 原有 GPT 条目，以及 B 与客体系统盘布局。已原生验收 NTFS 和 Btrfs 的单候选登记，其他格式及多候选写入仍待验收。不会还原原 GUID/名称/属性及额外尾部空间；MBR、双表丢失/损坏及重叠候选登记尚未实现，实际磁盘故障及竞态验收仍待完成。新增 Btrfs 联合浏览，从最近搜索中选择同一提交且位置、成员身份各自独立的候选。f6347c09 正式构建在 4Kn Windows VM 验收同盘分次搜索两成员、目录预览、跨条带文件导出、跨盘联合读取，以及拦截将第二个源盘作为导出目标。联合浏览仅使用所选范围执行只读文件恢复，无需预先登记分区。 已接入 NTFS、FAT32、exFAT 备用引导候选。按卷记录推导起点与容量，整个候选必须位于搜索范围内，并通过目录及冗余元数据核对。普通和 RAID 逻辑范围均复用候选验证。有效主引导的重复项、冲突和超范围证据被过滤。备用候选用于浏览和提取，预览与导出时重新校验，导出清单保留重建依据。 be2cddab 正式构建通过 806 项项目检查和 477 项来宾工具测试。512 字节隔离 VM 在 B 的专用 48 MiB 未分配区准确发现 NTFS、FAT32、exFAT 三个候选，预览全部三个样本，跨盘导出 FAT32 和 exFAT 各一份。独立逐字节核对文件及重建清单的 SHA-256，并确认 B 的整个夹具范围及相邻扇区、两盘 GPT 和系统盘布局保持原样，B 持续脱机。4Kn 和虚拟 RAID 备用引导搜索待原生验收。 新增校验和保护的 Ext4 备用超级块搜索。候选包含完整卷范围，核对当前块组描述符、根 inode 和日志，仅浏览和提取。512 字节跨扫描块和 4Kn 扇区内的备用超级块布局均通过合成测试，覆盖副本去重、主副本失效、超出范围、日志脏状态和重开时证据变化。 正式构建 03872969… 通过 184 项前端、96 项核心、613 项桌面后端、545 项来宾工具和 11 项 VM 工具检查，程序与只读光盘载荷的 SHA-256 一致。在独立 512 字节 Windows VM 内，从 B 的 66 MiB 未分配区找到一个 64 MiB 候选，列出 11,006 个文件，预览并跨盘导出 13 字节样本。独立核对输出字节与 SHA-256、备用超级块位置、完整源范围、相邻扇区、两盘 GPT 和来宾系统盘布局。B 持续脱机，搜索至后验期间无新增写入。Ext4 的 4Kn 实体路径及虚拟 RAID 路径待原生验收。 整盘镜像和已校验的整盘备份还原点可按 LBA 搜索。镜像分区表不完整时可显式以丢失分区搜索方式打开。候选绑定当前镜像会话或备份还原点，切换还原点后清除旧候选及结果。文件预览和导出复核候选证据，输出排除所有来源盘，清单记录来源、范围及还原点。分区镜像和分区备份使用既有文件视图。 正式构建 386badb3… 通过 1,451 项自动检查并与只读光盘载荷一致。独立 512 字节 Windows VM 从无分区表的 6 MiB RAW 镜像和两层增量备份最新点找到 LBA 2,049 的 2 MiB NTFS 候选，分别浏览 4 个文件、预览并跨盘导出 5 字节样本。切到基础点后旧结果清除，重新搜索只找到 LBA 4,097 的候选。独立回读核对两份输出的 SHA-256、导出清单的来源和范围、三个源文件、两张测试盘分区表及来宾系统盘布局。其他镜像容器和 4Kn 的损坏分区表入口待原生验收。 新增「全部未分配空间」，适用于可校验的物理盘、整盘镜像与整盘备份还原点。核对完整分区表，物理来源与 Windows 分区范围交叉检查。GPT 只搜索可用 LBA，MBR 排除引导和 EBR 扇区。多个空闲范围统一计算进度和证据预算，每个候选绑定其所在范围。512 字节与 4Kn GPT 合成测试核对两段空闲区、跳过同样具有文件系统的已登记分区、候选范围绑定及全局进度。另有 4Kn 扩展 MBR 合成测试。 正式构建 475b2de2… 通过 1,468 项自动检查并与两张只读光盘载荷一致。隔离 512 字节 Windows VM 扫描了脱机 B 的 15.73 GiB 未分配空间，找到唯一一处 64 MiB Ext4 候选并列出 11,006 个文件。B 的 QMP 写入字节及操作计数均为零。4Kn 逻辑扇区的 VHDX 和压缩整盘备份均找到 LBA 512、8192 的 exFAT，跳过 LBA 4096 的已登记副本，并可预览样本文件。独立核对两个源文件的完整 SHA-256、B 的 Ext4 样本及邻区、两张测试盘 GPT 和客体系统盘布局。4Kn 实体盘及扩展 MBR 路径待原生验收。",
+      "detail": "已接入整盘/指定 LBA/未分配/现有分区范围的只读搜索，核对 NTFS、FAT12/16/32、exFAT、Ext2/3/4 和 Btrfs 的引导扇区或超级块及附加证据；候选明确区分现有/重叠/未登记，停止或失败保留已检查结果。浏览/预览/提取绑定源身份、布局与候选证据，缓存前限定原始读取范围。新增完整一致 GPT 中的未登记范围恢复：1–128 个普通数据条目、全零空槽、保留全部现有条目、重叠拒绝、重复候选核验、五分钟单次令牌、锁卷后脱机、备份表先写、SHA-256 回读及原生布局复验。fb26559e 正式构建通过 459 项检查；VM B 完整搜索末段 3.36 GiB，找到已准备的 2 MiB 未登记 NTFS，读取 4 文件并预览 12345；原生预览确认后新增第 10 条记录，4 段/33792 字节写入回读通过。独立只读工具确认 B/10、脱机、原生/原始 GPT 一致及整个文件系统逐字节未变；A/19 写入计数未变。早先 d35560fc 的搜索停止、现有大 NTFS 浏览证据独立保留。4ca200e3 正式构建在 4Kn Windows VM A 的 768 MiB 未登记范围发现两个 Btrfs 候选。备用超级块候选可读并保留目录导出两个文件到 B，搜索、浏览和导出期间 A 无新增写入。仅主超级块完整的候选登记为 A/42，主备 GPT 四个范围共 40,960 字节回读通过。独立复核两个完整源镜像、导出文件 SHA-256、A 脱机和 A 原有 GPT 条目，以及 B 与客体系统盘布局。已原生验收 NTFS 和 Btrfs 的单候选登记，其他格式及多候选写入仍待验收。不会还原原 GUID/名称/属性及额外尾部空间；MBR、双表丢失/损坏及重叠候选登记尚未实现，实际磁盘故障及竞态验收仍待完成。新增 Btrfs 联合浏览，从最近搜索中选择同一提交且位置、成员身份各自独立的候选。f6347c09 正式构建在 4Kn Windows VM 验收同盘分次搜索两成员、目录预览、跨条带文件导出、跨盘联合读取，以及拦截将第二个源盘作为导出目标。联合浏览仅使用所选范围执行只读文件恢复，无需预先登记分区。 已接入 NTFS、FAT32、exFAT 备用引导候选。按卷记录推导起点与容量，整个候选必须位于搜索范围内，并通过目录及冗余元数据核对。普通和 RAID 逻辑范围均复用候选验证。有效主引导的重复项、冲突和超范围证据被过滤。备用候选用于浏览和提取，预览与导出时重新校验，导出清单保留重建依据。 be2cddab 正式构建通过 806 项项目检查和 477 项来宾工具测试。512 字节隔离 VM 在 B 的专用 48 MiB 未分配区准确发现 NTFS、FAT32、exFAT 三个候选，预览全部三个样本，跨盘导出 FAT32 和 exFAT 各一份。独立逐字节核对文件及重建清单的 SHA-256，并确认 B 的整个夹具范围及相邻扇区、两盘 GPT 和系统盘布局保持原样，B 持续脱机。4Kn 和虚拟 RAID 备用引导搜索待原生验收。 新增校验和保护的 Ext4 备用超级块搜索。候选包含完整卷范围，核对当前块组描述符、根 inode 和日志，仅浏览和提取。512 字节跨扫描块和 4Kn 扇区内的备用超级块布局均通过合成测试，覆盖副本去重、主副本失效、超出范围、日志脏状态和重开时证据变化。 正式构建 03872969… 通过 184 项前端、96 项核心、613 项桌面后端、545 项来宾工具和 11 项 VM 工具检查，程序与只读光盘载荷的 SHA-256 一致。在独立 512 字节 Windows VM 内，从 B 的 66 MiB 未分配区找到一个 64 MiB 候选，列出 11,006 个文件，预览并跨盘导出 13 字节样本。独立核对输出字节与 SHA-256、备用超级块位置、完整源范围、相邻扇区、两盘 GPT 和来宾系统盘布局。B 持续脱机，搜索至后验期间无新增写入。Ext4 的 4Kn 实体路径及虚拟 RAID 路径待原生验收。 整盘镜像和已校验的整盘备份还原点可按 LBA 搜索。镜像分区表不完整时可显式以丢失分区搜索方式打开。候选绑定当前镜像会话或备份还原点，切换还原点后清除旧候选及结果。文件预览和导出复核候选证据，输出排除所有来源盘，清单记录来源、范围及还原点。分区镜像和分区备份使用既有文件视图。 正式构建 386badb3… 通过 1,451 项自动检查并与只读光盘载荷一致。独立 512 字节 Windows VM 从无分区表的 6 MiB RAW 镜像和两层增量备份最新点找到 LBA 2,049 的 2 MiB NTFS 候选，分别浏览 4 个文件、预览并跨盘导出 5 字节样本。切到基础点后旧结果清除，重新搜索只找到 LBA 4,097 的候选。独立回读核对两份输出的 SHA-256、导出清单的来源和范围、三个源文件、两张测试盘分区表及来宾系统盘布局。其他镜像容器和 4Kn 的损坏分区表入口待原生验收。 新增「全部未分配空间」，适用于可校验的物理盘、整盘镜像与整盘备份还原点。核对完整分区表，物理来源与 Windows 分区范围交叉检查。GPT 只搜索可用 LBA，MBR 排除引导和 EBR 扇区。多个空闲范围统一计算进度和证据预算，每个候选绑定其所在范围。512 字节与 4Kn GPT 合成测试核对两段空闲区、跳过同样具有文件系统的已登记分区、候选范围绑定及全局进度。另有 4Kn 扩展 MBR 合成测试。 正式构建 475b2de2… 通过 1,468 项自动检查并与两张只读光盘载荷一致。隔离 512 字节 Windows VM 扫描了脱机 B 的 15.73 GiB 未分配空间，找到唯一一处 64 MiB Ext4 候选并列出 11,006 个文件。B 的 QMP 写入字节及操作计数均为零。4Kn 逻辑扇区的 VHDX 和压缩整盘备份均找到 LBA 512、8192 的 exFAT，跳过 LBA 4096 的已登记副本，并可预览样本文件。独立核对两个源文件的完整 SHA-256、B 的 Ext4 样本及邻区、两张测试盘 GPT 和客体系统盘布局。4Kn 实体盘及扩展 MBR 路径待原生验收。 新增整盘镜像候选多选登记。保留完整 GPT 或 MBR 的既有分区，支持 RAW 副本的 MBR 主分区、逻辑分区与自动分配。全零首逻辑扇区可新建 MBR 或 GPT，缺失 MBR 签名可在现有条目和完整 EBR 链均通过检查时补回。重新核对候选文件系统、未分配空间和全零 EBR，复制后回读候选和分区表并校验完整逻辑 SHA-256。正式构建 57837a2c… 通过 1739 项集中检查，30 项按配置跳过。512 B 和 4 KiB 的合成用例覆盖多候选新建、保留原 MBR 条目、向前延伸 EBR 链以及重叠、非零保留扇区与已变化候选的拒绝。原生界面使用合成 IPC 验证搜索结果勾选、逻辑分区预览和确认。只读光盘已与正式程序及两个 4Kn FAT12 样本匹配。隔离 A/B 实际登记和文件回读待验收。 WinPE 原生界面已接入整盘镜像的整盘、全部未分配空间与指定 LBA 搜索。候选可重新核对后预览现存文件和删除候选。只读隔离 WinPE 512 B 与合成 4Kn 的证据、普通文件导出验证见 .vm/winpe-lost-status.json。 WinPE 已接入多候选登记到新 RAW 副本，支持预览保留现有分区条目与空白表重建。隔离 UEFI 原生预览和 512 B / 4Kn 普通文件副本验证见 .vm/winpe-register-status.json。",
       "evidence": [
         "src-tauri/src/lost_backup_ext.rs",
+        ".vm/image-partition-registration-status.json",
         ".vm/lost-ext-status.json",
         "src-tauri/src/retained_partition_tasks.rs",
         ".vm/retained-search-status.json",
@@ -462,8 +495,14 @@
     },
     {
       "id": "fragment-recovery",
-      "status": "planned",
-      "detail": "受证据约束的碎片恢复；不猜测并宣称完整"
+      "status": "in-progress",
+      "detail": "已接入可选的 ZIP、Office Open XML 和 OpenDocument 碎片重组。根据完整中央目录、记录偏移、压缩流边界与逐项 CRC 唯一匹配各处保留的完整成员记录，再核对重组后完整归档和 SHA-256。单包最多 256 个成员。支持所选范围与可复核空闲簇，暂停后从碎片阶段起点继续，保留已发布的连续候选。独立 .NET ZIP 样本验证逐字节复原，其他合成样本验证 ZIP64、数据描述符、重复匹配拒绝、空闲范围复核、内容变化、暂停和 DOCX 预览。正式构建 f67e7af9… 通过 1678 项集中检查，正式程序与只读光盘载荷 SHA-256 一致。原生 WebView 使用合成 IPC 验证签名设置、候选和文档预览。后续加入 Ogg 逻辑流重组，按流序列号和页序号排序，校验页 CRC、包延续和结束标记。拒绝缺页、损坏页和重复页，保留普通连续多流结果。核对乱序 Opus 复原字节、跨页包的标记、续扫以及空闲簇检查。正式构建 9a2224d5… 通过 1689 项集中检查及载荷 SHA-256 核对，原生 WebView 用合成 IPC 验证选项、候选和 Opus 播放。已准备 4Kn FAT12 夹具，加入已分配簇中的重复页作为对照。后续加入 FLAC 碎片重组，复用帧结构和 CRC 检查，按帧号或采样位置重组完整音频，对已有寻址点和解码 PCM 的 STREAMINFO MD5 执行核对，拒绝缺帧及多个校验通过的布局。独立 24 位样本逐字节复原，FFmpeg 核对原 PCM 摘要。正式构建 d2de51f1… 通过 1695 项集中检查。用合成 IPC 在原生 WebView 验证选项、候选和 FLAC 播放。隔离来宾用只读光盘已包含相同正式程序及两种格式的 4Kn FAT12 合成镜像，并独立核对载荷。后续加入静态 PNG 碎片重组，首个 IDAT 区域须紧接文件头，末段须保留 IEND。支持在完整 IDAT 块边界重组，核对各块 CRC、完整 zlib 校验和与所有扫描行，包括 Adam7。普通 PNG 扫描按块顺序与 CRC 确定结束位置，兼容旧进度。合成用例逐字节复原，验证重复匹配、错误校验和、缺失结尾、空闲范围和旧进度续扫。正式构建 6f81be9a… 通过 1705 项集中检查，FFmpeg 独立核对 RGB 样本，原生 WebView 以合成 IPC 验证选项和实际 PNG 解码。已核对只读 ISO 内同一程序与 PNG、Ogg、FLAC 三格式 4Kn FAT12 合成夹具。成员、页、帧或块内部断裂及其他格式的通用重组仍待扩展。隔离来宾实盘验收待完成。",
+      "evidence": [
+        ".vm/zip-fragments-status.json",
+        ".vm/ogg-fragments-status.json",
+        ".vm/flac-fragments-status.json",
+        ".vm/png-fragments-status.json"
+      ]
     },
     {
       "id": "tree-export",
@@ -514,8 +553,9 @@
     },
     {
       "id": "system-migration",
-      "status": "planned",
-      "detail": "系统迁移与目标启动验证；需另设可处置系统测试盘"
+      "status": "in-progress",
+      "detail": "支持从脱机 Windows x64 源盘或 WinPE 锁卷后的源盘迁移到同逻辑扇区大小的无分区 RAW 或 GPT 目标。写前核对启动配置、加载器、NTFS 卷状态及 SYSTEM 配置单元。保留磁盘和分区标识。默认沿用分区起点，GPT 备份表随目标盘末尾调整。BIOS/MBR 要求 512 字节逻辑扇区及不小于源盘的目标，可在 UEFI 副本补齐缺失的 EFI 回退入口。870f483e… 通过 4Kn 真实 WinPE 迁移、16 GiB 全盘 SHA-256 回读和断开源盘后的 Windows LogonUI 启动。cd51afa4… 在桌面离线迁移和 WinPE 续接中接通 GPT 系统 NTFS 分区及普通 NTFS 数据分区的容量调整。先试算，再对脱机副本执行扩缩，逐页核对改写范围并把其余范围与原迁移流对照，最终核对全盘 SHA-256 和启动链。1784 项自动化检查与 10 项 NTFS 引擎检查通过，包含 512 字节和 4Kn 的合成 Windows 分区扩缩。4Kn 真实迁移将系统卷从 15071 MiB 缩至 12288 MiB，同时将数据卷从 16 MiB 扩至 20 MiB。独立复核通过容量、卷标识、标记文件、启动链及任务消费记录。移除源盘和 WinPE 光盘后，目标独立启动到 Windows Server Core LogonUI。离线迁移和 WinPE 续接支持为系统 NTFS 分区及普通 NTFS 数据分区指定目标起点，可与调容组合。保留 GPT GUID 和 NTFS 卷序列号，核对目标范围后从原盘计算目标扇区流，更新移动分区的 NTFS 主备引导扇区。512 字节与 4Kn 合成测试通过。516d723c… 在 4Kn WinPE 中将 Windows 系统卷由 288 MiB 移至 320 MiB 并缩至 12288 MiB，数据卷移至 13312 MiB 并扩至 20 MiB。通过 16 GiB 全盘 SHA-256、原起点清零、标记文件、目标脱机和任务消费复核。移除源盘与光盘后，目标独立启动到 Windows Server Core LogonUI。1786 项自动化检查与 10 项 NTFS 引擎检查通过。GPT 支持选择 Windows 必需分区和额外数据分区，也可复制全部分区。离线迁移预览列出复制和跳过的范围，WinPE 续接绑定选择。程序从 Windows 启动管理器核对启动、恢复和休眠相关设备，自动保留必需及受保护分区。c6383628… 通过 512 字节和 4Kn 合成迁移及隔离 WinPE 实测。真实 4Kn 迁移跳过 1000 MiB FAT32 分区并将勾选的 16 MiB NTFS 数据卷移到其原起点，16 GiB 全盘 SHA-256、小卷样本、清零范围、目标脱机及一次性任务复核通过。移除源盘与光盘后，目标启动至 Windows Server Core LogonUI。1790 项自动化检查和 10 项 NTFS 引擎检查通过。桌面和 WinPE 现支持在同一任务中选择最多八个目标，逐盘绑定分区范围和布局。首次写入前锁定并复核整批目标，写入后逐盘回读。真实一源多目标验收及热迁移仍待完成。",
+      "evidence": [".vm/migration-resize-status.json", ".vm/migration-relocation-status.json", ".vm/migration-selection-status.json"]
     },
     {
       "id": "system-hot-backup",
@@ -635,7 +675,16 @@
       "id": "raid",
       "status": "in-progress",
       "detail": "可显式选择 RAW/IMG 文件，按成员顺序、字节范围、扇区与条带参数只读重组 JBOD、RAID0/1/4、near RAID10、常见 RAID5 及 DDF RAID6。冗余布局按条带核对可用性；成员齐全的校验阵列抽查条带，成员顺序与布局需独立确认。支持 GPT/MBR 分区浏览或直接读取支持的文件系统，并跨盘导出与记录重组参数。Alpha 3 构建 4d589f8d… 通过 774 项集中检查和 449 项来宾工具测试。4Kn Windows 原生界面拒绝未对齐范围，成功组装三份 RAW 左对称 RAID5 成员。跨盘导出保留嵌套目录，独立核对文件与 Linux SHA-256、清单范围和顺序、三个源文件、两个测试盘 GPT 与来宾系统盘布局。完整阵列与分别缺任一成员的四组普通文件测试都符合完整逻辑 SHA-256。后续批次已支持物理整盘和分区成员，拒绝重复、重叠及未按设备扇区对齐的范围。分区表缺失或损坏时可指定逻辑扇区范围搜索，按候选证据重新校验后读取并跨盘导出。该批正式构建 96e4ed3a… 通过 777 项集中检查和 452 项来宾工具测试，构建、留档与来宾光盘 SHA-256 一致。4Kn Windows 原生界面验收两分区 RAID0 与从整盘范围读取的单成员 RAID1。两种方式都在 LBA 1024 找到 32 MiB Ext4，RAID1 的搜索从 LBA 256 开始。两份嵌套文件跨盘导出，独立后验核对 Linux SHA-256、来源及候选范围清单、三个完整源范围与原有布局。可直接重新组装当前阵列，带入当前成员和参数或改选来源。构建 a679c0df… 通过 778 项集中检查和 453 项来宾工具测试。4Kn Windows 原生界面把整盘范围改为同边界的分区，拒绝少一字节的成员长度，取消后可读取旧候选。调整成员位置和逻辑扇区后，旧搜索和目录清除，新搜索在 LBA 8192 找到原 32 MiB Ext4 并列出嵌套文件。虚拟 RAID 已支持 Linux md 的全部 14 种 RAID6 布局。五成员的 4Kn Linux 内核样本验证了 224 种可读组合的完整逻辑字节和跨条带读取，并拒绝 224 种超出缺盘上限的组合。正式构建 ab007ed6… 通过 779 项集中检查和 453 项来宾工具测试，构建、留档与只读光盘内的正式载荷摘要一致。4Kn Windows 原生界面选取五个左对称 RAID6 成员中的三个，成功以缺两盘状态读取 Ext4 并保留目录跨盘导出 1,179,648 字节。独立工具核对导出文件与 Linux 的 SHA-256、重组清单、五份源文件、两盘 GPT 及来宾系统盘布局。已实现 Linux md 1.0、1.1、1.2 超级块的显式参数识别。核对阵列身份、超级块校验和、事件、角色及数据范围，再填入布局、条带和缺失槽位。组装和数据任务复核元数据，导出清单记录版本、阵列 UUID、事件和指纹。Linux 4Kn 内核生成的六套阵列覆盖三个版本，验证 37 种可读组合并拒绝 39 种成员不足的组合。正式构建 f2530440… 通过 781 项集中检查和 453 项来宾工具测试，构建、留档及光盘载荷摘要一致。4Kn Windows 原生界面从乱序的三个 RAW 成员中识别缺两盘的 Linux md 1.2 RAID6，自动排列槽位与偏移。重新组装保留元数据，编辑长度后转为手动参数，取消恢复原组装。跨盘导出 1,179,648 字节，独立核对 Linux SHA-256、导出元数据、五个成员和两盘 GPT 及系统盘布局。虚拟 RAID 已实现 Linux md 不等长 RAID0 的 original 与 alternate 布局。以成员有效长度建立条带区，按相应规则选择每区成员顺序。Linux md 自动识别要求标记明确或两种映射经长度推导一致。两个 4Kn Linux 内核样本的完整 36 MiB SHA-256、两处边界和已知错误布局比对通过，14 种成员不齐组合被拒绝。前批六套阵列的 37 种可读组合和 39 种拒绝组合回归通过。正式构建 30afa8a2… 通过 783 项集中检查和 453 项来宾工具测试，构建、留档及只读光盘文件摘要一致。4Kn Windows 原生界面从三个 A 盘物理分区识别 Linux md 1.2 alternate，在 LBA 4352 找到 16 MiB Ext4，并保留目录跨盘导出 1,179,648 字节。独立工具核对 Linux SHA-256、导出成员范围和超级块元数据、三个源分区完整摘要、A/B 两盘 GPT 及系统盘布局。导出清单记录文件和目录的时间或属性警告。虚拟 RAID 的 Linux md RAID10 支持 near、far、offset、奇数成员和可设置的副本数，far 与 offset 可使用固定远端副本组。缺盘按每段逻辑条带是否仍有副本判断，现有副本相异时停止读取。Linux 内核原生生成的五成员 n2、n3、f3、o2 样本覆盖 128 种选择，64 种可读组合完整逻辑内容与 Linux 一致，其余 64 种被拒绝。LVM2 RAID10 共享同一映射逻辑，历史 30 种卷与成员组合回归通过。正式构建 d0394a61… 通过 784 项集中检查和 453 项来宾工具测试，构建、留档及光盘载荷摘要一致。4Kn Windows 原生界面使用三个 RAW 成员识别缺两盘的五成员 Linux md 1.2 offset 阵列。重新编辑回显参数，改变布局时清除识别标记，取消后可继续读取原阵列。Ext4 目录保留并跨盘导出 1,179,648 字节，独立核对文件与 Linux 的 SHA-256、导出清单与超级块、五份源镜像、A/B GPT 和来宾系统盘布局。默认数据卷容量检查阻止写入样本，采用 A 盘另一现有数据卷完成后验。导出清单记录一个文件和一个目录的时间或属性警告。虚拟 RAID 已支持混合 near/far、混合 offset、旧式和固定分组的 Linux md RAID10。支持手动参数及超级块识别。组装前以周期验证所有副本物理地址的边界和重叠，拒绝会让不同逻辑块指向相同物理块的布局。Linux 内核生成的四套 4Kn 样本覆盖 448 种成员选择，349 种读取的完整逻辑数据与内核一致，99 种因副本不足被拒绝。常规 RAID10 128 种和 LVM2 RAID10 30 种组合回归通过。正式桌面构建 d712f556… 通过 785 项集中检查和 453 项来宾工具测试。本地构建、留档和实际只读光盘中的正式可执行文件摘要一致。4Kn Windows 原生界面识别六槽混合 offset，使用三份 RAW 镜像组装 18 MiB 逻辑阵列。重新编辑时核对原参数，将槽位改为五个时拒绝物理地址重叠。取消后继续用原阵列跨盘导出 Ext4 文件。独立核对目录、文件与 Linux 的 SHA-256、导出清单、六份源镜像、A/B GPT 及来宾系统盘布局。一个文件和一个目录的时间或属性警告记录在导出清单。控制器专用布局仍待实现。",
-      "evidence": [".vm/virtual-raid-batch-status.json", ".vm/virtual-raid-device-status.json", ".vm/virtual-raid-recompose-status.json", ".vm/virtual-raid-md6-status.json", ".vm/virtual-raid-md-metadata-status.json", ".vm/virtual-raid-md-zones-status.json", ".vm/virtual-raid-md10-status.json", ".vm/virtual-raid-md10-advanced-status.json"]
+      "evidence": [
+        ".vm/virtual-raid-batch-status.json",
+        ".vm/virtual-raid-device-status.json",
+        ".vm/virtual-raid-recompose-status.json",
+        ".vm/virtual-raid-md6-status.json",
+        ".vm/virtual-raid-md-metadata-status.json",
+        ".vm/virtual-raid-md-zones-status.json",
+        ".vm/virtual-raid-md10-status.json",
+        ".vm/virtual-raid-md10-advanced-status.json"
+      ]
     },
     {
       "id": "lvm",
@@ -681,34 +730,75 @@
     },
     {
       "id": "system-virtualization",
-      "status": "planned",
-      "detail": "系统转 VMware/VirtualBox 与启动验证"
+      "status": "in-progress",
+      "detail": "已接入受支持的 512 字节逻辑扇区 Windows x64 整盘镜像和脱机物理盘。检查 BIOS 或 UEFI 启动路径、下一次启动项以及默认 Windows 控制集中的 SATA 或 NVMe 驱动。可在输出副本中补齐缺失的 x64 EFI 回退入口。确认后在另一物理盘生成 VMware VMX/VMDK 或 VirtualBox VBOX/VDI，默认禁用网络和共享目录。源读取两遍，虚拟磁盘和配置均在发布前回读验证。正式构建 a78fa627… 通过 1747 项自动检查，与已打包的只读光盘载荷 SHA-256 一致。QEMU 逐字节比对了两个合成虚拟磁盘，另核对配置结构、VDI 标识及磁盘引用。正式桌面用合成 IPC 验证两种平台、取消和确认、结果回显及 4Kn 限制。真实 512 字节 A/B 导出、平台导入和 Windows 启动待验收。运行中的 Windows 系统迁移另列。",
+      "evidence": ".vm/system-virtualization-status.json"
     },
     {
       "id": "boot-repair",
       "status": "in-progress",
-      "detail": "Windows 启动检查已接入已打开的整盘或分区镜像、备份还原点及身份与布局已核对的脱机物理磁盘。整盘先校验 GPT/MBR，选择 EFI 系统分区或活动 MBR 主分区。按固定路径读取 FAT12/16/32、Legacy BIOS 的 NTFS 启动文件与 BCD，核对 EFI PE 应用头和回退文件架构，报告文件 SHA-256、默认项、菜单顺序、缺失对象和超时。待回放的 BCD 显示为无效，镜像、备份、物理盘和固件均以只读方式处理。修正了物理磁盘和备份的显示名称被当作镜像文件名校验的问题。正式构建 8d987b78… 通过 1579 项集中检查及载荷核对。隔离 4Kn Windows 原生界面核对了 512 B GPT/FAT32 镜像的 x64 UEFI 启动管理器和回退文件、旧版 MBR/FAT16 备份的 Legacy BIOS 启动管理器与空 MBR 引导代码、默认 Windows Setup 菜单、待回放的 BCD 拒绝，以及脱机 B 没有 EFI 系统分区的结果。独立工具核对三份夹具摘要、两盘 GPT 和来宾系统盘布局。B 保持脱机且无新增写入。英文界面部分分区表详情仍使用中文。后续加入 BCD 启动设备与系统设备的独立核对。GPT 使用核验一致的主备表中的磁盘与分区 GUID，MBR 使用磁盘签名与分区字节偏移。匹配后在对应 FAT 或 NTFS 范围内查找 ASCII 卷内路径，报告加载器 PE 头、SHA-256 和系统目录状态。相对引用按当前启动分区检查。对跨盘和间接设备报告未解析状态，对 NTFS 重解析点及父路径拒绝读取。正式构建 22fae8c9… 通过 1585 项集中检查，载荷 SHA-256 一致。隔离 4Kn Windows 原生界面在合成 GPT 镜像和 MBR 第 1 版备份的第二个 FAT 分区核对了 Windows 安装介质原版 x64 加载器和系统目录。分别核对了缺失分区、跨盘签名、缺失加载器和目录、间接设备和父路径。回读核对两份夹具及加载器 SHA-256、A/B 的 GPT 和来宾系统盘布局，B 保持脱机且无新增写入。英文界面仍有中文分区名称。NTFS 加载器原生用例、签名信任与实际启动仍待验收。支持从兼容的库与应用对象逐级解析 BCD 启动设备、加载器路径、系统设备和目录、默认项、菜单以及恢复设置。直接值优先，父分支不一致时标记冲突，缺失对象、类型错误和循环会使未设置的继承值进入无法核对状态。显示已确认的来源对象、启动序列、工具顺序和恢复序列。32aedbf4… 正式构建通过 1589 项自动检查，另以合成 GPT/FAT32 与 NTFS 镜像核对原版 x64 winload.efi 的 PE 和 SHA-256。真实检查报告通过浏览器组件验收。正式程序与只读光盘载荷 SHA-256 一致，工具盘已接入核对过的隔离 VM，来宾解锁后仍需进行原生界面与回读验收。已接入脱机 GPT 磁盘上现有 UEFI BCD 启动项的直接设备引用修复。Windows 原生布局与 WMI 身份及 GPT 主备表的分区 GUID、边界、类型和属性交叉核对。选择同盘 Windows 分区后验证 EFI 启动管理器、Windows 加载器及系统目录。可将菜单已有项设为默认。确认前显示旧、新引用和 BCD 摘要，原始 BCD 先保存到另一物理盘并回读核验，再用一次性确认写入受限物理块。正式构建 3110d1b6… 通过 1599 项自动检查，另在 512e 与 4Kn 合成镜像核验失败拒绝、确认取消、完整读取与邻接字节。正式程序与工具光盘载荷的 SHA-256 相同。隔离 4Kn Windows 原生界面修复 B 上的两个失效 GPT 引用并设置新默认项，A 留存 20 KiB 原始备份。B 从预览到独立回读仅增加两次 4 KiB 写入，并保持脱机。独立核对原始 BCD、修复后的 BCD、NTFS 加载器、EFI 管理器、A/B GPT 与来宾系统盘布局。启动文件重建、BIOS/UEFI 转换、实际 UEFI 启动和签名信任仍待完成或验收。",
-      "evidence": [".vm/boot-inspection-status.json", ".vm/boot-references-status.json", ".vm/boot-inheritance-status.json", ".vm/boot-repair-status.json"]
+      "detail": "Windows 启动检查已接入已打开的整盘或分区镜像、备份还原点及身份与布局已核对的脱机物理磁盘。整盘先校验 GPT/MBR，选择 EFI 系统分区或活动 MBR 主分区。按固定路径读取 FAT12/16/32、Legacy BIOS 的 NTFS 启动文件与 BCD，核对 EFI PE 应用头和回退文件架构，报告文件 SHA-256、默认项、菜单顺序、缺失对象和超时。待回放的 BCD 显示为无效，镜像、备份、物理盘和固件均以只读方式处理。修正了物理磁盘和备份的显示名称被当作镜像文件名校验的问题。正式构建 8d987b78… 通过 1579 项集中检查及载荷核对。隔离 4Kn Windows 原生界面核对了 512 B GPT/FAT32 镜像的 x64 UEFI 启动管理器和回退文件、旧版 MBR/FAT16 备份的 Legacy BIOS 启动管理器与空 MBR 引导代码、默认 Windows Setup 菜单、待回放的 BCD 拒绝，以及脱机 B 没有 EFI 系统分区的结果。独立工具核对三份夹具摘要、两盘 GPT 和来宾系统盘布局。B 保持脱机且无新增写入。英文界面部分分区表详情仍使用中文。后续加入 BCD 启动设备与系统设备的独立核对。GPT 使用核验一致的主备表中的磁盘与分区 GUID，MBR 使用磁盘签名与分区字节偏移。匹配后在对应 FAT 或 NTFS 范围内查找 ASCII 卷内路径，报告加载器 PE 头、SHA-256 和系统目录状态。相对引用按当前启动分区检查。对跨盘和间接设备报告未解析状态，对 NTFS 重解析点及父路径拒绝读取。正式构建 22fae8c9… 通过 1585 项集中检查，载荷 SHA-256 一致。隔离 4Kn Windows 原生界面在合成 GPT 镜像和 MBR 第 1 版备份的第二个 FAT 分区核对了 Windows 安装介质原版 x64 加载器和系统目录。分别核对了缺失分区、跨盘签名、缺失加载器和目录、间接设备和父路径。回读核对两份夹具及加载器 SHA-256、A/B 的 GPT 和来宾系统盘布局，B 保持脱机且无新增写入。英文界面仍有中文分区名称。NTFS 加载器原生用例、签名信任与实际启动仍待验收。支持从兼容的库与应用对象逐级解析 BCD 启动设备、加载器路径、系统设备和目录、默认项、菜单以及恢复设置。直接值优先，父分支不一致时标记冲突，缺失对象、类型错误和循环会使未设置的继承值进入无法核对状态。显示已确认的来源对象、启动序列、工具顺序和恢复序列。32aedbf4… 正式构建通过 1589 项自动检查，另以合成 GPT/FAT32 与 NTFS 镜像核对原版 x64 winload.efi 的 PE 和 SHA-256。真实检查报告通过浏览器组件验收。正式程序与只读光盘载荷 SHA-256 一致，工具盘已接入核对过的隔离 VM，来宾解锁后仍需进行原生界面与回读验收。已接入脱机 GPT 磁盘上现有 UEFI BCD 启动项的直接设备引用修复。Windows 原生布局与 WMI 身份及 GPT 主备表的分区 GUID、边界、类型和属性交叉核对。选择同盘 Windows 分区后验证 EFI 启动管理器、Windows 加载器及系统目录。可将菜单已有项设为默认。确认前显示旧、新引用和 BCD 摘要，原始 BCD 先保存到另一物理盘并回读核验，再用一次性确认写入受限物理块。正式构建 3110d1b6… 通过 1599 项自动检查，另在 512e 与 4Kn 合成镜像核验失败拒绝、确认取消、完整读取与邻接字节。正式程序与工具光盘载荷的 SHA-256 相同。隔离 4Kn Windows 原生界面修复 B 上的两个失效 GPT 引用并设置新默认项，A 留存 20 KiB 原始备份。B 从预览到独立回读仅增加两次 4 KiB 写入，并保持脱机。独立核对原始 BCD、修复后的 BCD、NTFS 加载器、EFI 管理器、A/B GPT 与来宾系统盘布局。已实现脱机 GPT 磁盘的 FAT32 EFI 启动文件恢复。按固定路径核对同盘 NTFS 中的 Windows 启动管理器和加载器架构，恢复启动管理器及可选回退文件。缺失目录可创建。先将原始文件保存到另一物理盘的 ZIP 并回读，再分阶段更新 FAT、目录和文件数据，最后回读核对 SHA-256。正式构建 45316c4c… 通过 1609 项集中自动检查及 512e、4Kn 两项整盘合成用例。正式程序与只读光盘副本的 SHA-256 一致。隔离 4Kn Windows 原生界面恢复 B 上的 x64 启动管理器和回退文件，预览和 QMP 均记录了 1408 次 4 KiB 写入。独立工具核对 A 上 ZIP 中的 719 字节原始管理器、B 上的两份新文件、原有 BCD、两盘 GPT 和来宾系统盘布局。B 保持脱机。已实现从同盘 Windows 安装的 BCD-Template 新建缺失的 UEFI BCD，选定普通 Windows 加载配置，建立一个默认启动项并写入已经核对的 EFI 和 Windows GPT 引用。原有 BCD 受保护，残留的 BCD.LOG、BCD.LOG1、BCD.LOG2 先跨盘留档再移除。修复后隐藏旧报告。正式构建 b19779ad… 通过 1615 项集中检查、两种扇区规格的重建和原 EFI 文件恢复整盘用例。与只读光盘内的程序 SHA-256 一致。隔离 4Kn Windows 原生界面从缺失状态创建 8 KiB BCD，B 记录 13 次 4 KiB 写入。来宾工具检查三份备份日志、默认启动项、加载器和系统设备引用、两盘 GPT 与来宾系统盘布局。Windows 自带 BCDEdit 成功枚举新 BCD 的副本，B 一直脱机。损坏的现有 BCD 可显式选择日志恢复或模板替换。日志恢复要求有效主文件头及可核对的完整连续事务链，保留现有启动项。模板替换创建一个启动项。两条路径都将原 BCD 和日志跨盘备份及回读后再写入，B 保持脱机。正式构建 69801618… 通过 1621 项集中检查和 512e、4Kn 整盘合成用例。隔离 4Kn Windows BCD 文件头损坏样本在日志恢复预览被拒绝时零写入，随后从模板重建并仅写入 13 次 4 KiB。独立工具核对原 BCD、两份归档日志、A/B GPT 与来宾系统盘布局，BCDEdit 成功枚举新启动项。最初的轮换日志样本通过应用回读，但 BCDEdit 拒绝加载。重新生成具备完整 BCD 根目录与安全描述符的合成测试文件后，同一正式构建在隔离 4Kn Windows 上回放两份轮换日志。BCDEdit 枚举两个原有 Windows 启动项及其两处修改。独立工具核对恢复的 BCD、跨盘 ZIP 中的原始文件和日志、两盘 GPT 及来宾系统盘布局。QMP 确认 B 从预览到后验只写入 14 次 4 KiB，并保持脱机。旧式日志回放已通过合成检查。隔离 4Kn Windows 原生界面从空白 EFI 分区重建 x64 启动管理器、回退文件和 BCD，共写入 1411 个 4 KiB 块，并逐份回读核对。首次独立 UEFI 启动进入 Windows 首次配置，因 BCD 缺少系统存储标记而报告 0xc0000098。对照 Windows BCDBoot 生成的存储确认标记后，正式构建 00251f65… 写入并回读校验该标记，通过 1622 项自动检查及 512e、4Kn 的新建和替换整盘用例。正式程序与客体载荷的 SHA-256 一致。复用首次启动前的副本重新创建缺失的 BCD，仅写入 11 个 4 KiB 块。全新 EDK2 固件变量下只连接 16 GiB Test B，Windows Server Core 启动至原生 Ctrl+Alt+Del 登录提示。BIOS/UEFI 转换、固件启动项管理与 Secure Boot 签名信任仍待完成或验收。",
+      "evidence": [
+        ".vm/boot-inspection-status.json",
+        ".vm/boot-references-status.json",
+        ".vm/boot-inheritance-status.json",
+        ".vm/boot-repair-status.json",
+        ".vm/boot-files-status.json",
+        ".vm/boot-store-status.json",
+        ".vm/boot-damaged-status.json",
+        ".vm/boot-windows-status.json"
+      ]
     },
     {
       "id": "boot-entries",
-      "status": "planned",
-      "detail": "UEFI 启动项查看与受控编辑"
+      "status": "in-progress",
+      "detail": "磁盘菜单通过 Windows 固件 API 显式读取 BootOrder、BootCurrent、BootNext 及引用的 Boot####，显示名称、状态、设备路径和可识别的 GPT 分区标识。支持重排、重命名、启停及设置和清除一次性启动。正式构建 b7e12b9d… 通过 1627 项自动检查及光盘载荷校验，正式 WebView 使用合成固件数据验收读取、重排、取消、确认。新增从脱机 GPT 磁盘的 FAT32 EFI 分区浏览和选择 EFI 应用，按原始 GPT 的一基槽位、GUID 与逻辑块范围生成短格式设备路径，提交前复核架构、加载器 SHA-256 及盘布局。支持删除和单个启动项的 .dsuefi 备份还原，保留原设备路径及附加数据，通过摘要校验后以新编号追加。新建和还原先写条目再追加顺序，删除先从顺序移除再删除条目。每步回读，部分失败报告已核对的更改。当前项、一次性启动项和最后一个有效启动项受到保护。固件声明支持时可设置或取消下次启动进入固件设置，仅更改 OsIndications 中对应的一位。正式构建 427ebce6… 通过 1634 项自动检查，本地程序、留档与只读光盘内程序的 SHA-256 相同。正式 WebView 用合成固件和磁盘数据验收 EFI 文件选择、新建、备份、删除、还原及设置下次启动。新增按名称枚举 UEFI 全局命名空间中的标准 Boot####，通过 Windows 固件 API 核对实际属性和数据，列表指明未列入启动顺序的条目。可以将已有条目加入顺序，也可以删除非当前、非一次性的未引用条目。枚举接口不可用时显示已引用的范围。支持从同一套经核对的脱机 EFI 来源改绑现有启动项，保持编号、名称、属性及启动顺序，可显式保留原启动参数。改绑保护已安排的一次性项及最后一个有效启动项。正式构建 176ae81a… 通过 1639 项自动检查及载荷一致性验证。正式 WebView 用合成数据核对未列入顺序的 Boot0034、追加后位置、新旧 EFI 路径及 24 字节参数保留。EFI 来源扩展到在线普通 GPT 磁盘，包括可核对的系统 ESP 和无盘符 ESP。只读物理设备句柄核对设备编号、序列号、容量和扇区规格，分别对照 Windows 元数据、原始主备 GPT 以及可用的卷关联。使用两份独立 FAT32 读取比较引导区摘要、目录结果或文件 SHA-256，提交重新核对完整 GPT 摘要和选定加载器。新增独立的加载器核对入口，显示分区 GUID 和文件摘要。正式构建 d26ec24d… 通过 1645 项自动检查及测试光盘载荷校验。正式界面以合成在线来源验证浏览、核对及既有启动项操作。用于实际在线 ESP 读取的隔离来宾夹具已打包。原 EDK2 验证来宾收到正常关机请求后仍在登录界面，原生在线分区读取与真实固件读写待验收。已加入只读 Secure Boot 证书查看，可核对 SecureBoot、SetupMode、AuditMode、DeployedMode 及 PK、KEK、db、dbx，显示 X.509 使用者、颁发者、有效期、序列号、签名所有者、摘要及吊销时间。固件变量进行两次有界读取；任一变量变化则放弃当次报告。正式构建 badfe701… 通过 1651 项自动检查及光盘载荷核对。原生界面使用合成数据验收证书详情、缺失和读取失败状态、dbx 分页、摘要搜索及重新读取。真实固件及在线 EFI 来源仍待来宾验收，新增 EFI 加载器安全启动摘要与签名核对，核对 64 MiB 以内支持的 PE32/PE32+ 映像。支持 SHA-1、SHA-224、SHA-256、SHA-384、SHA-512 的 PE 映像摘要，分别查询 db/dbx 的同类摘要，保留拒绝库命中和数据库不可读状态。Crypt32 验证嵌入的 PKCS#7 签名，再比对签名内的映像摘要。证书链信任及固件吊销策略仍待实现。正式构建 83844301… 通过 1656 项集中自动检查，并核对只读光盘载荷。独立验收从 Windows 安装光盘提取的 bootx64.efi，验证 Microsoft 签名及 SHA-256 映像摘要。正式界面使用合成数据验收 dbx 命中、映像摘要不符、固件不可读和切换加载器后清除结果。真实固件和在线分区验收仍待完成。已接入签名证书链与 dbx 吊销核对。Crypt32 只接受终止于实际 db 中证书的路径，回查中间证书来自签名内嵌数据。支持根证书、中间证书和签名证书作为信任锚。比对 dbx 的 X.509 条目及 SHA-256、SHA-384、SHA-512 TBS 摘要；永久吊销标出命中，带日期条目显示吊销时间及待核对可信时间戳状态。正式构建 b290ba18… 通过 1658 项集中自动检查和光盘载荷核对。Windows 安装光盘的 bootx64.efi 通过合成 db 的证书路径与合成 dbx 的永久吊销验证。正式界面以合成固件数据验证锚点指纹、链内证书、永久吊销和带日期吊销。新增 dbt 时间戳签名数据库读取和查看。EFI 加载器核对验证内嵌 SHA-2 RFC 3161 时间戳签名、主签名绑定、时间戳证书用途及身份、签发时刻的 dbt 信任链，以及时间戳签名链在 dbx 中的吊销状态。只有可信时间严格早于所有适用的 dbx 吊销时刻，才通过该项核对。永久吊销仍标出命中，缺少时区或信任证据的记录保持待核对。正式构建 38629ed9… 通过 1661 项集中自动检查和光盘载荷核对。OpenSSL 独立验证了同一个合成时间戳与加载器签名的绑定。Windows 安装光盘的 EFI 文件通过原有签名链和吊销回归。正式界面使用合成数据验收 dbt 浏览、可信时间戳早于吊销、时间戳未获信任及永久吊销。真实固件验收及最终启动策略判定仍待完成。测试夹具已可在原 EDK2 启动验证来宾运行期间接入经 SHA-256 校验的只读工具光盘，仍只连接 16 GiB 4Kn Test B。宿主与光盘内正式程序继续匹配构建 38629ed9…。热接入前后核对 QMP 库存，Test B 的读写计数一致。已唤醒原生 Windows 解锁界面，实际应用及固件验收等待来宾解锁。",
+      "evidence": [
+        ".vm/firmware-boot-status.json",
+        ".vm/firmware-entry-lifecycle-status.json",
+        ".vm/firmware-entry-lifecycle-native-ui.json",
+        ".vm/firmware-catalog-status.json",
+        ".vm/firmware-catalog-native-ui.json",
+        ".vm/firmware-online-status.json",
+        ".vm/firmware-online-native-ui.json",
+        ".vm/secure-boot-status.json",
+        ".vm/loader-security-status.json",
+        ".vm/loader-trust-status.json",
+        ".vm/loader-timestamp-status.json",
+        ".vm/boot-tools-status.json"
+      ]
     },
     {
       "id": "boot-media",
-      "status": "planned",
-      "detail": "可启动维护介质制作"
+      "status": "in-progress",
+      "detail": "备份与克隆已提供 WinPE 启动 ISO 制作。以用户选择的 amd64 CopyPE 工作目录或媒体目录为来源，核对 x64 EFI 回退文件和光盘启动映像、所选固件模式的 BCD、介质内 RAM 磁盘和 SDI 引用及 WIM 启动索引。ISO 9660 与 Joliet 共用文件数据，可选择 UEFI 或 UEFI + BIOS。预览后输出到另一块物理磁盘，完整回读光盘目录、启动映像与 ISO 的 SHA-256 后发布。首轮双启动夹具通过文件核对，但固件未进入 WinPE。修正 ISO 主目录的 Windows 启动文件标识后，7-Zip 独立比对 66 个文件及两个 El Torito 启动映像，完全一致。同一个输出 ISO 在仅连接这张只读光盘的 EDK2 和 SeaBIOS 客体分别启动到 Windows Server 安装程序，UEFI 客体亦成功打开 X:\\sources 命令提示符。正式构建 5d853abe… 通过 1757 项集中自动检查及只读光盘程序载荷校验。正式桌面以合成 IPC 核对固件模式、预览、取消、确认及结果。A/B 盘上真实跨盘制盘仍待验收。已实现向经 Windows 核对的另一块 USB 磁盘的 FAT32 数据分区添加 x64 UEFI WinPE 文件。预览列出新增和可复用文件，同名内容冲突在写前拒绝。按 SHA-256 回读，最后发布新增 EFI 回退文件。合成目录以实际 WinPE 文件验收，66 个启动文件和 1 个原有文件均逐项校验。独立读取工具对测试 FAT 映像报告卷头警告，仍完整提取并核对全部文件。该 FAT32 映像以单一只读 USB 设备在隔离 EDK2 客体启动，打开 WinPE 命令提示符。双模式 ISO 回归与上一版已启动验收的输出逐字节一致。正式构建 44577204… 通过 1765 项集中测试和只读光盘程序载荷核对，原生 WebView 使用合成数据验收筛选、预览清单、取消、确认与结果。Windows USB 卷实际写入、USB BIOS 启动、传统 DOS 启动介质及自动启动待完成。制作 ISO 或 U 盘时可添加同一份 x64 DiskStudio.exe。预览显示 SHA-256，发布前回读核对；ISO 和合成 USB 目录内的程序与正式构建 87392708… 一致。完整 ISO 独立核对 boot.wim、BCD、boot.sdi 与 EFI 回退加载器，取消携带程序后生成的 ISO 与上一版已启动验收的输出逐字节一致。本轮隔离 WinPE 从单独的只读 ISO 启动后，手动运行制作工具生成的只读载荷内程序。正式构建 6db8ee00… 打包的 777,033,728 字节双启动 ISO 经独立提取核对程序和 boot.wim。隔离 EDK2 与 SeaBIOS 客体均只连接该只读 ISO，分别启动至 WinPE，并从同一光盘手动运行 DiskStudio。Windows USB 卷实际写入和 USB BIOS 启动待验收或实现。备份与克隆加入从原版 ADK amd64 WinPE 目录准备联机 GPT FAT32 数据分区的功能。使用另一块物理磁盘上的本地 NTFS 工作目录，通过 DISM 加入 WMI 和 Windows Storage 组件，捕获含同版 DiskStudio 的可启动 WIM。发布启动文件逐项回读，最后发布 EFI 回退文件。WinPE 初始化后配置为自动打开 DiskStudio，和一次性 UEFI 重启入口配合使用。正式构建 d33ba656… 在隔离 4Kn 来宾向 B 盘 GPT FAT32 数据分区发布并回读核对 67 个文件，清理 A 盘工作目录，实际重启后自动打开同一份正式程序。已独立复核固件一次性启动、程序摘要和两块测试盘的枚举。已接入完整扇区备份续接。Windows 预览备份源和 NTFS 输出路径，确认后以独立固件记录登记，目标 WinPE 核对同版程序与启动项后单次领取。正式构建 1e883c27… 在隔离 4Kn 来宾自动备份 128 MiB NTFS 分区。输出卷由 U: 改为 E: 后仍写入原选定目录，完整 SHA-256、NTFS 文件字节、固件启动项与单次任务消费复核通过。已接入同容量的完整和增量备份还原续接。确认前绑定各层备份和目标布局，WinPE 重新打开备份并验证完整逻辑内容后锁卷、覆盖目标、回读校验并留在脱机状态。加密备份在 WinPE 重新输入密码。正式构建 94e9c16c… 在隔离 4Kn 来宾从两层增量链还原 128 MiB NTFS 分区，增量层已加密。关机后独立核对 QCOW2 分区 SHA-256 及还原文件，并复核单次续接记录已消费。克隆、迁移和分区编辑的跨重启续接待实现。",
+      "evidence": [
+        ".vm/maintenance-iso-status.json",
+        ".vm/winpe-usb-status.json",
+        ".vm/winpe-library-status.json",
+        ".vm/winpe-export-final-status.json",
+        ".vm/winpe-adk-partition-status.json",
+        ".vm/winpe-backup-handoff-status.json",
+        ".vm/winpe-restore-handoff-status.json"
+      ]
     },
     {
       "id": "batch-usb-format",
-      "status": "planned",
-      "detail": "批量 USB 格式化，每个设备绑定独立身份"
+      "status": "in-progress",
+      "detail": "磁盘菜单已接入批量 USB 格式化。根据 Windows Storage 的 USB 总线、两个提供者的唯一序列号和完整布局列出可选设备，支持按型号、序列号及容量筛选。每盘显式选择一个普通 GPT 数据分区，或为报告无分区的 RAW/GPT USB 磁盘预览创建数据分区。整批采用同一文件系统、卷标、簇大小和快速或完整格式化设置。RAW 先核对初始化结果，再创建预览范围内的数据分区；允许 Windows 新建范围外的标准 MSR。单次确认绑定全部目标，首次写入前复核整批，执行前逐盘复核独立布局与卷关联。遇失败或无法回读确认时停止，逐盘记录已完成的步骤、停止和跳过状态。正式构建 b6329203… 通过 1670 项自动检查和只读光盘载荷核对。原生界面以合成数据验收筛选、分区选择、取消令牌、确认、进度、部分失败和未执行设备，刷新后仍可查看结果。真实 USB 格式化待验收。",
+      "evidence": [
+        ".vm/usb-format-status.json"
+      ]
     },
     {
       "id": "offline-runtime",
-      "status": "planned",
-      "detail": "WinPE/离线维护与重启衔接"
+      "status": "in-progress",
+      "detail": "同一份正式可执行文件检测到 Windows PE 后使用原生 Win32 界面。手动启动后可显式选择本地 RAW/IMG 整盘或分区镜像，并选 512 B 或 4096 B 逻辑扇区。复用 GPT/MBR 与启动文件检查，呈现启动文件、SHA-256 和 BCD 启动项。只打开选择的普通文件。原正式程序在原版 Windows PE 启动时因缺少 WebView2 无法使用界面。正式构建 8efbc1bc… 通过 1766 项集中自动检查、只读光盘载荷校验和 Windows 原生 WebView 回归。同一程序在隔离 EDK2 客体的原版 Windows PE 从只读工具光盘打开，检查 512 B GPT 镜像和单独的 FAT32 EFI 分区。各显示 5 个 BCD 启动项，管理器和 BCD 摘要与独立提取一致。过小的 1 MiB 整盘镜像按现有几何下限拒绝，提示沿用分区表备份措辞。新增复用现存目录和删除候选扫描，按目录分页。选中候选后重新核对文件记录并预览最多前 4096 字节，显示文本或十六进制。可取消读取。修正整盘镜像低于 4 MiB 的诊断用语。正式构建 87392708… 通过 1767 项集中自动检查及制作介质载荷 SHA-256 核对。隔离 WinPE 原生界面验收 512 B MBR/FAT12 镜像，进入子目录预览 37 字节现存文件并预览 27 字节删除候选，内容与夹具一致。Windows 原生 WebView 核对勾选和取消携带程序后发送的请求和确认流程。原生 WinPE 可选择已读取的文件或目录树，在另一块经核对的物理磁盘新建命名结果目录。确认前核对保留句柄的源盘、目标卷及布局，提交前复核。复用正式恢复引擎重新核对文件记录和卷内证据，逐文件 SHA-256 回读后发布，输出 DiskStudio-export.json。合成普通文件夹具保留 DOCS 层级并导出 37 字节现存文件和 27 字节删除候选，独立回读、清单和源镜像摘要相符。重复选择既有结果目录被拒绝。原版 WinPE 文件夹对话框无法返回监测用路径，修复为原生保存窗口供用户指定新目录。正式构建 6db8ee00… 通过 1767 项集中自动检查、光盘载荷一致性校验和 Windows 原生界面回归。完整 ISO 的 WinPE 原生界面核对导出位置、取消和光盘镜像源盘验证失败时拒绝。WinPE 下 4Kn、其他文件系统目录、隔离 A/B 跨盘实写验收、物理盘维护、自动启动及重启衔接仍待完成。 本批新增 WinPE 整盘镜像 GPT/MBR 分区表检查和只读扇区查看。支持十进制或十六进制 LBA、512 B 和 4096 B 逻辑扇区，显示偏移、十六进制、ASCII 和 SHA-256。无效分区表保留诊断入口，禁用未核对分区的文件浏览。正式构建 602b2c2a… 通过 1769 项集中自动检查、正式桌面构建、原生 WebView 回归和光盘载荷 SHA-256 核对。仅接入只读 ISO 的隔离 UEFI WinPE 通过 512 B MBR 检查及目录回归、损坏的 4Kn GPT 分项诊断、越界拒绝和两个扇区的独立 SHA-256 比对。见 .vm/winpe-diagnostics-status.json。 WinPE 新增整盘镜像丢失分区搜索。支持整盘、已核对分区表的全部未分配空间与十进制或十六进制起止 LBA。显式扫描、显示进度和证据，取消可保留已找到的候选。重新核对候选后可浏览、预览和导出。正式构建 8fd09e9d… 通过 1770 项集中自动检查及光盘载荷核对。隔离 UEFI WinPE 在只读 ISO 内验证三种范围、缺表与倒序范围的拒绝、FAT12 现存文件和删除候选预览及取消导出。普通文件验收独立回读四份输出、两份镜像完整 SHA-256 和结果清单的源边界。见 .vm/winpe-lost-status.json。4Kn 搜索通过合成检查，原生 4Kn 与 A/B 跨盘输出仍待验收。 WinPE 可标记多个丢失分区候选，预览登记到新 RAW 镜像。复用桌面的边界核对、保留分区条目及 MBR 主/逻辑放置。确认后使用已核对的跨盘目标，两遍读取源镜像，回读核对副本分区表、候选和完整 SHA-256 后发布。合成普通文件验证 512 B GPT 和 4Kn MBR 两个副本的分区边界、摘要、表外字节和完整源镜像。正式构建 d95b9e9b… 通过 1771 项集中检查、正式桌面及光盘载荷 SHA-256 核对。仅接只读 ISO 的隔离 UEFI WinPE 验证多选、移出、双候选的 GPT 和 MBR 逻辑预览、已有 MBR 条目保留、取消选择文件和来源身份拒绝。该试验的存储查询返回 0x80041010，未进入写入。带正常 Storage WMI 的 WinPE 在隔离 A/B 上的实际回读与发布及原生 4Kn 仍待验收。见 .vm/winpe-register-status.json。 新增独立 WinPE 存储查询探针和微软 amd64 组件准备脚本。隔离 UEFI 客体在原版 10.0.26100.32230 WinPE 中确认 Win32_DiskDrive 和 Win32_PageFileUsage 可查询，Storage WMI 的磁盘、分区、卷及分区卷关联四类均返回 0x80041010。已核对 10.0.26100.1 的 ADK amd64 原始映像和十个组件包，以及来宾探针的启动载荷 SHA-256。682 项来宾工具及 13 项 VM 工具检查通过。见 .vm/winpe-adk-storage-status.json。已在核对过的隔离 Test B 工作卷中离线集成十个组件包，独立提取并回读 549,160,751 字节的单索引启动 WIM，SHA-256 与来宾和只读 ISO 中的结果一致。使用仅接入该只读光盘的隔离 UEFI 来宾启动后，六项查询全部通过，包括原先缺失的四项 Storage WMI 查询。见 .vm/winpe-adk-servicing-status.json。正式构建 d95b9e9b… 的光盘载荷经 SHA-256 核对。在集成 Storage WMI 的隔离 512 字节 UEFI WinPE 中，正式界面从 Test A 的 RAW 镜像找到两个 FAT12 候选，确认后向 Test B 发布 12 MiB GPT 和 12 MiB 逻辑 MBR 镜像。并从 A 的 FAT12 镜像向 B 导出一个目录内的 37 字节现存文件及一个 27 字节删除候选。独立回读核对 A 的三份镜像、B 的两份输出 SHA-256、GPT 主备 CRC、MBR 的两个 EBR、表外字节、两份导出内容和各自清单。拒绝同盘和已有目标，确认来源及旧目标内容一致且无部分文件。从候选预览完成到关机前 A 的 QMP 写入计数保持一致。见 .vm/winpe-registration-ab-status.json。正式构建 a98162b1… 通过 1773 项集中检查、桌面构建与只读介质载荷核对。隔离 UEFI WinPE 中的 A/B 逻辑与物理扇区均为 4096 字节。从 Test A 的 4Kn FAT12 整盘镜像向 Test B 发布 GPT 与逻辑 MBR 双候选副本，并在保留旧 MBR 主条目的副本发布一个未分配范围候选。关机后从文件形式的两份 QCOW2 独立复核三份 12 MiB 镜像的完整 SHA-256、GPT 主备 CRC、两个 EBR、原分区条目和表外内容。4Kn 导出的 34 字节现存文件和 32 字节删除候选与原 FAT12 数据和两份清单相符。已存在的目标文件通过保护回归，原生界面显示英文提示及主、逻辑分区标签。从候选预览至关机前 Test A 的写入计数一致。见 .vm/winpe-registration-4kn-status.json。WinPE 新增实体磁盘只读入口，刷新使用 Windows 存储信息，显式打开后以双提供者身份、设备号、容量、扇区、分区范围和原始表证据绑定读取。正式构建 9e17462e… 通过 1774 项自动检查。隔离 UEFI 4Kn A/B 实测 A 的 MBR、B 的 GPT、A 的 LBA 256 摘要、未登记 FAT12 定段搜索和取消全部未分配空间搜索后保留候选。向 B 导出 34 字节现存文件和 32 字节删除候选，关机后独立核对两份文件、清单和完整 A 盘内容。见 .vm/winpe-physical-4kn-status.json。WinPE 新增直接登记到主备表一致的可写 GPT 实体盘。预览列出候选范围和新条目 GUID，五分钟内二次确认，复用桌面锁卷、脱机、候选复验、先备表后主表、SHA-256 回读及原生布局验证。正式构建 4ae2e5b5… 通过 1775 项自动检查复跑和桌面构建。隔离 UEFI 4Kn A/B 实测拒绝确认时零新增写入，重新预览后登记 A 的 4 MiB FAT12 候选，四个 GPT 范围共 40,960 字节回读通过，独立来宾工具确认 A 保持脱机。关机后独立核对主备 GPT、原有条目和完整表外内容，B 写入计数无变化。见 .vm/winpe-gpt-recovery-4kn-status.json。WinPE 新增从 UEFI Windows 对已准备的联机 GPT FAT32 分区进行一次性重启。双次读取绑定磁盘和 GPT，核对 EFI 加载器、BCD、SDI、WIM 启动索引和当前程序摘要。确认后复验，复用或新建独立固件项，回读 BootNext 后请求 Windows 重启。正式构建 cce0861b… 通过 1776 项自动检查和原生桌面模拟固件预览、取消、确认。真实固件验收使用隔离 UEFI 4Kn 来宾中的同一后端，从光盘 WinPE 请求重启到已核对的 Test B FAT32 ESP。重启后 BootCurrent 为 Boot0003，BootNext 已消费，常规 BootOrder 为 [1, 0, 2]，实际打开与正式构建摘要一致的 WinPE 原生程序。结果见 .vm/winpe-restart-4kn-status.json。自动生成本地 WinPE 环境及恢复上次任务、其他实体盘维护和部分诊断翻译仍待完成。",
+      "evidence": [
+        ".vm/winpe-native-status.json",
+        ".vm/winpe-library-status.json",
+        ".vm/winpe-export-final-status.json"
+      ]
     }
   ]
 }

@@ -790,6 +790,7 @@ mod tests {
             locator: Locator::Signature {
                 content_hash: None,
                 allocation_digest: None,
+                fragments: None,
                 offset: 0,
                 header: b"hello".to_vec(),
                 footer: b"hello".to_vec(),

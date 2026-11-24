@@ -6,6 +6,7 @@ import { useLocale } from "./i18n/LanguageProvider";
 import { errorText } from "./partitionOutcome";
 import { formatSize } from "./types";
 import { BootRepairForm } from "./BootRepairForm";
+import { BootFileRebuildForm } from "./BootFileRebuildForm";
 
 export type BootInspectionSource =
   | { kind: "image"; id: string }
@@ -457,15 +458,18 @@ export function BootInspectionDialog({
   const [error, setError] = useState("");
   const [reading, setReading] = useState(false);
   const [repairing, setRepairing] = useState(false);
+  const [reportStale, setReportStale] = useState(false);
   const inFlight = useRef(false);
   const close = () => {
     if (!inFlight.current) onClose();
   };
 
   function repairBusy(busy: boolean) {
+    if (busy && inFlight.current) return false;
     inFlight.current = busy;
     setRepairing(busy);
     onBusy(busy);
+    return true;
   }
 
   async function inspect() {
@@ -474,6 +478,7 @@ export function BootInspectionDialog({
     onBusy(true);
     setReading(true);
     setError("");
+    setReportStale(false);
     setReport(null);
     try {
       setReport(await invoke<BootReport>("data_inspect_boot", { request }));
@@ -536,14 +541,29 @@ export function BootInspectionDialog({
             />
           )}
           {request.kind === "disk" && report.repairPartitions?.length > 0 && (
-            <BootRepairForm
-              source={request.source}
-              volumes={report.volumes}
-              partitions={report.repairPartitions}
-              onBusy={repairBusy}
-            />
+            <>
+              <BootRepairForm
+                source={request.source}
+                volumes={report.volumes}
+                partitions={report.repairPartitions}
+                onBusy={repairBusy}
+                onChanged={() => setReportStale(true)}
+                reportStale={reportStale}
+              />
+              <BootFileRebuildForm
+                source={request.source}
+                volumes={report.volumes}
+                partitions={report.repairPartitions}
+                onBusy={repairBusy}
+                onChanged={() => setReportStale(true)}
+                reportStale={reportStale}
+              />
+            </>
           )}
-          {report.volumes.map((volume) => (
+          {reportStale && (
+            <Hint>{t("请重新检查，读取目前的启动文件和 BCD。")}</Hint>
+          )}
+          {!reportStale && report.volumes.map((volume) => (
             <Volume key={`${volume.offset}:${volume.mode}`} report={volume} />
           ))}
         </div>

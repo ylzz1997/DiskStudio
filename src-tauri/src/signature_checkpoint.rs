@@ -127,7 +127,9 @@ pub(crate) fn restore_records(
     cursor: &Checkpoint,
     records: &[StoredCandidate],
 ) -> Result<Vec<Candidate>, String> {
-    if records.len() > crate::recovery::MAX_RESULTS || records.len() != cursor.count as usize {
+    if records.len() > crate::recovery::MAX_RESULTS || records.len() != cursor.count as usize
+        || (!cursor.fragments_checked && records.iter().any(StoredCandidate::fragmented))
+    {
         return Err("恢复进度与候选数量不一致。".into());
     }
     binding.validate()?;

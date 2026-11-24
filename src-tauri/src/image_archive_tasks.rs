@@ -384,6 +384,7 @@ mod tests {
         Info {
             id: String::new(),
             name: "sample.img".into(),
+            partition_table: None,
             size: 4 * 1024 * 1024,
             options: Options { kind, sector },
             partitions: vec![Part {

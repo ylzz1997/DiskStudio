@@ -14,6 +14,11 @@ use uuid::Uuid;
 
 #[path = "boot_repair.rs"]
 pub(crate) mod repair;
+#[path = "boot_virtualization.rs"]
+pub(crate) mod virtualization;
+#[cfg(windows)]
+#[path = "boot_inspection_winpe.rs"]
+mod winpe;
 
 const MIB: usize = 1024 * 1024;
 const MAX_EXECUTABLE: usize = 16 * MIB;
@@ -347,7 +352,7 @@ fn ntfs_lookup<'n>(
     Ok(Some(file))
 }
 
-fn ntfs_file(
+pub(crate) fn ntfs_file(
     ntfs: &Ntfs,
     reader: &mut (impl Read + Seek),
     path: &[&str],
@@ -377,7 +382,7 @@ fn ntfs_file(
     Ok(Some(bytes))
 }
 
-fn pe_machine(bytes: &[u8], subsystems: &[u16]) -> Result<u16, &'static str> {
+pub(crate) fn pe_machine(bytes: &[u8], subsystems: &[u16]) -> Result<u16, &'static str> {
     let dos = bytes.get(..64).ok_or("Truncated DOS header")?;
     if &dos[..2] != b"MZ" {
         return Err("Missing DOS executable signature");
@@ -771,6 +776,7 @@ mod tests {
         let layout = Layout::Gpt(GptIdentity {
             disk_guid: disk.to_bytes_le(),
             partitions: vec![disk_core::table_check::GptPartitionIdentity {
+                number: 1,
                 guid: partition.to_bytes_le(), kind: [0; 16], attributes: 0, range: 4096..8192,
             }],
         });

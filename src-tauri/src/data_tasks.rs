@@ -21,6 +21,20 @@ mod image_archive_tasks;
 #[cfg(windows)]
 #[path = "device_image_tasks.rs"]
 mod device_image_tasks;
+#[cfg(windows)]
+#[path = "system_virtualization_tasks.rs"]
+mod system_virtualization_tasks;
+#[cfg(windows)]
+#[path = "system_migration_tasks.rs"]
+pub(crate) mod system_migration_tasks;
+#[cfg(windows)]
+#[path = "maintenance_media_tasks.rs"]
+mod maintenance_media_tasks;
+#[cfg(all(windows, test))]
+pub(crate) use maintenance_media_tasks::usb::install_adk_for_lab;
+#[cfg(windows)]
+#[path = "image_table_conversion_tasks.rs"]
+mod image_table_conversion_tasks;
 #[path = "recovery_tasks.rs"]
 pub mod recovery_tasks;
 #[path = "retained_partition_tasks.rs"]
@@ -1496,10 +1510,16 @@ fn cancel_in(s: &State, id: &str) -> Result<(), String> {
     Ok(())
 }
 pub(crate) fn start(title: &str) -> Result<(String, Arc<AtomicBool>), String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let id = start_with_cancel(title, Arc::clone(&cancel))?;
+    Ok((id, cancel))
+}
+
+pub(crate) fn start_with_cancel(title: &str, cancel: Arc<AtomicBool>) -> Result<String, String> {
     let mut s = state();
     idle(&s)?;
     let id = uuid::Uuid::new_v4().to_string();
-    s.cancel = Arc::new(AtomicBool::new(false));
+    s.cancel = cancel;
     s.job = Some(Job {
         id: id.clone(),
         title: title.into(),
@@ -1511,7 +1531,7 @@ pub(crate) fn start(title: &str) -> Result<(String, Arc<AtomicBool>), String> {
         message: String::new(),
         sha256: None,
     });
-    Ok((id, s.cancel.clone()))
+    Ok(id)
 }
 fn progress(
     id: &str,
@@ -1982,6 +2002,66 @@ pub enum Request {
         #[serde(default)]
         mode: crate::used_space::Mode,
     },
+    #[cfg(windows)]
+    VirtualizeSystem {
+        source: system_virtualization_tasks::Source,
+        options: crate::system_virtualization::Options,
+    },
+    #[cfg(windows)]
+    MigrateSystem {
+        source: Selection,
+        destination: Selection,
+        #[serde(default)]
+        partition_sizes: Vec<crate::system_migration::PartitionSize>,
+        #[serde(default)]
+        partition_selection: crate::system_migration::PartitionSelection,
+    },
+    #[cfg(windows)]
+    MigrateSystemBatch {
+        source: Selection,
+        destinations: Vec<system_migration_tasks::Destination>,
+    },
+    #[cfg(windows)]
+    CreateWinpeIso {
+        mode: crate::maintenance_media::Mode,
+        #[serde(default)]
+        include_app: bool,
+    },
+    #[cfg(windows)]
+    CreateWinpeUsb {
+        destination: Selection,
+        #[serde(default)]
+        include_app: bool,
+    },
+    #[cfg(windows)]
+    InstallWinpeFromAdk { destination: Selection },
+    #[cfg(windows)]
+    ConvertImageTable {
+        id: String,
+        table: crate::image_table_conversion::Scheme,
+    },
+    #[cfg(windows)]
+    ConvertImagePartition {
+        id: String,
+        partition: u32,
+    },
+    #[cfg(windows)]
+    BackupImageTable { id: String },
+    #[cfg(windows)]
+    RestoreImageTable { id: String },
+    #[cfg(windows)]
+    RepairImageGpt {
+        id: String,
+        side: crate::image_table_conversion::gpt_repair::Side,
+        digest: String,
+    },
+    #[cfg(windows)]
+    RegisterImagePartitions {
+        id: String,
+        search_id: String,
+        candidates: Vec<String>,
+        options: crate::image_table_conversion::registration::Options,
+    },
     Clone {
         source: Selection,
         destination: Selection,
@@ -2088,7 +2168,7 @@ fn validate_backup_options(options: &BackupOptions) -> Result<(), String> {
     }
     Ok(())
 }
-fn backup_output_bound(payload: u64, size: u64, encrypted: bool) -> Result<u64, String> {
+pub(crate) fn backup_output_bound(payload: u64, size: u64, encrypted: bool) -> Result<u64, String> {
     let plain = payload
         .checked_add(HEADER_SIZE)
         .and_then(|n| {
@@ -2114,6 +2194,17 @@ pub struct Plan {
     pub bytes: u64,
     pub warning: String,
     pub destructive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_conversion: Option<crate::image_table_conversion::Preview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    virtual_machine: Option<crate::system_virtualization::Preview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_migration: Option<crate::system_migration::Preview>,
+    #[cfg(windows)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system_migration_targets: Vec<system_migration_tasks::TargetPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maintenance_media: Option<crate::maintenance_media::Preview>,
 }
 pub(crate) enum Work {
     ArchiveBackup {
@@ -2126,6 +2217,18 @@ pub(crate) enum Work {
     ImageBackup(Box<image_archive_tasks::Backup>),
     #[cfg(windows)]
     ExportDeviceImage(Box<device_image_tasks::Export>),
+    #[cfg(windows)]
+    VirtualizeSystem(Box<system_virtualization_tasks::Export>),
+    #[cfg(windows)]
+    MigrateSystem(Box<system_migration_tasks::Migration>),
+    #[cfg(windows)]
+    CreateWinpeIso(Box<maintenance_media_tasks::Export>),
+    #[cfg(windows)]
+    CreateWinpeUsb(Box<maintenance_media_tasks::usb::Install>),
+    #[cfg(windows)]
+    ConvertImageTable(Box<image_table_conversion_tasks::Convert>),
+    #[cfg(windows)]
+    BackupImageTable(Box<image_table_conversion_tasks::Save>),
     ArchiveRestore {
         destination: Selection,
         chain: Chain,
@@ -2375,6 +2478,122 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         export.warning(&locale),
                         false,
                         Work::ExportDeviceImage(Box::new(export)),
+                    )
+                }
+                Request::VirtualizeSystem { source, options } => {
+                    let Some(export) = system_virtualization_tasks::Export::prepare(source, options)? else {
+                        return Ok(None);
+                    };
+                    (
+                        "导出 Windows 虚拟机",
+                        export.source().into(),
+                        export.destination(),
+                        export.size(),
+                        export.warning(&locale),
+                        false,
+                        Work::VirtualizeSystem(Box::new(export)),
+                    )
+                }
+                Request::BackupImageTable { id } => {
+                    use image_table_conversion_tasks::Save;
+                    let Some(backup) = Save::prepare(id)? else {
+                        return Ok(None);
+                    };
+                    (
+                        "备份镜像分区表",
+                        backup.source().into(),
+                        backup.path().display().to_string(),
+                        backup.size(),
+                        Save::warning(&locale),
+                        false,
+                        Work::BackupImageTable(Box::new(backup)),
+                    )
+                }
+                request @ (Request::ConvertImageTable { .. }
+                    | Request::ConvertImagePartition { .. }
+                    | Request::RestoreImageTable { .. }
+                    | Request::RepairImageGpt { .. }
+                    | Request::RegisterImagePartitions { .. }) => {
+                    use image_table_conversion_tasks::{Change, Convert};
+                    let (id, change) = match request {
+                        Request::ConvertImageTable { id, table } => (id, Change::Table(table)),
+                        Request::ConvertImagePartition { id, partition } => (id, Change::Placement(partition)),
+                        Request::RestoreImageTable { id } => (id, Change::Restore),
+                        Request::RepairImageGpt { id, side, digest } => (id, Change::Repair { side, digest }),
+                        Request::RegisterImagePartitions { id, search_id, candidates, options } => (id, Change::Register {
+                            search: search_id, ids: candidates, options,
+                        }),
+                        _ => unreachable!(),
+                    };
+                    let Some(conversion) = Convert::prepare(id, change)? else {
+                        return Ok(None);
+                    };
+                    (
+                        conversion.title(),
+                        conversion.source(&locale),
+                        conversion.path().display().to_string(),
+                        conversion.size(),
+                        conversion.warning(&locale),
+                        false,
+                        Work::ConvertImageTable(Box::new(conversion)),
+                    )
+                }
+                Request::CreateWinpeIso { mode, include_app } => {
+                    let Some(export) = maintenance_media_tasks::Export::prepare(mode, include_app, &locale)? else {
+                        return Ok(None);
+                    };
+                    (
+                        maintenance_media_tasks::TITLE,
+                        export.source().into(),
+                        export.destination(),
+                        export.size(),
+                        locale.text("保存到另一块物理磁盘。启动目录、启动映像和 ISO 的 SHA-256 将通过写后回读核对。").into(),
+                        false,
+                        Work::CreateWinpeIso(Box::new(export)),
+                    )
+                }
+                Request::CreateWinpeUsb { destination, include_app } => {
+                    let Some(install) = maintenance_media_tasks::usb::Install::prepare(destination, include_app, &locale)? else {
+                        return Ok(None);
+                    };
+                    (
+                        maintenance_media_tasks::usb::TITLE,
+                        install.source().into(),
+                        install.destination(),
+                        install.size(),
+                        locale.text("在现有 FAT32 U 盘添加 UEFI 启动文件。已有同名文件仅在内容完全一致时复用。新增文件回读校验后发布。").into(),
+                        false,
+                        Work::CreateWinpeUsb(Box::new(install)),
+                    )
+                }
+                Request::InstallWinpeFromAdk { destination } => {
+                    let Some(install) = maintenance_media_tasks::usb::Install::prepare_adk(destination, &locale)? else {
+                        return Ok(None);
+                    };
+                    (
+                        maintenance_media_tasks::usb::ADK_TITLE,
+                        install.source().into(),
+                        install.destination(),
+                        install.size(),
+                        locale.text("在独立的 NTFS 工作目录准备 WinPE，加入 Windows 存储组件和 DiskStudio。核对完成后发布到现有 GPT FAT32 分区。").into(),
+                        false,
+                        Work::CreateWinpeUsb(Box::new(install)),
+                    )
+                }
+                request @ (Request::MigrateSystem { .. } | Request::MigrateSystemBatch { .. }) => {
+                    let (source, destinations) = match request {
+                        Request::MigrateSystem { source, destination, partition_sizes, partition_selection } => (
+                            source, vec![system_migration_tasks::Destination {
+                                selection: destination, partition_sizes, partition_selection,
+                            }],
+                        ),
+                        Request::MigrateSystemBatch { source, destinations } => (source, destinations),
+                        _ => unreachable!(),
+                    };
+                    let (work, source, destination, warning) = system_migration_tasks::Migration::prepare(source, destinations, &locale)?;
+                    (
+                        system_migration_tasks::TITLE, source, destination, work.size(), warning, true,
+                        Work::MigrateSystem(Box::new(work)),
                     )
                 }
                 Request::Clone {
@@ -2803,6 +3022,28 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
             bytes,
             warning,
             destructive,
+            table_conversion: match &work {
+                Work::ConvertImageTable(conversion) => Some(conversion.preview().clone()),
+                _ => None,
+            },
+            virtual_machine: match &work {
+                Work::VirtualizeSystem(export) => Some(export.preview()),
+                _ => None,
+            },
+            system_migration: match &work {
+                Work::MigrateSystem(migration) if migration.target_count() == 1 => migration.preview().pop().map(|target| target.layout),
+                _ => None,
+            },
+            #[cfg(windows)]
+            system_migration_targets: match &work {
+                Work::MigrateSystem(migration) if migration.target_count() > 1 => migration.preview(),
+                _ => Vec::new(),
+            },
+            maintenance_media: match &work {
+                Work::CreateWinpeIso(export) => Some(export.preview().clone()),
+                Work::CreateWinpeUsb(install) => Some(install.preview().clone()),
+                _ => None,
+            },
         };
         state().pending = Some(Pending {
             plan: plan.clone(),
@@ -2812,10 +3053,25 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
         Ok(Some(plan))
     }
 }
+pub(crate) fn inspect_image_gpt(
+    id: String,
+) -> Result<crate::image_table_conversion::gpt_repair::Report, String> {
+    #[cfg(windows)]
+    {
+        let _guard = crate::OPERATION.try_lock().map_err(|_| "请等待当前磁盘任务完成")?;
+        idle(&state())?;
+        image_table_conversion_tasks::inspect_gpt(id)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = id;
+        Err("镜像 GPT 修复当前仅支持 Windows。".into())
+    }
+}
 const OVERWRITE_WARNING: &str = "目标范围原有的文件系统及数据将被替换，不能撤销。执行前锁定卷并将整个目标磁盘脱机；完成、取消或失败后都保持脱机，避免重复 GPT 标识自动挂载。需在确认副本后由你决定何时联机。";
 #[cfg(windows)]
 const PARTITION_OVERWRITE_WARNING: &str = "目标分区原有文件系统及数据将被永久替换。锁卷后将整个目标磁盘脱机，开始写入后保持脱机。请核对副本后再决定是否联机。";
-fn validate_pair(a: &Selection, b: &Selection) -> Result<(), String> {
+pub(crate) fn validate_pair(a: &Selection, b: &Selection) -> Result<(), String> {
     if a.target == b.target {
         return Err("源和目标必须是不同的物理磁盘。".into());
     }
@@ -2887,6 +3143,23 @@ pub(crate) fn run(
     id: &str,
     cancel: &Arc<AtomicBool>,
     work: Work,
+) -> Result<(String, Option<String>), String> {
+    run_with_handoff(id, cancel, work, None)
+}
+
+#[cfg(windows)]
+pub(crate) enum HandoffBinding {
+    BackupOutput(crate::backup_files::PortableOutput),
+    RestoreTarget(String),
+    CloneLayouts { source: String, destination: String },
+}
+
+#[cfg(windows)]
+pub(crate) fn run_with_handoff(
+    id: &str,
+    cancel: &Arc<AtomicBool>,
+    work: Work,
+    handoff: Option<HandoffBinding>,
 ) -> Result<(String, Option<String>), String> {
     let err = |e: std::io::Error| e.to_string();
     let locale = crate::native_locale::current();
@@ -2988,8 +3261,10 @@ pub(crate) fn run(
             };
             let required = backup_output_bound(payload, r.size, options.encryption)?;
             reader.seek(SeekFrom::Start(0)).map_err(err)?;
-            let (mut file, publication) =
-                crate::backup_files::create(&path, &source.target, required, password.as_ref())?;
+            let (mut file, publication) = match handoff {
+                Some(HandoffBinding::BackupOutput(output)) => output.create(&source.target, required)?,
+                _ => crate::backup_files::create(&path, &source.target, required, password.as_ref())?,
+            };
             drop(password);
             let header = {
                 let mut content: Box<dyn Read + '_> = if let Some(plan) = &allocation {
@@ -3074,6 +3349,9 @@ pub(crate) fn run(
         }
         Work::ImageBackup(backup) => backup.execute(id, cancel),
         Work::ExportDeviceImage(export) => export.execute(id, cancel),
+        Work::VirtualizeSystem(export) => export.execute(id, cancel),
+        Work::ConvertImageTable(conversion) => conversion.execute(id, cancel),
+        Work::BackupImageTable(backup) => backup.execute(id, cancel),
         Work::ArchiveRestore {
             destination,
             mut chain,
@@ -3081,6 +3359,7 @@ pub(crate) fn run(
             let h = chain.header().clone();
             chain.verify(|n| progress(id, cancel, "验证备份链", n, h.size))?;
             let dst = platform::resolve(&destination, true, true)?;
+            check_restore_handoff(handoff.as_ref(), &destination, &dst)?;
             if dst.size != h.size
                 || dst.disk.logical_sector_size != Some(h.sector)
                 || (h.kind == "partition") != destination.partition.is_some()
@@ -3158,6 +3437,9 @@ pub(crate) fn run(
                 Some(hash),
             ))
         }
+        Work::MigrateSystem(migration) => migration.execute(id, cancel),
+        Work::CreateWinpeIso(export) => export.execute(id, cancel),
+        Work::CreateWinpeUsb(install) => install.execute(id, cancel),
         Work::Clone {
             source,
             destination,
@@ -3174,6 +3456,13 @@ pub(crate) fn run(
             let _dst_locks = platform::lock(&dst)?;
             let src = platform::resolve_locked(&source, false, &src, &_src_locks)?;
             let dst = platform::resolve_locked(&destination, true, &dst, &_dst_locks)?;
+            if let Some(HandoffBinding::CloneLayouts { source: expected_source, destination: expected_target }) = &handoff {
+                if platform::handoff_layout_fingerprint(&source, &src, false)? != *expected_source
+                    || platform::restore_layout_fingerprint(&destination, &dst)? != *expected_target
+                {
+                    return Err("克隆来源或目标布局与重启前确认时不同。".into());
+                }
+            }
             if mode == crate::used_space::Mode::UsedSpace {
                 let mut reader = exact_reader(&src)?;
                 progress(id, cancel, "检查文件系统分配信息", 0, src.size)?;
@@ -3222,6 +3511,7 @@ pub(crate) fn run(
                 return Err("备份 SHA-256 不匹配，未修改目标磁盘。".into());
             }
             let dst = platform::resolve(&destination, true, true)?;
+            check_restore_handoff(handoff.as_ref(), &destination, &dst)?;
             if dst.size != header.size || dst.disk.logical_sector_size != Some(header.sector) {
                 return Err("目标容量或扇区大小已变化".into());
             }
@@ -3382,6 +3672,16 @@ pub(crate) fn run(
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn check_restore_handoff(binding: Option<&HandoffBinding>, selection: &Selection, disk: &platform::Resolved) -> Result<(), String> {
+    if let Some(HandoffBinding::RestoreTarget(expected)) = binding {
+        if platform::restore_layout_fingerprint(selection, disk)? != *expected {
+            return Err("WinPE 还原目标的布局与确认时不同。".into());
+        }
+    }
+    Ok(())
 }
 #[cfg(windows)]
 fn exact_reader(source: &platform::Resolved) -> Result<crate::used_space::View<File>, String> {
@@ -3880,6 +4180,12 @@ mod tests {
                 bytes: 512,
                 warning: String::new(),
                 destructive: false,
+                table_conversion: None,
+                virtual_machine: None,
+                system_migration: None,
+                #[cfg(windows)]
+                system_migration_targets: Vec::new(),
+                maintenance_media: None,
             },
             work: Work::Backup {
                 source: selection("a", None),

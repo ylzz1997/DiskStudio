@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), not(test)), windows_subsystem = "windows")]
 use disk_core::Disk;
 mod backup_archive;
 mod backup_browser;
@@ -27,6 +27,7 @@ mod fat_recovery;
 #[cfg(windows)]
 mod fat_volume;
 mod file_metadata;
+mod firmware_boot;
 mod free_space_wipe;
 mod health_data;
 mod health_tasks;
@@ -38,8 +39,11 @@ mod image_compression;
 mod image_conversion_tasks;
 mod image_conversion_wire;
 mod image_convert;
+mod system_virtualization;
+mod system_migration;
 mod image_creation;
 mod image_files;
+mod image_table_conversion;
 mod lost_partition_restore;
 mod lost_partition_tasks;
 mod lost_partitions;
@@ -49,6 +53,8 @@ mod ldm_tasks;
 mod lvm_tasks;
 mod maintenance_io;
 mod maintenance_tasks;
+mod maintenance_iso;
+mod maintenance_media;
 mod native_locale;
 mod operation_gate;
 mod ntfs_allocation;
@@ -106,6 +112,10 @@ mod table_restore;
 mod table_restore_task;
 mod table_tasks;
 mod used_space;
+#[cfg(windows)]
+mod winpe;
+#[cfg(windows)]
+mod winpe_handoff;
 pub(crate) static OPERATION: operation_gate::OperationGate = operation_gate::OperationGate::new();
 
 #[tauri::command]
@@ -393,6 +403,14 @@ fn data_image_status() -> Option<data_tasks::image_browse_tasks::Status> {
     data_tasks::image_browse_tasks::status()
 }
 #[tauri::command]
+async fn data_image_gpt_inspect(
+    id: String,
+) -> Result<image_table_conversion::gpt_repair::Report, String> {
+    tauri::async_runtime::spawn_blocking(move || data_tasks::inspect_image_gpt(id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 async fn data_inspect_boot(request: data_tasks::boot_inspection_tasks::Request) -> Result<boot_inspection::Report, String> {
     tauri::async_runtime::spawn_blocking(move || data_tasks::boot_inspection_tasks::inspect(request))
         .await
@@ -406,6 +424,12 @@ async fn data_preview_boot_repair(request: boot_repair_tasks::Request) -> Result
         .map_err(|error| error.to_string())?
 }
 #[tauri::command]
+async fn data_preview_boot_files(request: boot_repair_tasks::FileRequest) -> Result<boot_repair_tasks::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || boot_repair_tasks::preview_files(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
 async fn data_apply_boot_repair(token: uuid::Uuid) -> Result<Option<boot_repair_tasks::Report>, String> {
     tauri::async_runtime::spawn_blocking(move || boot_repair_tasks::apply(token))
         .await
@@ -414,6 +438,70 @@ async fn data_apply_boot_repair(token: uuid::Uuid) -> Result<Option<boot_repair_
 #[tauri::command]
 fn data_discard_boot_repair(token: uuid::Uuid) {
     boot_repair_tasks::discard(token);
+}
+#[tauri::command]
+async fn firmware_boot_inspect() -> Result<firmware_boot::Report, String> {
+    tauri::async_runtime::spawn_blocking(firmware_boot::inspect)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_inspect_secure_boot() -> Result<firmware_boot::secure_boot::Report, String> {
+    tauri::async_runtime::spawn_blocking(firmware_boot::inspect_secure_boot)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_preview(request: firmware_boot::Request) -> Result<Option<firmware_boot::Preview>, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::preview(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_list_loaders(source: data_tasks::Selection) -> Result<Vec<firmware_boot::Loader>, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::list_loaders(source))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_verify_loader(id: uuid::Uuid) -> Result<firmware_boot::LoaderVerification, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::verify_loader(id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_inspect_loader_security(id: uuid::Uuid) -> Result<firmware_boot::loader_security::Report, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::inspect_loader_security(id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_backup(request: firmware_boot::BackupRequest) -> Result<Option<firmware_boot::BackupResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::backup(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_boot_apply(token: String) -> Result<firmware_boot::Report, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::apply(token))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_winpe_preview(request: firmware_boot::WinPeRequest) -> Result<Option<firmware_boot::WinPePreview>, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::winpe_preview(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn firmware_winpe_restart(token: String) -> Result<firmware_boot::WinPeRestart, String> {
+    tauri::async_runtime::spawn_blocking(move || firmware_boot::winpe_restart(token))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn firmware_boot_discard(token: String) {
+    firmware_boot::discard(token);
 }
 use data_tasks::retained_partition_tasks;
 #[tauri::command]
@@ -759,6 +847,37 @@ fn quick_partition_discard(token: String) {
     partitions::quick::discard(token);
 }
 #[tauri::command]
+async fn usb_format_candidates() -> Result<Vec<partitions::usb_format::Candidate>, String> {
+    tauri::async_runtime::spawn_blocking(partitions::usb_format::candidates)
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn usb_format_prepare(
+    request: partitions::usb_format::Request,
+) -> Result<partitions::usb_format::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || partitions::usb_format::prepare(request))
+        .await
+        .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn usb_format_execute(
+    token: String,
+    progress: tauri::ipc::Channel<partitions::quick::Progress>,
+) -> Result<partitions::usb_format::Outcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        partitions::usb_format::execute(token, |event| {
+            let _ = progress.send(event);
+        })
+    })
+    .await
+    .map_err(|_| "批量执行任务未能返回结果；请核对实际状态，勿重复提交。".to_string())?
+}
+#[tauri::command]
+fn usb_format_discard(token: String) {
+    partitions::usb_format::discard(&token);
+}
+#[tauri::command]
 async fn partition_reallocation_prepare(
     request: partitions::reallocation::Request,
 ) -> Result<Option<partitions::reallocation::Preview>, String> {
@@ -1092,6 +1211,11 @@ fn set_display_language(language: native_locale::Language) {
     native_locale::set(language);
 }
 fn main() {
+    #[cfg(windows)]
+    if winpe::detected() {
+        winpe::run();
+        return;
+    }
     tauri::Builder::default()
         .on_window_event(|_, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1180,6 +1304,10 @@ fn main() {
             quick_partition_prepare,
             quick_partition_execute,
             quick_partition_discard,
+            usb_format_candidates,
+            usb_format_prepare,
+            usb_format_execute,
+            usb_format_discard,
             partition_reallocation_prepare,
             partition_reallocation_execute,
             partition_reallocation_discard,
@@ -1195,11 +1323,24 @@ fn main() {
             data_reconstruct_filesystem,
             data_backup_status,
             data_image_status,
+            data_image_gpt_inspect,
             data_search_retained_partitions,
             data_inspect_boot,
             data_preview_boot_repair,
+            data_preview_boot_files,
             data_apply_boot_repair,
             data_discard_boot_repair,
+            firmware_boot_inspect,
+            firmware_boot_inspect_secure_boot,
+            firmware_boot_list_loaders,
+            firmware_boot_verify_loader,
+            firmware_boot_inspect_loader_security,
+            firmware_boot_backup,
+            firmware_boot_preview,
+            firmware_boot_apply,
+            firmware_winpe_preview,
+            firmware_winpe_restart,
+            firmware_boot_discard,
             data_browse_retained_partition,
             data_image_spaces_select,
             data_image_spaces_open,

@@ -862,6 +862,8 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 
 精简空间采用独立镜像和导出目录。执行 `node scripts/vm/build-storage-spaces-recovery-fixture.mjs <完整校验扇区捕获目录名> <精简缓存捕获目录名> --thin`。生成的 FAT16 夹具中，现存文件跨越直接分配和缓存，删除候选只存于缓存。把 `.vm/storage-spaces-recovery-thin.json` 的绝对路径设为 `DISKSTUDIO_SPACES_THIN_FIXTURE`，执行 `cargo test -p diskstudio --bin diskstudio thin_storage_space_browses_and_extracts_through_a_checkpoint -- --ignored`，用桌面后端核对分区表、文件分类和两份文件摘要。
 
+原生验收复用固定镜像场景中已准备好的 A/B 卷。挂载 `make-tools-iso.ps1 -Live -StorageSpacesThinRecovery` 生成的只读光盘并重新核对 QMP、来宾身份和载荷摘要。在来宾执行一次 `stage-storage-spaces-recovery.ps1 -Thin`。从 `S:\spaces-thin` 打开两个成员镜像，选择精简空间并读取 FAT16 分区，将文件导出到 `R:\thin-out`，再用 `stage-storage-spaces-recovery.ps1 -Thin -Verify` 独立复核。脚本验证两卷身份后只创建测试文件和目录。正式构建 `1cea3f4c…` 通过该流程。预览仅存于缓存的删除候选，将 8,233 字节的现存文件和 3,601 字节的删除候选从 A 跨盘导出到 B。两份完整 SHA-256 通过来宾独立核对，两个源成员区段一致，导出期间 A 无新增写入。证据见 `.vm/storage-spaces-thin-native-status.json`。
+
 ### Windows UEFI BCD 引用修复
 
 使用含 FAT32 EFI 系统分区、NTFS 加载器和已知过期 BCD 引用的 4Kn 合成镜像 `.vm/payload/Boot-Repair-4096.img`。运行 `node scripts/vm/build-boot-repair-disk.mjs`，生成独立的 16 GiB Test B QCOW2。脚本复核 GPT 主备表和分区边界，在新镜像末端写入备份 GPT，并回读校验。已有夹具盘不被替换。
@@ -872,4 +874,118 @@ Linux md RAID10 验收使用 `seed-virtual-raid-md10-4kn` 和 `virtual-raid-md10
 
 正式构建 `3110d1b6…` 通过 4Kn 来宾原生验收。A 的备份 SHA-256 与原始 BCD 一致，B 的修复后 BCD SHA-256 与预览一致。两盘 GPT、EFI 启动管理器和来宾系统盘布局一致，B 全程脱机。QMP 显示从预览到独立回读期间 B 只写了两个 4 KiB 块。证据见 `.vm/boot-repair-status.json`。
 
-原生验收复用固定镜像场景中已准备好的 A/B 卷。挂载 `make-tools-iso.ps1 -Live -StorageSpacesThinRecovery` 生成的只读光盘并重新核对 QMP、来宾身份和载荷摘要。在来宾执行一次 `stage-storage-spaces-recovery.ps1 -Thin`。从 `S:\spaces-thin` 打开两个成员镜像，选择精简空间并读取 FAT16 分区，将文件导出到 `R:\thin-out`，再用 `stage-storage-spaces-recovery.ps1 -Thin -Verify` 独立复核。脚本验证两卷身份后只创建测试文件和目录。正式构建 `1cea3f4c…` 通过该流程。预览仅存于缓存的删除候选，将 8,233 字节的现存文件和 3,601 字节的删除候选从 A 跨盘导出到 B。两份完整 SHA-256 通过来宾独立核对，两个源成员区段一致，导出期间 A 无新增写入。证据见 `.vm/storage-spaces-thin-native-status.json`。
+### Windows EFI 启动文件恢复
+
+使用 `.vm/payload/Boot-Files-4096.img`，这是包含 Windows 原版 x64 启动管理器和加载器的 GPT 测试镜像。EFI 分区有一份损坏的启动管理器、有效的 BCD，且缺少 x64 回退文件。运行 `node scripts/vm/build-boot-repair-disk.mjs --boot-files` 生成独立的 16 GiB B 盘。A 使用关机后复制的 2 GiB NTFS 备份卷夹具或同样制备的独立 A/2。通过 `node scripts/vm/lab.mjs start --4kn --boot-files` 启动并核对 QMP 身份、文件后端和容量。
+
+用 `build-guest-checks.ps1 -BootFiles` 生成与正式程序 SHA-256 绑定的准备和回读工具。从只读光盘运行 `Boot-Files-4Kn-Prepare.exe`，核对 B 的坏文件和缺失文件并记录 BCD、分区布局等摘要。检查 B 的启动文件后，从同盘的 Windows 分区恢复启动管理器和 x64 回退文件，将 ZIP 保存到 A 的 `DS-Boot-Files\EFI-files-before-repair.zip`。运行 `Boot-Files-4Kn-Verify.exe`，核对 ZIP 中损坏文件的原始字节、两个恢复后的 EFI 文件、原有 BCD、A/B GPT 和来宾系统盘布局。
+
+### Windows UEFI 缺失 BCD 重建
+
+使用 `.vm/payload/Boot-Store-4096.img`。其中 FAT32 EFI 分区有原版 Windows 启动管理器和三份残留日志，BCD 文件缺失。同盘 NTFS 分区保留 Windows 安装映像中的 `BCD-Template`、启动管理器及加载器。用 `node scripts/vm/build-boot-repair-disk.mjs --boot-store` 单独制备 B，使用关机后复制的 A/2 NTFS 备份卷。启动 `node scripts/vm/lab.mjs start --4kn --boot-store`，预检来宾身份、容量、后端和只读工具光盘。
+
+用 `build-guest-checks.ps1 -BootStore` 构建准备及回读工具。运行 `Boot-Store-4Kn-Prepare.exe`，核对脱机 B 的缺失 BCD、三份日志和布局。在启动文件恢复里选中「从 Windows 模板新建缺失的 BCD」，将 ZIP 存到 A 的 `DS-Boot-Store\EFI-files-before-repair.zip`。用 `Boot-Store-4Kn-Verify.exe` 检查备份、默认启动项、两个加载器设备、A/B GPT 和来宾系统盘布局。验证工具将新 BCD 的副本保存到 A，并用 Windows 的 BCDEdit 枚举该副本。
+
+### Windows UEFI 损坏 BCD 恢复
+
+用 `build-guest-checks.ps1 -BootDamaged` 构建两种验收场景的准备和回读工具。`Boot-Dirty-4096.img` 含事务中断的 BCD 和两份轮换日志。`Boot-Damaged-4096.img` 的 BCD 文件签名损坏，同盘 NTFS 保留原版 Windows BCD 模板和加载器。在前一台来宾关机后，分别运行 `build-boot-repair-disk.mjs --boot-dirty` 或 `--boot-damaged` 创建独立 Test B，用对应的 `lab.mjs start --4kn` 夹具。两个场景使用相同的正式程序和只读工具光盘，各自通过 QMP 与来宾身份检查。
+
+在轮换日志夹具中，选择「从现有 BCD 日志恢复」，将原文件存到 A 的 `DS-Boot-Dirty\EFI-files-before-repair.zip`。回读工具检查两个启动项、两个日志修改、原 BCD 和日志的 ZIP 摘要，并用 BCDEdit 枚举恢复的副本。损坏签名夹具先预览日志恢复以检查拒绝结果，再选择「用 Windows 模板替换损坏的 BCD」，将备份存到 `DS-Boot-Damaged\EFI-files-before-repair.zip`。回读工具检查新启动项、原 BCD 和日志的 ZIP 摘要、A/B GPT 与来宾系统盘布局。
+
+正式构建 `69801618…` 已通过两种 4Kn 场景的验收。Windows BCDEdit 验证了模板替换后的一项启动配置，以及日志恢复后的两个原启动项和两处修改。QMP 记录模板替换写入 13 个 4 KiB 块，日志恢复写入 14 个，B 均保持脱机。验收记录见 `.vm/boot-damaged-status.json`。
+
+### 从修复后的 Test B 启动 Windows
+
+此场景使用独立的 `test-a-boot-windows-4kn.qcow2` 和 `test-b-boot-windows-4kn.qcow2`。在来宾关机后，以具有 2 GiB NTFS 备份卷的 `test-a-boot-store-4kn.qcow2` 的副本作为 A。B 首次启动时创建为空白 16 GiB QCOW2。通过 `make-tools-iso.ps1 -Live -BootWindowsFixture` 生成只读工具光盘，核对光盘中的正式程序及 `Boot-Windows-Fixture.ps1` 的 SHA-256。
+
+用 `node scripts/vm/lab.mjs start --4kn --boot-windows --boot-stage` 启动并执行 `preflight`。原始 Windows 安装光盘以只读方式加挂，来宾仍从原 80 GiB 系统盘启动。来宾从工具光盘运行 `Boot-Windows-Fixture.ps1`。脚本核对 SMBIOS 身份、三块磁盘、A/B 的完整序列号和两种扇区大小，以及空白 B 和 A 上的备份卷。它在 B 上建立 EFI、MSR 和 Windows 分区，并用 DISM 应用安装盘第一个 Windows Server Core 映像。EFI 分区没有启动文件。脚本把源文件摘要和分区标识存到 A，并将 B 脱机。
+
+准备阶段中断后，可以在核对 B 的当前布局后显式指定 `-ContinueFrom Gpt` 或 `-ContinueFrom Volumes`。前者要求 B 上仅有 Windows 创建的 MSR。后者要求已经有 EFI 和空白 NTFS Windows 分区，直接继续部署映像。两者均使用 A 上原有的准备目录。
+
+用工具光盘中的正式程序检查 B，选择「恢复 Windows EFI 启动文件」，同时勾选 x64 回退文件和从 Windows 模板新建缺失 BCD。预览确认后把 ZIP 存到 A 的 `D:\DS-Boot-Windows`。记录应用读回结果及 QMP 写入计数。正常关闭来宾后，运行 `node scripts/vm/lab.mjs start --4kn --boot-windows --boot-verify` 并再次执行 `preflight`。EDK2 使用全新变量存储，只连接 B。记录固件和启动屏幕，以及 Windows 到达首次设置或登录的结果。
+
+用 `node scripts/vm/lab.mjs boot-screenshot` 保存画面。命令在截图前再次核对来宾、固件和磁盘配置，并将 PNG 写入 `.vm/boot-windows-screens`。
+
+4Kn EDK2 启动验证配置可在启动完成后用 `node scripts/vm/lab.mjs boot-attach-tools` 接入待用只读工具光盘。命令核对 ISO 摘要、固定来宾身份、EDK2 固件和 Test B 的序列号、容量及两种扇区大小。它先验证 USB 光驱和只读文件后端，再连接来宾。之后 `preflight` 会同时检查已登记的光盘，同一份 ISO 可重新核对。屏幕休眠时可用 `boot-screenshot --wake-display` 唤醒并截图，解锁仍在来宾窗口完成。
+
+核对在线 EFI 加载器使用普通 `--4kn --boot-windows` 修复配置。工具光盘需包含已校验的正式程序和 `Boot-Windows-Fixture.ps1`，先执行 QMP `preflight`。来宾运行夹具的 `-LoaderTest Online`，核对 A 的原始部署记录及 B 的三项 GPT 标识、类型和范围，再将 B 联机，输出 EFI 分区编号与 Windows 启动管理器的预期 SHA-256。正式程序从「磁盘 → UEFI 固件启动项 → EFI 加载器」选中 B 的 EFI 系统分区并读取文件，选择 `\EFI\Microsoft\Boot\bootmgfw.efi`，核对界面 GPT 分区 GUID 和 SHA-256。记录核对前后 QMP 读写计数，完成后运行 `-LoaderTest Offline` 恢复 B 的脱机状态。这一步使用加载器核对入口，与固件变量读写验收独立。
+
+首轮从空白 EFI 分区重建三份文件后，Windows 首次配置发现 BCD 缺少系统存储标记。对照 BCDBoot 的输出后，正式构建 `00251f65…` 加入了该标记的写入和回读校验。复验使用启动前的冷关机副本。夹具脚本的 `-PrepareMissingStore` 核对 A 上的预览与 GPT 记录后，在 B 的 EFI 分区备存旧 BCD，为重建保留缺失状态。正式程序重建 BCD 时写入 11 个 4 KiB 块，随后在只连接 B 的全新 EDK2 环境下启动到 Windows Server Core 的 Ctrl+Alt+Del 登录提示。完整记录见 `.vm/boot-windows-status.json`。
+
+### 查看安全启动证书
+
+在已通过 QMP 和来宾身份核对的 UEFI 测试 VM 中，从已核对 SHA-256 的只读工具光盘启动正式程序。打开「磁盘 → UEFI 固件启动项 → 查看安全启动证书」。在来宾用 Windows 的 `Confirm-SecureBootUEFI` 核对开关，分别用 `Get-SecureBootUEFI` 核对 PK、KEK、db 和 dbx 是否存在及原始数据 SHA-256。至少核对一张 X.509 证书的名称、颁发者、序列号与有效期，并查看 dbx 中已有的摘要记录。验收需要能启动 Windows 且包含测试证书数据库的隔离来宾。
+
+正式构建 `badfe701…` 已通过同一程序的合成固件桌面检查及工具光盘载荷核对。真实固件验收待完成，当前记录见 `.vm/secure-boot-status.json`。
+
+加载器签名核对使用同一套已核对的 EFI 来源。选择来宾 Test B 上的 Windows EFI 加载器，点击「核对安全启动摘要与签名」，比对完整文件 SHA-256、PE 映像摘要和签名者。用来宾对 db、dbx 的独立读取核对摘要命中结果。普通文件验收可对安装光盘中已提取的 `bootx64.efi` 运行 `cargo test --locked -p diskstudio verifies_windows_installation_efi_signature -- --ignored`。该用例读取仓库下 `.vm/windows-boot-fixture/efi/boot/bootx64.efi`。
+
+证书链核对还需比对已登记的 db 信任锚，并核对 dbx 中的证书与 TBS 摘要。普通文件用例使用安装光盘中同一文件的证书构造合成 db 和 dbx。真实固件验收须在隔离来宾中分别核对证书链锚点、永久吊销记录，以及基于 dbt 的可信时间戳与 dbx 吊销生效时间。验收应区分严格早于生效时刻、等于生效时刻和时间戳签名者无法通过核对的场景。
+
+### WinPE 存储查询与跨盘验收
+
+从仓库根目录运行 `./scripts/vm/prepare-winpe-storage-inputs.ps1`。提取工具使用 `.vm/tools/7zip/7z.exe`。脚本将原始 amd64 `winpe.wim` 和十个组件包存入 `.vm/winpe-adk-input/amd64`，并将核对过的大小和 SHA-256 写入同目录的 `inputs.json`。组件包按 WMI、NetFx、Scripting、PowerShell、StorageWMI 的顺序在来宾中安装，每组先语言中立包，再安装 en-US 包。[Windows ADK 下载](https://learn.microsoft.com/en-us/windows-hardware/get-started/adk-install) · [WinPE 可选组件](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-add-packages--optional-components-reference?view=windows-11)
+
+用 `cargo build --locked --release --manifest-path scripts/vm/guest-checks/Cargo.toml --bin winpe-storage-probe` 编译控制台探针。在仅接入已核对只读介质的隔离 WinPE 中运行它。探针执行固定的 WMI SELECT，只输出存储类的查询状态及错误码。查询通过后，再按固定 VM 身份、后端文件、容量和来宾完整序列号核对 A/B，并用同一正式程序验收跨盘发布和回读。
+
+验收实体磁盘的只读入口时，使用 `prepare-winpe-registration --verify-physical-4kn`。为 WinPE 编译该来宾工具时使用 `RUSTFLAGS='-C target-feature=+crt-static'`。介质中的工具须从来宾 RAM 盘运行，在两块预置的 16 GiB NVMe 文件后端已经过 QMP 核对后执行。该模式检查完整 A/B 命名空间序列号、设备号、4Kn 几何和 B 盘实际输出卷。它适用于已经布置好的夹具。
+
+正式构建 `9e17462e…` 通过 1774 项自动检查和桌面构建。隔离 UEFI WinPE 使用经 SHA-256 核对的同一可执行文件。原生界面只读检查 A 的 MBR、B 的 GPT，并核对 A 的 LBA 256 扇区摘要。搜索 A 的 LBA 256–1279，找到未登记的 4 MiB FAT12 分区并预览两个文件。取消全部未分配空间搜索后，已找到的候选仍可打开。
+
+关机后，用 `read-winpe-4kn-registration --physical` 从关闭的 B 盘 QCOW2 回读 34 字节现存文件、32 字节删除候选和两份清单，内容摘要均一致。A 盘的 QMP 写入计数在验收期间为零，关机后整个逻辑磁盘与夹具逐字节一致。记录见 `.vm/winpe-physical-4kn-status.json`。英文分区表报告的部分检查项仍需补齐翻译。
+
+### WinPE 实体盘 GPT 候选登记
+
+A 盘夹具含一条有效的 GPT 记录和一个位于未分配空间的 FAT12 文件系统。实际写入前分别核对来宾完整序列号、两块盘的 4Kn 几何、A 的初始 GPT 和登记预览范围。通过 QMP 区分取消确认与实际写入。确认后可在同一来宾 RAM 盘运行 `prepare-winpe-registration --verify-gpt-recovered`，再关闭来宾并从普通 QCOW2 文件检查主备 GPT、原有条目和表外字节。
+
+正式构建 `4ae2e5b5…` 通过 1775 项自动检查复跑和桌面构建。隔离 UEFI WinPE 中，从 A 的 LBA 256–1279 搜索得到 4 MiB FAT12 候选。拒绝第一次确认后，A/B 的 QMP 写入计数均无变化。重新预览并确认后，A 新增一个 GPT 数据分区，写入并回读四段共 40,960 字节，核对 Windows 原生布局。独立来宾工具确认 A 仍处于脱机状态。
+
+关闭虚拟机后独立验证主备表 CRC32、原有条目及新条目范围，重建预期逻辑磁盘并完整比较，确认 GPT 写入范围以外的字节一致。四段独立回读的 SHA-256 与界面一致。B 的写入计数在试验期间无变化。记录见 `.vm/winpe-gpt-recovery-4kn-status.json`。
+
+### WinPE 一次性重启
+
+桌面预览验收使用原生 WebView 和模拟固件调用，核对介质选择、摘要显示、取消预览和确认时使用新的单次令牌。
+
+真实固件验收从受控 UEFI WinPE 光盘启动，连接两块经过 QMP 核对的 16 GiB 4Kn NVMe 盘。忽略测试 `prepares_winpe_media_on_test_b` 在来宾重复核对 A/B 后，仅在空白 B 上建立 FAT32 ESP 并复制已核对的光盘载荷。运行 `hands_off_to_the_prepared_winpe_partition` 可使用正式的介质核对、固件预览和重启实现。重启后在目标 WinPE 运行 `confirms_firmware_booted_the_winpe_partition`，核对 `BootCurrent` 指向 DiskStudio WinPE、`BootNext` 已被消费且普通启动顺序中没有新条目。
+
+正式构建 `cce0861b…` 通过 1776 项自动检查和桌面构建。隔离光盘 WinPE 以相同后端核对 B 盘的 WIM 和程序摘要，实际请求重启，并从 B 盘 ESP 启动目标 WinPE。目标环境报告 `BootCurrent=Boot0003`，`BootNext` 已被消费，普通启动顺序为 `[1, 0, 2]`。随后打开经 SHA-256 核对的同一份正式程序，来宾正常关机。进入目标 WinPE 时 Windows 在空白 A 上生成了 MBR 磁盘签名，关机后独立核对非零字节只在偏移 440–443。真实重启经来宾测试入口发起，桌面窗口使用模拟固件验收。记录见 `.vm/winpe-restart-4kn-status.json`。
+
+ADK 启动分区验收使用同一对 16 GiB 4Kn NVMe 夹具。只读光盘携带经摘要核对的 Microsoft amd64 英文基础 WIM、十个组件包和 WinPE 介质模板。`assembles_and_publishes_adk_winpe` 在核对来宾身份、A/B 序列号及空白布局后准备 A 的 NTFS 工作卷和 B 的 GPT FAT32 数据分区。测试复用正式 ADK 准备、文件发布和回读流程，并核对 A 上的私有工作目录已清空。`restarts_into_adk_winpe` 使用正式 UEFI 流程重启，`confirms_adk_winpe_boot` 在目标 WinPE 读取固件状态，并核对其 RAM 盘上 DiskStudio 的 SHA-256。
+
+正式构建 `d33ba656…` 通过 1778 项自动检查。来宾从 ADK 基础映像生成 WinPE，在 B 盘新增并回读核对 67 个启动文件，随后清理 A 上的工作目录。从同一份 B 盘重启后，DiskStudio 自动打开并列出两块 4Kn 测试盘。目标 WinPE 报告 `BootCurrent=Boot0003`，`BootNext` 已消费，常规启动顺序为 `[1, 0, 2]`。RAM 盘程序与本地正式构建的 SHA-256 一致。桌面向导另用模拟调用验收，包括原有 ISO 向导、ADK 目标筛选、预览、取消和确认。记录见 `.vm/winpe-adk-partition-status.json`。
+
+WinPE 离线备份续接验收仍使用同一对 16 GiB 4Kn NVMe 磁盘。`prepares_queued_backup` 核对两盘均为空白后，在 A 建立 128 MiB NTFS 源卷并写入固定文件，在 B 建立 FAT32 启动分区及单独的 1 GiB NTFS 输出卷。`schedules_queued_backup` 复用正式预览、续接记录登记和重启代码。目标 WinPE 自动运行同版 DiskStudio。`verifies_queued_backup` 检查启动项、已消费记录和重启后的新盘符，验证备份链和源卷内的文件字节。
+
+正式构建 `1e883c27…` 通过 1782 项自动检查，两个 WinPE 启动映像内程序的 SHA-256 均与正式构建一致。输出路径从 `U:\backups\queued.dsbackup` 变为 `E:\backups\queued.dsbackup`，DiskStudio 仍定位到已确认的输出目录，自动备份 128 MiB 逻辑内容并通过回读。独立验证工具重新打开备份，核对 4Kn 几何、完整 SHA-256 和内含 NTFS 文件的字节。`BootCurrent` 为 `Boot0003`，固件一次性启动项与续接记录均已消费。再次打开同一程序时未重复执行任务，来宾正常关机。桌面入口与预览另用原生 WebView 和模拟固件调用验收。记录见 `.vm/winpe-backup-handoff-status.json`。
+
+WinPE 离线还原验收复用空白的两块 4Kn 测试盘。`prepares_queued_restore` 在 A 的 128 MiB NTFS 分区内建立测试文件，向 B 的 NTFS 卷生成基础备份和加密增量，然后替换 A 上的文件作为还原前对照。`schedules_queued_restore` 按正式流程预览目标、选择两层备份并请求一次性重启。在目标 WinPE 的原生密码对话框解锁增量后，`verifies_queued_restore` 独立读取已脱机的 A 盘，复核分区范围、全量 SHA-256 和恢复后的 NTFS 文件字节，并确认续接记录只消费一次。
+
+正式构建 `94e9c16c…` 通过 1783 项自动检查。隔离来宾从 B 启动 WinPE，重新定位由 U: 变为 E: 的备份卷，原生密码解锁后验证两层备份并还原到 A。程序完成 SHA-256 写后回读，独立检查确认 A 脱机、`BootCurrent=Boot0003`、`BootNext` 和续接记录均已消费。该 WinPE 脱机句柄拒绝 `SEEK_END`，验收入口改用已核对的设备容量限定读取范围。本次关机后只读提取 A 的 QCOW2 文件中 128 MiB 目标分区，独立核对备份摘要和完整 57 字节 NTFS 文件。QMP 核对解锁至还原完成期间 B 无新增写入。桌面向导另以模拟固件调用验证预览、取消和覆盖确认。记录见 `.vm/winpe-restore-handoff-status.json`。
+
+WinPE 克隆续接由 `prepares_queued_clone` 在两块已核对的空白 4Kn 盘上准备。B 保存 WinPE 和 128 MiB NTFS 源分区，A 保存同容量目标。正式构建 `ec13ef58…` 从 B 自动启动，完成全扇区克隆和 SHA-256 写后回读，并保持 A 脱机。关机后从两份 QCOW2 独立解析 GPT 和 NTFS，核对源与副本内的 73 字节文件。快照比较另记录了 20 个不同的 4 KiB 块，源卷在 WinPE 中继续联机。启动映像内程序与桌面构建摘要一致，1784 项自动化检查通过。桌面克隆和迁移入口使用原生 WebView 和模拟固件调用验收。
+
+Windows 迁移续接复用 16 GiB 4Kn Windows Server 2025 测试源 B。先单独启动 B 并正常关闭 Windows，再启动隔离 WinPE，将空 GPT 的 A 确认为目标。正式构建 `870f483e…` 复核源盘布局并持有源卷锁，完成 16 GiB 写入、源盘复读和目标盘 SHA-256 回读。QMP 记录复制和复读期间 B 的写入计数保持一致。独立的 `verifies_queued_migration` 核对 A 仍脱机、目标 Windows 启动链和固件续接记录，确认 `BootCurrent=Boot0004`、`BootNext` 与任务记录均已消费。1784 项自动化检查通过，WinPE 内执行文件与桌面构建摘要一致。验收先验证了两处拒绝条件，重启后 RAW 目标原生布局与确认时不同，以及源 SYSTEM 配置单元需要日志回放。
+
+迁移结束后使用全新的 EDK2 变量，仅连接 A，确认 QMP 存储清单中只有迁移目标和固件文件。Windows 从 A 单独启动至原生 LogonUI。完整记录见 `.vm/winpe-copy-handoff-status.json`。
+
+迁移调容验收在独立 4Kn A/B 用例上进行。B 保留已正常关机的 Windows Server 2025 和 WinPE 启动分区，并在尾部建立 16 MiB NTFS 数据卷和标记文件。A 为无分区 GPT。正式构建 `cd51afa4…` 在一次性重启后将系统卷由 15071 MiB 缩至 12288 MiB，并将数据卷由 16 MiB 扩至 20 MiB。两卷保留起点、GPT GUID 和 NTFS 卷序列号。源卷持锁期间 B 的 QMP 写入计数保持一致。原生作业通过 16 GiB 全盘回读和调容后的启动链复核，独立入口再核对目标脱机、分区表、主备 NTFS 引导扇区、标记文件和任务记录消费状态。1784 项自动化检查和 10 项 NTFS 引擎检查通过，桌面离线迁移与 WinPE 的容量预览另用原生 WebView 及模拟 IPC 验收。完整记录见 `.vm/migration-resize-status.json`。
+
+使用新 EDK2 变量仅连接已调容的 A，迁移副本独立启动到 Windows Server Core 的 LogonUI。QMP 核对来宾只连接 A 与固件，随后正常关机。
+
+正式构建 `516d723c…` 在另一次隔离 4Kn WinPE 迁移中将 Windows 卷起点从 288 MiB 移到 320 MiB，容量从 15071 MiB 缩到 12288 MiB，同时将数据卷移入原系统分区缩容后腾出的范围，起点为 13312 MiB，容量从 16 MiB 扩到 20 MiB。16 GiB 目标全盘通过 SHA-256 回读。独立核对目标脱机、GPT 和 NTFS 标识、NTFS 主备引导扇区、标记文件、原起点清零及 BootNext 和任务消费状态。源卷持锁期间 QMP 记录 B 无新增写入。移除 B 和光盘后，A 独立启动到 Windows Server Core 的 LogonUI，随后正常关机。1786 项自动化检查及 10 项 NTFS 引擎检查通过。桌面离线迁移和 WinPE 布局预览通过原生 WebView 的模拟 IPC 检查。完整记录见 `.vm/migration-relocation-status.json`。
+
+选择分区的真实验收使用同一组隔离 4Kn A/B 设备。早期预检在发现重叠后拒绝写入。逐项比对发现从 B 启动 WinPE 后，BCD 会加入指向该 FAT32 介质的一次性固件入口。正式构建 `c6383628…` 从 Windows 启动管理器追踪启动、继承、恢复和休眠所用的对象。它核对仍存在的设备引用，并保留 BCD 原有内容。复验跳过 1000 MiB 的 FAT32 第 4 分区，将选中的 16 MiB NTFS 第 5 分区移至 15359 MiB。16 GiB 目标通过整盘 SHA-256 回读。独立核对证实保留的 GPT 标识、样本文件和启动链一致，未使用的旧范围为零，目标保持脱机，一次性任务已消费。源卷持锁期间 QMP 记录 B 无新增写入。仅连接 A 后，Windows Server Core 启动到原生 LogonUI，随后正常关机。1790 项自动化检查和 10 项 NTFS 引擎检查通过。两种桌面预览的分区选择通过原生 WebView 的模拟 IPC 验收。完整记录见 `.vm/migration-selection-status.json`。
+
+隔离 UEFI 测试使用原版 Windows Setup WinPE 10.0.26100.32230。`Win32_DiskDrive` 和 `Win32_PageFileUsage` 查询通过，`MSFT_Disk`、`MSFT_Partition`、`MSFT_Volume` 和 `MSFT_PartitionToVolume` 均返回 `0x80041010`。启动映像、探针摘要和来宾截图见 `.vm/winpe-adk-storage-status.json`。[WMI 错误码](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-error-constants)
+
+服务夹具由 `guest-checks/src/bin/prepare-winpe-storage.rs` 构建。只读启动介质的 RAM 盘载荷包含 `X:\dsadd.exe` 和 `X:\dsadk` 中的已核对 WIM、十个组件包及 `dsprobe.exe`。QMP 先核对固定 VM 身份、唯一的空白 Test B 文件后端、NVMe 序列号和 512 字节扇区。夹具在来宾重复核对 SMBIOS、完整设备序列号、16 GiB 容量、空分区布局及首尾各 1 MiB 全零，创建 NTFS 工作卷后核对 `R:` 的实际设备范围。通过后才离线安装组件并以 `R:\winpe-storage.wim` 捕获单索引启动映像，同时写入 SHA-256 和字节数。正常关闭来宾后从普通 QCOW2 文件独立提取，核对摘要，再使用仅连接只读介质的来宾复查存储类。[WinPE 离线组件安装](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/winpe-adding-powershell-support-to-windows-pe?view=windows-11)
+
+实测从核对过的 Test B 工作卷独立提取 549,160,751 字节的启动 WIM。回读摘要与来宾记录和只读 ISO 内的映像一致，映像内包含十个组件清单。仅接入这张只读光盘的 UEFI 来宾启动后，六项查询全部通过。完整记录见 `.vm/winpe-adk-servicing-status.json`。
+
+跨盘验收使用含集成组件的 WinPE、同一份正式 `DiskStudio.exe` 和两块空白 16 GiB NVMe 盘。只读介质中的 `prepare-winpe-registration` 在 QMP 核对文件后端后运行，在来宾核对 A/B 序列号、几何、空分区表和卷范围，只在 Test A 的 `P:\cases` 放入三个合成镜像，并在 Test B 的 `T:\output` 建立输出目录和已有文件对照。正式界面从 A 的镜像登记两个 FAT12 候选，分别向 B 发布 GPT 和逻辑 MBR 副本，并从 A 的 `library.img` 向 B 导出现存目录与删除候选。
+
+正式构建 `d95b9e9b…` 在 512 字节来宾完成上述操作。正常关机后独立回读两份镜像，核对 GPT 主备 CRC、两个 EBR、两个 4 MiB 分区范围、完整 SHA-256 和表外字节。两份导出物分别为 37 和 27 字节，内容与 FAT12 源记录及导出清单相符。同盘与已有文件的输出均被拦截，Test A 从候选预览完成到关机前新增写入为零。完整记录见 `.vm/winpe-registration-ab-status.json`。
+
+4Kn 夹具通过 `creates_winpe_4kn_registration_fixture_files` 生成，使用 `DISKSTUDIO_WINPE_4KN_FIXTURE` 指定 `.vm` 下的空目录。两块测试盘均设为 4096 字节逻辑和物理扇区，通过 QMP 和来宾设备复核后，以 `prepare-winpe-registration --4kn` 准备与 512 字节用例相同的 A/B 卷。追加用例从 `searchfree.img` 的未分配范围找回一个候选，在发布副本时保留原有 MBR 条目。
+
+正式构建 `a98162b1…` 在隔离 4Kn 来宾发布了 GPT、逻辑 MBR 和保留原 MBR 条目的三份 12 MiB 副本，并跨盘导出了 34 字节现存文件及 32 字节删除候选。已有目标拒绝提示、主分区和逻辑分区的英文名称在原生界面复验通过。关机后用 `read-winpe-4kn-registration` 只读解析两份 QCOW2 中的 4Kn NTFS。独立核对 GPT 主备 CRC、MBR 链、原分区条目、表外字节、完整 SHA-256、导出内容和清单。Test A 从候选预览完成到关机前新增写入为零。完整记录见 `.vm/winpe-registration-4kn-status.json`。

@@ -2,6 +2,8 @@
 
 The Windows engine creates and populates a fresh NTFS volume through two pipes. DiskStudio retains the storage handles and restricts all requests to the confirmed target extent. The engine receives partition geometry, a new volume serial, and a stream of file records. The build links the NTFS-3G library and formatter with the pipe adapter in place of the upstream device adapters.
 
+The same engine runs `ntfsresize` for Windows migration. Its read-only trial uses the confirmed source geometry. During the real resize, requests for the retained range go to the offline copy. Reads from a discarded shrink range can still use the locked source, and writes to that range are temporary. The pipe tool receives only sizes and relative offsets. DiskStudio checks the primary and backup boot sectors, the resulting volume geometry, and the written pages by SHA-256. NTFS schedules a Windows filesystem check for the resized copy.
+
 The build uses the pinned NTFS-3G 2026.9.28 source archive under `third-party/ntfs-3g` and the same extracted w64devkit compiler as the Ext4 engine. The script checks the archive SHA-256 against the upstream release and writes the separate executable inside `.vm`. NTFS-3G and the adapter are licensed under GPL-2.0-or-later. [NTFS-3G 2026.9.28 release](https://github.com/tuxera/ntfs-3g/releases/tag/2026.9.28)
 
 ```powershell

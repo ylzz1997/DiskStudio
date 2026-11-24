@@ -15,6 +15,10 @@ export type RecoveryProgress = {
     length: number | null;
     freeOnly?: boolean;
     sectorAligned?: boolean;
+    zipFragments?: boolean;
+    oggFragments?: boolean;
+    flacFragments?: boolean;
+    pngFragments?: boolean;
   } | null;
   done: number;
   total: number;
@@ -54,6 +58,10 @@ export function settingsFromProgress(p: RecoveryProgress): SignatureSettings {
     kinds: [...p.options.kinds],
     freeOnly: p.options.freeOnly === true,
     sectorAligned: p.options.sectorAligned === true,
+    zipFragments: p.options.zipFragments === true,
+    oggFragments: p.options.oggFragments === true,
+    flacFragments: p.options.flacFragments === true,
+    pngFragments: p.options.pngFragments === true,
     customRange: p.options.start !== 0 || p.options.length !== null,
     start: (p.options.start / 1024 ** 2).toFixed(9),
     end:

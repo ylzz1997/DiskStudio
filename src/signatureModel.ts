@@ -58,6 +58,9 @@ export const signatureTypes = [
   { id: "dff", label: "DFF", detail: "核对未压缩 DSDIFF 的声音属性和数据范围。" },
 ] as const;
 export type SignatureKind = (typeof signatureTypes)[number]["id"];
+export const zipPackageKinds: SignatureKind[] = [
+  "zip", "docx", "xlsx", "pptx", "docm", "xlsm", "pptm", "odt", "ods", "odp",
+];
 export type SignatureSettings = {
   kinds: SignatureKind[];
   customRange: boolean;
@@ -65,6 +68,10 @@ export type SignatureSettings = {
   end: string;
   freeOnly: boolean;
   sectorAligned: boolean;
+  zipFragments: boolean;
+  oggFragments: boolean;
+  flacFragments: boolean;
+  pngFragments: boolean;
 };
 export const defaultSignatureSettings: SignatureSettings = {
   kinds: signatureTypes.map((t) => t.id),
@@ -73,6 +80,10 @@ export const defaultSignatureSettings: SignatureSettings = {
   end: "",
   freeOnly: false,
   sectorAligned: false,
+  zipFragments: false,
+  oggFragments: false,
+  flacFragments: false,
+  pngFragments: false,
 };
 export function signatureRequest(
   settings: SignatureSettings,
@@ -106,6 +117,12 @@ export function signatureRequest(
     length: end === sourceSize ? null : end - start,
     ...(settings.freeOnly && { freeOnly: true }),
     ...(settings.sectorAligned && { sectorAligned: true }),
+    ...(settings.zipFragments && settings.kinds.some((kind) => zipPackageKinds.includes(kind)) && {
+      zipFragments: true,
+    }),
+    ...(settings.oggFragments && settings.kinds.includes("ogg") && { oggFragments: true }),
+    ...(settings.flacFragments && settings.kinds.includes("flac") && { flacFragments: true }),
+    ...(settings.pngFragments && settings.kinds.includes("png") && { pngFragments: true }),
   };
 }
 export function previewImageMime(name: string): string | null {

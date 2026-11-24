@@ -52,6 +52,8 @@ pub struct GptIdentity {
 
 #[derive(PartialEq, Eq)]
 pub struct GptPartitionIdentity {
+    /// One-based GPT entry slot, including positions of unused slots.
+    pub number: u32,
     /// Unique partition and type GUIDs in on-disk byte order.
     pub guid: [u8; 16],
     pub kind: [u8; 16],
@@ -124,14 +126,15 @@ impl Gpt<'_> {
             && self.table == other.table
     }
 
-    fn partitions(&self, sector: u64) -> impl Iterator<Item = (&[u8], Range<u64>)> {
+    fn partitions(&self, sector: u64) -> impl Iterator<Item = (u32, &[u8], Range<u64>)> {
         self.table
             .chunks_exact(self.stride)
-            .filter(|entry| entry[..16].iter().any(|byte| *byte != 0))
-            .map(move |entry| {
+            .enumerate()
+            .filter(|(_, entry)| entry[..16].iter().any(|byte| *byte != 0))
+            .map(move |(slot, entry)| {
                 let start = u64le(entry, 32) * sector;
                 let end = (u64le(entry, 40) + 1) * sector;
-                (entry, start..end)
+                (slot as u32 + 1, entry, start..end)
             })
     }
 }
@@ -267,6 +270,49 @@ fn entries(g: &Gpt<'_>, sector: u64) -> Result<(usize, usize), String> {
     Ok((ranges.len(), unaligned))
 }
 
+/// A GPT copy whose header, array CRC, and entries all passed independent
+/// checks. The other copy and the protective MBR are not used here.
+pub struct CheckedGptCopy<'a> {
+    pub header: &'a [u8],
+    pub array: &'a [u8],
+    pub array_offset: u64,
+    pub entry_stride: usize,
+    pub first_usable: u64,
+    pub last_usable: u64,
+}
+
+pub fn check_gpt_copy<'a>(
+    head: &'a [u8],
+    tail: &'a [u8],
+    size: u64,
+    sector: u64,
+    backup: bool,
+) -> Result<CheckedGptCopy<'a>, (CheckState, String)> {
+    if !matches!(sector, 512 | 4096)
+        || !(4 * MIB..=1 << 43).contains(&size)
+        || size % sector != 0
+        || !(sector as usize..=MIB as usize).contains(&head.len())
+        || !(sector as usize..=MIB as usize).contains(&tail.len())
+    {
+        return Err(invalid("GPT 副本读取几何无效。"));
+    }
+    let ends = Ends { head, tail, size };
+    let checked = gpt(&ends, sector, backup)?;
+    entries(&checked, sector).map_err(|reason| (CheckState::Failed, reason))?;
+    let header_at = if backup { size - sector } else { sector };
+    let header = ends.get(header_at, sector).ok_or((
+        CheckState::Unchecked, "GPT 头部超出读取范围。".into(),
+    ))?;
+    Ok(CheckedGptCopy {
+        header,
+        array: checked.table,
+        array_offset: u64le(header, 72) * sector,
+        entry_stride: checked.stride,
+        first_usable: checked.first,
+        last_usable: checked.last,
+    })
+}
+
 pub(crate) struct CheckedGpt {
     pub(crate) partitions: Vec<([u8; 16], Range<u64>)>,
     pub(crate) digest: [u8; 32],
@@ -288,7 +334,7 @@ pub(crate) fn checked_gpt(
     entries(&primary, sector)?;
     let partitions = primary
         .partitions(sector)
-        .map(|(entry, range)| (entry[..16].try_into().unwrap(), range))
+        .map(|(_, entry, range)| (entry[..16].try_into().unwrap(), range))
         .collect();
     let mut digest = Sha256::new();
     digest.update(size.to_le_bytes());
@@ -510,7 +556,8 @@ pub fn inspect_image_with_geometry(
                         disk_guid: primary.guid.try_into().unwrap(),
                         partitions: primary
                             .partitions(sector)
-                            .map(|(entry, range)| GptPartitionIdentity {
+                            .map(|(number, entry, range)| GptPartitionIdentity {
+                                number,
                                 guid: entry[16..32].try_into().unwrap(),
                                 kind: entry[..16].try_into().unwrap(),
                                 attributes: u64le(entry, 48),
@@ -720,6 +767,19 @@ mod tests {
         let crc = crc32fast::hash(&bytes[at..at + 16384]);
         bytes[h + 88..h + 92].copy_from_slice(&crc.to_le_bytes());
         header_crc(&mut bytes[h..h + 512]);
+    }
+    #[test]
+    fn gpt_identity_preserves_empty_slots_before_a_partition() {
+        let mut bytes = fixture(512);
+        for backup in [false, true] {
+            table_mutate(&mut bytes, backup, |table| {
+                table.copy_within(..128, 15 * 128);
+                table[..128].fill(0);
+            });
+        }
+        let identity = inspect(&bytes).gpt_identity.unwrap();
+        assert_eq!(identity.partitions[0].number, 16);
+        assert_eq!(identity.partitions[0].range, MIB..3 * MIB);
     }
     #[test]
     fn independently_checks_both_copies_on_512_and_4k_images() {

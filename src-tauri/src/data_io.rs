@@ -169,6 +169,35 @@ pub fn copy_exact<R: Read + Send, W: Write>(
     })
 }
 
+/// Advance each logical stream by one bounded chunk before starting the next
+/// round. Keep reads on one thread because the streams may share a device
+/// handle and its current file position.
+pub(crate) fn copy_rounds<R: Read, W: Write>(
+    copies: &mut [(R, W, u64)],
+    mut checkpoint: impl FnMut(usize, u64, bool) -> Result<(), String>,
+) -> Result<Vec<String>, (usize, String)> {
+    let mut buffer = vec![0; 4 * 1024 * 1024];
+    let mut hashes = vec![Sha256::new(); copies.len()];
+    let largest = copies.iter().map(|(_, _, size)| *size).max().unwrap_or(0);
+    let mut done = 0;
+    for offset in (0..largest).step_by(buffer.len()) {
+        for (index, (input, output, size)) in copies.iter_mut().enumerate() {
+            let len = size.saturating_sub(offset).min(buffer.len() as u64) as usize;
+            if len == 0 {
+                continue;
+            }
+            checkpoint(index, done, false).map_err(|error| (index, error))?;
+            let bytes = &mut buffer[..len];
+            input.read_exact(bytes).map_err(|error| (index, format!("读取失败，未跳过坏扇区：{error}")))?;
+            checkpoint(index, done, true).map_err(|error| (index, error))?;
+            output.write_all(bytes).map_err(|error| (index, format!("写入失败：{error}")))?;
+            hashes[index].update(bytes);
+            done += len as u64;
+        }
+    }
+    Ok(hashes.into_iter().map(|hash| format!("{:x}", hash.finalize())).collect())
+}
+
 pub fn hash_exact<R: Read + Send>(
     reader: &mut R,
     size: u64,

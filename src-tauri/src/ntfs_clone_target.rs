@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-const PAGE: u64 = 64 * 1024;
+pub(crate) const PAGE: u64 = 64 * 1024;
 const CHUNK: usize = 4 * 1024 * 1024;
 
 pub(super) struct Target<R> {
@@ -14,6 +14,7 @@ pub(super) struct Target<R> {
     written: BTreeMap<u64, [u8; 32]>,
     page: Vec<u8>,
     sync: fn(&mut R) -> std::io::Result<()>,
+    preserve: bool,
 }
 
 fn io_error(error: std::io::Error) -> String {
@@ -28,7 +29,14 @@ impl<R: Read + Write + Seek> Target<R> {
             written: BTreeMap::new(),
             page: vec![0; PAGE as usize],
             sync,
+            preserve: false,
         }
+    }
+
+    pub(super) fn prefilled(device: R, size: u64, sync: fn(&mut R) -> std::io::Result<()>) -> Self {
+        let mut target = Self::new(device, size, sync);
+        target.preserve = true;
+        target
     }
 
     fn bounded(&self, offset: u64, count: usize) -> Result<(), String> {
@@ -45,10 +53,11 @@ impl<R: Read + Write + Seek> Target<R> {
     /// hides old target contents, even when a request changes only part of a page.
     fn load_page(&mut self, base: u64, size: usize) -> Result<(), String> {
         let page = &mut self.page[..size];
-        if let Some(expected) = self.written.get(&base) {
+        let expected = self.written.get(&base);
+        if expected.is_some() || self.preserve {
             self.device.seek(SeekFrom::Start(base)).map_err(io_error)?;
             self.device.read_exact(page).map_err(io_error)?;
-            if <[u8; 32]>::from(Sha256::digest(page)) != *expected {
+            if expected.is_some_and(|digest| <[u8; 32]>::from(Sha256::digest(page)) != *digest) {
                 return Err("NTFS 目标的页数据与此前写入内容不一致。".into());
             }
         } else {
@@ -97,6 +106,16 @@ impl<R: Read + Write + Seek> Target<R> {
 
     pub(super) fn flush(&mut self) -> Result<(), String> {
         (self.sync)(&mut self.device).map_err(io_error)
+    }
+
+    pub(super) fn verify_changes(mut self, mut checkpoint: impl FnMut() -> Result<(), String>) -> Result<BTreeMap<u64, [u8; 32]>, String> {
+        self.flush()?;
+        let pages: Vec<_> = self.written.keys().copied().collect();
+        for base in pages {
+            checkpoint()?;
+            self.load_page(base, (self.size - base).min(PAGE) as usize)?;
+        }
+        Ok(self.written)
     }
 
     pub(super) fn finish(

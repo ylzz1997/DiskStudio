@@ -17,10 +17,15 @@ import {
   Save,
   Upload,
 } from "lucide-react";
-import type { DataPlan, Disk, Partition } from "./types";
+import type { DataPlan, Disk, GptSide, Partition, VirtualMachineOptions } from "./types";
 import { formatSize } from "./types";
 import { Dialog, FormError, Hint } from "./components";
 import { native } from "./backend";
+import type { WinPeTaskForm } from "./FirmwareBootDialog";
+import {
+  MigrationLayoutPreview, MigrationTargets, invalidMigrationSizes, migrationOptions,
+  type MigrationTarget,
+} from "./MigrationSizes";
 import { RecoveryResults } from "./RecoveryResults";
 import { BackupBrowserPanel, type BackupInfo } from "./BackupBrowserPanel";
 import { BackupRestoreDialog } from "./BackupRestoreDialog";
@@ -28,6 +33,7 @@ import { BackupEncodingFields, type BackupCompression } from "./BackupEncodingFi
 import { ImageBrowserPanel, type ImageBrowseInfo } from "./ImageBrowserPanel";
 import { ImageBackupDialog } from "./ImageBackupDialog";
 import { DeviceImageExportDialog } from "./DeviceImageExportDialog";
+import { SystemVirtualizationDialog } from "./SystemVirtualizationDialog";
 import { BootInspectionDialog, type BootInspectionSource } from "./BootInspectionDialog";
 import { StorageSpacesOpenDialog, StorageSpacesRecoveryPanel, type StorageSpacesView } from "./StorageSpacesRecovery";
 import { SectorCopyPanel } from "./SectorCopyPanel";
@@ -36,7 +42,8 @@ import { VirtualRaidDialog, type RaidDetection, type RaidEdit, type RaidFiles, t
 import type { ImageBrowseMode, ImageBrowseOptions } from "./ImageBrowserPanel";
 import type { NativeImageGroup } from "./imageBrowserSource";
 import { ImageBrowseOpenDialog } from "./ImageBrowseOpenDialog";
-import { RetainedPartitionSearch, type RetainedSearch } from "./RetainedPartitionSearch";
+import { ImageGptRepairDialog, type ImageGptReport } from "./ImageGptRepairDialog";
+import { RetainedPartitionSearch, type ImageRegistrationOptions, type RetainedSearch } from "./RetainedPartitionSearch";
 import type { RetainedSignatureRequest } from "./RetainedSignatureScan";
 import { PartitionBrowserPanel } from "./PartitionBrowserPanel";
 import { LvmBrowserDialog, type LvmView } from "./LvmBrowserDialog";
@@ -142,6 +149,7 @@ export function DataTools({
   onRefresh,
   fixedPartition,
   onBack,
+  onWinPeTask,
 }: {
   page: Page;
   disk: Disk | undefined;
@@ -150,6 +158,7 @@ export function DataTools({
   onRefresh: () => Promise<void>;
   fixedPartition?: number;
   onBack?: () => void;
+  onWinPeTask?: (task: WinPeTaskForm) => void;
 }) {
   const { language, t, catalogText } = useLocale();
   const [partition, setPartition] = useState(String(fixedPartition ?? ""));
@@ -167,8 +176,12 @@ export function DataTools({
   const [copyMode, setCopyMode] = useState<"allSectors" | "usedSpace">(
     "allSectors",
   );
-  const [partitionClone, setPartitionClone] = useState<"standard" | "resize" | "files" | "diskFiles">("standard");
+  const [partitionClone, setPartitionClone] = useState<"standard" | "resize" | "files" | "diskFiles" | "migrate">("standard");
+  const [winpeMode, setWinpeMode] = useState<"uefi" | "uefiAndBios" | "usb" | "adk" | null>(null);
+  const [winpePartition, setWinpePartition] = useState("");
+  const [winpeApp, setWinpeApp] = useState(true);
   const [diskCloneSizes, setDiskCloneSizes] = useState<Record<number, string>>({});
+  const [migrationTargets, setMigrationTargets] = useState<MigrationTarget[]>([]);
   const [sourceExpanded, setSourceExpanded] = useState(true);
   const [destination, setDestination] = useState("");
   const [destinationPartition, setDestinationPartition] = useState("");
@@ -183,6 +196,7 @@ export function DataTools({
   const [browsingBackup, setBrowsingBackup] = useState(false);
   const [browsingImage, setBrowsingImage] = useState(false);
   const [imageInfo, setImageInfo] = useState<ImageBrowseInfo | null>(null);
+  const [imageGpt, setImageGpt] = useState<{ id: string; report: ImageGptReport } | null>(null);
   const [imageBackupId, setImageBackupId] = useState("");
   const [deviceImageExport, setDeviceImageExport] = useState<{
     source: Selection;
@@ -215,6 +229,11 @@ export function DataTools({
   const [bootInspection, setBootInspection] = useState<{ request: BootInspectionSource; label: string } | null>(null);
   const [error, setError] = useState("");
   const [plan, setPlan] = useState<DataPlan | null>(null);
+  const [virtualMachine, setVirtualMachine] = useState<{
+    source: { kind: "image"; id: string } | { kind: "disk"; selection: Selection };
+    title: string;
+    sector: number;
+  } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const raster = preview?.raster;
@@ -258,6 +277,9 @@ export function DataTools({
         busy={!!busy}
         expanded={expanded}
         canSearchUnallocated={canSearchUnallocated}
+        table={kind === "image" ? imageInfo?.partitionTable : undefined}
+        onRegister={kind === "image" ? (searchId, candidates, options) =>
+          void prepareImageTable({ type: "registerImagePartitions", searchId, candidates, options }) : undefined}
         onSearch={(options) => void action(async () => {
           setOwnJobId(await invoke<string>("data_search_retained_partitions", { request: { source, options } }));
           setJob(await invoke<Job>("data_status"));
@@ -293,6 +315,19 @@ export function DataTools({
   const destinations = disks.filter(
     (d) => d.kind === "physical" && d.id !== disk?.id && !d.hardware?.isSystem,
   );
+  const winpeToPartition = winpeMode === "usb" || winpeMode === "adk";
+  const winpeTargets = winpeToPartition ? disks.flatMap((device) =>
+    device.kind === "physical" && device.hardware &&
+    (winpeMode === "usb" ? device.hardware.bus === "USB" : device.scheme === "GPT") &&
+    !!device.hardware.identity && !!device.hardware.layoutKey && device.hardware.layoutAvailable &&
+    !device.hardware.isSystem && device.hardware.offline === false && device.hardware.deviceReadOnly === false
+      ? device.partitions
+        .filter((part) => part.number !== undefined && !part.hidden && !part.system && part.fs.toUpperCase() === "FAT32" &&
+          (winpeMode !== "adk" || part.role === "数据分区"))
+        .map((part) => ({ device, part, key: `${device.id}/${part.number}` }))
+      : [],
+  ) : [];
+  const winpeTarget = winpeTargets.find(({ key }) => key === winpePartition);
   const selectedPart = parts.find((p) => String(p.number) === partition);
   const canExportDeviceImage = physical && !!disk?.hardware?.identity && !!disk.hardware.layoutKey &&
     disk.hardware.layoutAvailable && (partition ? !!selectedPart && !selectedPart.system : !disk.hardware.isSystem);
@@ -367,15 +402,23 @@ export function DataTools({
     disk.hardware?.offline === false && !disk.hardware.isSystem &&
     parts.some(diskClonePart) &&
     parts.every((part) => diskClonePart(part) || part.role === "MSR 保留");
+  const canMigrate = task === "clone" && !partition && canExportDeviceImage &&
+    disk.hardware?.offline === true && (disk.scheme === "GPT" || (disk.scheme === "MBR" && disk.sectorSize === 512));
   const resizingClone = canResizeClone && partitionClone === "resize";
   const cloningFiles = canFileClone && partitionClone === "files";
   const cloningDiskFiles = canDiskFileClone && partitionClone === "diskFiles";
-  const specialClone = resizingClone || cloningFiles || cloningDiskFiles;
-  const cloneDisks = cloningDiskFiles
+  const migrating = canMigrate && partitionClone === "migrate";
+  const specialClone = resizingClone || cloningFiles || cloningDiskFiles || migrating;
+  const canQueueWinPe = physical && !!disk.hardware?.identity && !!disk.hardware.layoutKey &&
+    disk.hardware.layoutAvailable && typeof disk.hardware.offline === "boolean";
+  const canQueueMigration = canQueueWinPe && !partition && task === "clone" &&
+    (disk.scheme === "GPT" || (disk.scheme === "MBR" && disk.sectorSize === 512));
+  const cloneDisks = cloningDiskFiles || migrating
     ? destinations.filter((d) =>
         (d.scheme === "RAW" || d.scheme === "GPT") &&
         d.sectorSize === disk.sectorSize && d.hardware?.layoutAvailable &&
         d.hardware.deviceReadOnly === false &&
+        (!migrating || disk.scheme === "GPT" || d.size >= disk.size) &&
         d.partitions.every((part) => part.number === undefined))
     : destinations;
   const cloneDiskSelected = cloneDisks.some((d) => d.id === destination);
@@ -386,6 +429,12 @@ export function DataTools({
   });
   const invalidDiskSizes = partitionSizes.some(({ bytes }) =>
     !Number.isSafeInteger(bytes) || bytes <= 0 || bytes % (1024 ** 2) !== 0);
+  const migrationDestinations = migrationTargets.map((target) => ({
+    disk: cloneDisks.find((choice) => choice.id === target.id),
+    options: migrationOptions(disk, target),
+  }));
+  const invalidMigration = !migrationDestinations.length || migrationDestinations.some(({ disk, options }) =>
+    !disk?.hardware?.identity || !disk.hardware.layoutKey || invalidMigrationSizes(options.partitionSizes));
   const cloneTargets = destinationDisk?.partitions.filter(
     (part) =>
       part.number !== undefined &&
@@ -441,6 +490,7 @@ export function DataTools({
     setDestination("");
     setDestinationPartition("");
     setDiskCloneSizes({});
+    setMigrationTargets([]);
     setError("");
   }, [disk?.id, fixedPartition]);
   useEffect(() => {
@@ -669,6 +719,15 @@ export function DataTools({
         };
       else if (task === "restore")
         request = { type: "restore", destination: selection(disk, partition) };
+      else if (migrating)
+        request = {
+          type: "migrateSystemBatch",
+          source: selection(disk, ""),
+          destinations: migrationDestinations.map(({ disk: target, options }) => ({
+            selection: selection(target, ""),
+            ...options,
+          })),
+        };
       else if (cloningDiskFiles)
         request = {
           type: "diskFileClone",
@@ -691,6 +750,24 @@ export function DataTools({
         };
       setConfirmed(false);
       setPlan(await invoke<DataPlan | null>("data_prepare", { request }));
+    });
+  }
+  async function prepareImageTable(change:
+    | { type: "convertImageTable"; table: "mbr" | "gpt" }
+    | { type: "convertImagePartition"; partition: number }
+    | { type: "backupImageTable" | "restoreImageTable" }
+    | { type: "repairImageGpt"; side: GptSide; digest: string }
+    | { type: "registerImagePartitions"; searchId: string; candidates: string[]; options: ImageRegistrationOptions }
+  ) {
+    if (!imageInfo) return;
+    await action(async () => {
+      const next = await invoke<DataPlan | null>("data_prepare", {
+        request: { ...change, id: imageInfo.id },
+      });
+      if (next) {
+        setConfirmed(false);
+        setPlan(next);
+      }
     });
   }
   async function execute() {
@@ -893,6 +970,40 @@ export function DataTools({
           >
             <FolderOpen size={16} />
             {t("浏览镜像")}
+          </button>
+          <button
+            className="button"
+            disabled={busy || !native}
+            onClick={() => {
+              setError("");
+              setWinpeApp(true);
+              setWinpeMode("uefi");
+            }}
+          >
+            {t("创建 WinPE 启动 ISO")}
+          </button>
+          <button
+            className="button"
+            disabled={busy || !native}
+            onClick={() => {
+              setError("");
+              setWinpePartition("");
+              setWinpeApp(true);
+              setWinpeMode("usb");
+            }}
+          >
+            {t("制作 WinPE 启动 U 盘")}
+          </button>
+          <button
+            className="button"
+            disabled={busy || !native}
+            onClick={() => {
+              setError("");
+              setWinpePartition("");
+              setWinpeMode("adk");
+            }}
+          >
+            {t("准备 WinPE 启动分区")}
           </button>
         </div>
       )}
@@ -1160,6 +1271,25 @@ export function DataTools({
         ) : browsingImage ? (
           <ImageBrowserPanel
             info={imageInfo}
+            onConvertTable={(table) => void prepareImageTable({ type: "convertImageTable", table })}
+            onConvertPlacement={(partition) => void prepareImageTable({ type: "convertImagePartition", partition })}
+            onBackupTable={() => void prepareImageTable({ type: "backupImageTable" })}
+            onRestoreTable={() => void prepareImageTable({ type: "restoreImageTable" })}
+            onInspectGpt={() => void action(async () => {
+              if (!imageInfo) return;
+              const id = imageInfo.id;
+              const report = await invoke<ImageGptReport>("data_image_gpt_inspect", { id });
+              setImageGpt({ id, report });
+            })}
+            onVirtualize={() => {
+              if (!imageInfo) return;
+              setError("");
+              setVirtualMachine({
+                source: { kind: "image", id: imageInfo.id },
+                title: imageInfo.name,
+                sector: imageInfo.options.sector,
+              });
+            }}
             onBootInspection={() => {
               if (imageInfo) setBootInspection({ request: { kind: "image", id: imageInfo.id }, label: imageInfo.name });
             }}
@@ -1405,6 +1535,25 @@ export function DataTools({
                       </span>
                     </label>
                   )}
+                  {canMigrate && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="copy-mode"
+                        value="migrate"
+                        checked={migrating}
+                        onChange={() => {
+                          setPartitionClone("migrate");
+                          setDestination("");
+                          setDestinationPartition("");
+                        }}
+                      />
+                      <span>
+                        <strong>{t("离线迁移 Windows")}</strong>
+                        <small>{t("先核对 Windows 启动链，再复制到另一块磁盘")}</small>
+                      </span>
+                    </label>
+                  )}
                 </fieldset>
               )}
               {task === "clone" && linuxSource && !specialClone && (
@@ -1474,7 +1623,13 @@ export function DataTools({
                       <small>{formatSize(sourceSize)}</small>
                     </div>
                     <ArrowRight size={22} />
-                    <div>
+                    {migrating ? <MigrationTargets source={disk}
+                      choices={cloneDisks.map((choice) => ({
+                        id: choice.id,
+                        label: `${diskTitle(choice, t)} · ${formatSize(choice.size)}`,
+                      }))}
+                      targets={migrationTargets} onChange={setMigrationTargets} disabled={!!busy} />
+                    : <div>
                       <label htmlFor="clone-disk">{t("目标磁盘")}</label>
                       <select
                         id="clone-disk"
@@ -1518,7 +1673,7 @@ export function DataTools({
                             ))}
                         </select>
                       )}
-                    </div>
+                    </div>}
                   </div>
                   {cloningDiskFiles && (
                     <fieldset className="disk-clone-sizes" disabled={!!busy}>
@@ -1547,7 +1702,9 @@ export function DataTools({
                     </fieldset>
                   )}
                   <Hint>
-                    {cloningDiskFiles
+                    {migrating
+                      ? t("请选择无分区且逻辑扇区大小相同的 RAW 或 GPT 目标。迁移后的 GPT 分区必须能放入目标，MBR 目标容量须不小于源盘。")
+                      : cloningDiskFiles
                       ? t("容量留空则沿用源分区大小。选择逻辑扇区大小相同的空 RAW 或 GPT 盘，写入后目标保持脱机。")
                       : specialClone
                       ? t("源与目标必须使用相同的逻辑扇区大小。目标保持脱机，两盘的 GPT 分区表保持原样。")
@@ -1596,6 +1753,35 @@ export function DataTools({
                       ? t("还原要求备份类型、容量及逻辑扇区与目标一致。")
                       : t("目标原有文件系统及数据将被替换，无法撤销。")}
                 </span>
+                {(task === "backup" || task === "restore") && onWinPeTask && disk?.kind === "physical" && disk.hardware?.offline === false && (
+                  <button className="button" disabled={busy || !native || !disk.hardware.identity || !disk.hardware.layoutKey ||
+                    (task === "restore" && disk.hardware.deviceReadOnly !== false)}
+                    onClick={() => onWinPeTask({ kind: task, selection: `${disk.id}/${partition || "disk"}` })}>
+                    {t(task === "restore" ? "在 WinPE 从备份还原" : "在 WinPE 执行完整扇区备份")}
+                  </button>
+                )}
+                {task === "clone" && onWinPeTask && canQueueWinPe && !specialClone && !linuxSource && (
+                  <button className="button" disabled={busy || !native}
+                    onClick={() => onWinPeTask({
+                      kind: "clone",
+                      selection: `${disk.id}/${partition || "disk"}`,
+                      destination: destination && (!partition || destinationPartition)
+                        ? `${destination}/${partition ? destinationPartition : "disk"}` : undefined,
+                      mode: copyMode,
+                    })}>
+                    {t("在 WinPE 克隆")}
+                  </button>
+                )}
+                {onWinPeTask && canQueueMigration && (
+                  <button className="button" disabled={busy || !native}
+                    onClick={() => onWinPeTask({
+                      kind: "migrate",
+                      selection: `${disk.id}/disk`,
+                      destinations: migrating ? migrationTargets : [],
+                    })}>
+                    {t("在 WinPE 迁移 Windows")}
+                  </button>
+                )}
                 {task === "backup" && (
                   <button
                     className="button"
@@ -1614,6 +1800,18 @@ export function DataTools({
                     {t("导出磁盘镜像")}
                   </button>
                 )}
+                {task === "backup" && !partition && disk?.hardware?.offline === true && canExportDeviceImage && (
+                  <button className="button" disabled={busy || !native} onClick={() => {
+                    setError("");
+                    setVirtualMachine({
+                      source: { kind: "disk", selection: selection(disk, "") },
+                      title: diskTitle(disk, t),
+                      sector: disk.sectorSize,
+                    });
+                  }}>
+                    {t("导出 Windows 虚拟机")}
+                  </button>
+                )}
                 <button
                   className="button primary"
                   disabled={
@@ -1621,7 +1819,7 @@ export function DataTools({
                     !physical ||
                     !native ||
                     (task === "clone" &&
-                      (!cloneDiskSelected || (cloningDiskFiles && invalidDiskSizes) || (!!partition && !cloneTargets.some(
+                      (migrating ? invalidMigration : !cloneDiskSelected || (cloningDiskFiles && invalidDiskSizes) || (!!partition && !cloneTargets.some(
                         (part) => String(part.number) === destinationPartition,
                       ))))
                   }
@@ -1632,7 +1830,9 @@ export function DataTools({
                     ? t("选择保存位置…")
                     : task === "restore"
                       ? t("选择备份文件…")
-                      : t("预览克隆")}
+                      : migrating
+                        ? t("预览系统迁移")
+                        : t("预览克隆")}
                 </button>
               </div>
             </section>
@@ -1828,7 +2028,9 @@ export function DataTools({
                   ? t("找到 {count} 个文件", {
                       count: job.found.toLocaleString(language),
                     })
-                  : `${formatSize(job.done)} / ${formatSize(job.total)}`}
+                  : job.phase === "准备 WinPE 启动环境"
+                    ? `${job.done} / ${job.total}`
+                    : `${formatSize(job.done)} / ${formatSize(job.total)}`}
               </span>
             </div>
             {job.message && (
@@ -2270,6 +2472,103 @@ export function DataTools({
           })}
         />
       )}
+      {imageGpt && imageInfo?.id === imageGpt.id && (
+        <ImageGptRepairDialog
+          name={imageInfo.name}
+          report={imageGpt.report}
+          onClose={() => setImageGpt(null)}
+          onChoose={(side) => {
+            const digest = imageGpt.report.digest;
+            setImageGpt(null);
+            void prepareImageTable({ type: "repairImageGpt", side, digest });
+          }}
+        />
+      )}
+      {virtualMachine && (
+        <SystemVirtualizationDialog
+          source={virtualMachine.title}
+          sector={virtualMachine.sector}
+          busy={!!busy}
+          error={error}
+          onClose={() => setVirtualMachine(null)}
+          onPrepare={(options: VirtualMachineOptions) => void action(async () => {
+            const next = await invoke<DataPlan | null>("data_prepare", {
+              request: { type: "virtualizeSystem", source: virtualMachine.source, options },
+            });
+            if (next) {
+              setVirtualMachine(null);
+              setConfirmed(false);
+              setPlan(next);
+            }
+          })}
+        />
+      )}
+      {winpeMode && (
+        <Dialog
+          title={winpeMode === "adk" ? t("准备 WinPE 启动分区") : winpeMode === "usb" ? t("制作 WinPE 启动 U 盘") : t("创建 WinPE 启动 ISO")}
+          onClose={() => { if (!busy) setWinpeMode(null); }}
+          footer={
+            <>
+              <button className="button" disabled={busy} onClick={() => setWinpeMode(null)}>{t("取消")}</button>
+              <button className="button primary" disabled={busy || (winpeToPartition && !winpeTarget)} onClick={() => void action(async () => {
+                const request = winpeToPartition
+                  ? {
+                      type: winpeMode === "adk" ? "installWinpeFromAdk" : "createWinpeUsb",
+                      destination: selection(winpeTarget?.device, String(winpeTarget?.part.number)),
+                      ...(winpeMode === "usb" ? { includeApp: winpeApp } : {}),
+                    }
+                  : { type: "createWinpeIso", mode: winpeMode, includeApp: winpeApp };
+                const next = await invoke<DataPlan | null>("data_prepare", { request });
+                if (next) {
+                  setWinpeMode(null);
+                  setConfirmed(false);
+                  setPlan(next);
+                }
+              })}>{winpeMode === "adk" ? t("选择 ADK 和工作目录…") : t("选择 WinPE 工作文件夹…")}</button>
+            </>
+          }
+        >
+          <div className="backup-settings">
+            {winpeToPartition ? <label>
+              <strong>{winpeMode === "adk" ? t("目标 GPT FAT32 分区") : t("目标 USB 分区")}</strong>
+              <select disabled={busy || !winpeTargets.length} value={winpeTarget?.key ?? ""} onChange={(event) => setWinpePartition(event.target.value)}>
+                <option value="">
+                  {winpeMode === "adk"
+                    ? (winpeTargets.length ? t("选择 GPT FAT32 分区") : t("没有可用的 GPT FAT32 分区"))
+                    : (winpeTargets.length ? t("选择 FAT32 USB 分区") : t("没有可用的 FAT32 USB 分区"))}
+                </option>
+                {winpeTargets.map(({ device, part, key }) => (
+                  <option key={key} value={key}>
+                    {diskTitle(device, t)} · {partitionTitle(part, catalogText)} · {formatSize(part.size)}
+                  </option>
+                ))}
+              </select>
+            </label> : <label>
+              <strong>{t("启动固件")}</strong>
+              <select
+                disabled={busy}
+                value={winpeMode}
+                onChange={(event) => setWinpeMode(event.target.value as "uefi" | "uefiAndBios")}
+              >
+                <option value="uefi">UEFI</option>
+                <option value="uefiAndBios">UEFI + BIOS</option>
+              </select>
+            </label>}
+          </div>
+          {winpeMode !== "adk" && <label className="data-confirm">
+            <input type="checkbox" checked={winpeApp} disabled={busy} onChange={(event) => setWinpeApp(event.target.checked)} />
+            {t("在启动介质中包含 DiskStudio")}
+          </label>}
+          <p className="data-footnote">
+            {winpeMode === "adk"
+              ? t("选取 Windows ADK 的 WinPE amd64 目录，并在另一块物理磁盘上准备至少有 4 GiB 可用空间的 NTFS 工作目录。启动后将自动打开 DiskStudio。")
+              : winpeMode === "usb"
+                ? t("使用 amd64 CopyPE 或现有 WinPE 文件为 U 盘添加 UEFI 启动。盘上同名文件必须与来源一致。")
+                : t("选择 amd64 CopyPE 工作文件夹或已有的 WinPE 介质文件夹，再将 ISO 保存到另一块物理磁盘。")}
+          </p>
+          {error && <FormError message={catalogText(error)} />}
+        </Dialog>
+      )}
       {plan && (
         <Dialog
           title={catalogText(plan.title)}
@@ -2284,7 +2583,149 @@ export function DataTools({
             <dd>{readablePaths(plan.destination)}</dd>
             <dt>{t("处理容量")}</dt>
             <dd>{formatSize(plan.bytes)}</dd>
+            {plan.virtualMachine && (
+              <>
+                <dt>{t("虚拟化软件")}</dt>
+                <dd>{plan.virtualMachine.platform === "vmware" ? "VMware" : "VirtualBox"} · {plan.virtualMachine.name}</dd>
+                <dt>{t("处理器数量")}</dt>
+                <dd>{plan.virtualMachine.cpus}</dd>
+                <dt>{t("内存（MiB）")}</dt>
+                <dd>{plan.virtualMachine.memoryMib}</dd>
+                <dt>{t("启动固件")}</dt>
+                <dd>{plan.virtualMachine.firmware.toUpperCase()}</dd>
+                <dt>{t("存储控制器")}</dt>
+                <dd>{plan.virtualMachine.controller === "nvme" ? "NVMe" : "SATA"} · <code>{plan.virtualMachine.driver}.sys</code></dd>
+                <dt>{t("系统虚拟磁盘")}</dt>
+                <dd>{plan.virtualMachine.disk}</dd>
+              </>
+            )}
+            {plan.systemMigration && <MigrationLayoutPreview layout={plan.systemMigration} />}
+            {plan.systemMigrationTargets?.map(({ destination, layout }) => (
+              <div key={destination} className="migration-target-preview">
+                <dt>{t("目标磁盘")}</dt>
+                <dd>{destination}</dd>
+                <MigrationLayoutPreview layout={layout} />
+              </div>
+            ))}
+            {plan.maintenanceMedia && (
+              <>
+                <dt>{t("启动固件")}</dt>
+                <dd>{plan.maintenanceMedia.bios ? "UEFI + BIOS" : "UEFI"}</dd>
+                <dt>{plan.maintenanceMedia.adk ? t("ADK 来源映像") : t("WinPE 启动索引")}</dt>
+                <dd>{plan.maintenanceMedia.wimImage} · {formatSize(plan.maintenanceMedia.wimBytes)}</dd>
+                <dt>{t("文件数")}</dt>
+                <dd>{plan.maintenanceMedia.fileCount.toLocaleString()}</dd>
+                {plan.maintenanceMedia.appSha256 && (
+                  <>
+                    <dt>DiskStudio.exe</dt>
+                    <dd><code>{plan.maintenanceMedia.appSha256}</code></dd>
+                    <dt>{t("在 WinPE 中打开")}</dt>
+                    <dd>{plan.maintenanceMedia.adk ? t("启动 WinPE 后自动打开 DiskStudio。") : t("从启动介质的根目录打开 DiskStudio.exe。")}</dd>
+                  </>
+                )}
+              </>
+            )}
+            {plan.maintenanceMedia?.usb && (
+              <>
+                <dt>{t("启动文件变更")}</dt>
+                <dd>{t("新增 {added} 个，复用 {reused} 个", {
+                  added: plan.maintenanceMedia.usb.newFiles.toLocaleString(),
+                  reused: plan.maintenanceMedia.usb.reusedFiles.toLocaleString(),
+                })}{!plan.maintenanceMedia.adk && ` · ${formatSize(plan.maintenanceMedia.usb.newBytes)}`}</dd>
+              </>
+            )}
+            {plan.tableConversion && (
+              <>
+                <dt>{t("分区表")}</dt>
+                <dd>{plan.tableConversion.placement || plan.tableConversion.restoredFrom || plan.tableConversion.gptRepair || plan.tableConversion.registration
+                  ? plan.tableConversion.to.toUpperCase()
+                  : `${plan.tableConversion.from.toUpperCase()} → ${plan.tableConversion.to.toUpperCase()}`}</dd>
+                {plan.tableConversion.restoredFrom && (
+                  <>
+                    <dt>{t("备份文件")}</dt>
+                    <dd>{plan.tableConversion.restoredFrom}</dd>
+                  </>
+                )}
+                {plan.tableConversion.gptRepair && (
+                  <>
+                    <dt>{t("修复依据")}</dt>
+                    <dd>{t(plan.tableConversion.gptRepair.authority === "primary" ? "主 GPT" : "备份 GPT")}</dd>
+                    <dt>{t("修复范围")}</dt>
+                    <dd>
+                      {[
+                        plan.tableConversion.gptRepair.repairPeer
+                          ? t(plan.tableConversion.gptRepair.authority === "primary" ? "备份 GPT" : "主 GPT")
+                          : "",
+                        plan.tableConversion.gptRepair.repairProtectiveMbr ? t("保护性 MBR") : "",
+                      ].filter(Boolean).join(" · ")}
+                    </dd>
+                  </>
+                )}
+                {plan.tableConversion.registration && (
+                  <>
+                    <dt>{t("登记候选")}</dt>
+                    <dd>{plan.tableConversion.partitions.length.toLocaleString()}{plan.tableConversion.registration.rebuiltTable && ` · ${t("重建分区表")}`}</dd>
+                  </>
+                )}
+                {plan.tableConversion.placement && (
+                  <>
+                    <dt>{t("转换分区形式")}</dt>
+                    <dd>
+                      {plan.tableConversion.placement.from === "primary" ? t("主分区") : t("逻辑分区")}
+                      {" → "}
+                      {plan.tableConversion.placement.to === "primary" ? t("主分区") : t("逻辑分区")}
+                      {" · "}
+                      {t("起点 {offset} B", { offset: plan.tableConversion.placement.offset.toLocaleString() })}
+                    </dd>
+                  </>
+                )}
+                <dt>{plan.tableConversion.restoredFrom || plan.tableConversion.gptRepair || plan.tableConversion.registration ? t("磁盘标识") : t("新磁盘标识")}</dt>
+                <dd><code>{plan.tableConversion.diskId}</code></dd>
+                <dt>{t("改写的表扇区")}</dt>
+                <dd>{formatSize(plan.tableConversion.tableBytes)}</dd>
+              </>
+            )}
           </dl>
+          {plan.maintenanceMedia?.usb && (
+            <details className="winpe-file-plan">
+              <summary>{t("查看启动文件")}</summary>
+              <ul>
+                {plan.maintenanceMedia.usb.files.map((file) => (
+                  <li key={file.path}>
+                    <span>{file.reused ? t("复用现有文件") : t("新增文件")}</span>
+                    <code>{file.path}</code>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {plan.tableConversion && plan.tableConversion.partitions.length > 0 && (
+            <div className="table-wrap image-table-conversion-preview">
+              <table className="partition-table">
+                <thead><tr>
+                  <th>{t("起点（字节）")}</th>
+                  <th>{t("容量")}</th>
+                  {!plan.tableConversion.restoredFrom && !plan.tableConversion.gptRepair && <th>{t(plan.tableConversion.registration ? "候选文件系统" : "源分区类型")}</th>}
+                  <th>{plan.tableConversion.restoredFrom || plan.tableConversion.gptRepair ? t("分区名称") : t("目标分区类型")}</th>
+                </tr></thead>
+                <tbody>
+                  {plan.tableConversion.partitions.map((partition) => (
+                    <tr key={partition.offset}>
+                      <td>{partition.offset.toLocaleString()}</td>
+                      <td>{formatSize(partition.size)}</td>
+                      {!plan.tableConversion?.restoredFrom && !plan.tableConversion?.gptRepair && <td><code>{partition.oldType}</code></td>}
+                      <td>
+                        <code>{partition.newType || "—"}</code>
+                        {plan.tableConversion?.to === "mbr" && !plan.tableConversion.restoredFrom && (
+                          <> · {partition.logical ? t("逻辑分区") : t("主分区")}</>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <div
             className={`data-plan-warning ${plan.destructive ? "destructive" : ""}`}
           >

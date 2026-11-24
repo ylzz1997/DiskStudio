@@ -182,12 +182,13 @@ pub(super) fn scan_signatures(
     found: impl FnMut(crate::recovery::Candidate),
 ) -> Result<String, String> {
     let range = options.range(size)?;
+    let bytes = range.end - range.start;
     let phase = if options.free_only {
         "核对空闲簇"
     } else {
         "签名扫描"
     };
-    super::progress(job, cancel, phase, cursor.consumed, range.end - range.start)?;
+    super::progress(job, cancel, phase, cursor.work_done(options), options.work(bytes))?;
     let allocation = options
         .free_only
         .then(|| crate::used_space::inspect(reader, size, sector, None, cancel))
@@ -199,7 +200,7 @@ pub(super) fn scan_signatures(
         cursor,
         sector,
         allocation.as_ref(),
-        |done, total| super::progress(job, cancel, "签名扫描", done, total),
+        |done, total| super::progress(job, cancel, options.phase(done, bytes), done, total),
         found,
     )?;
     if let Some(plan) = allocation {

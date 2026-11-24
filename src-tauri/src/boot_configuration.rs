@@ -1,9 +1,13 @@
 //! Interpret a retained Windows BCD store without opening the live registry.
 use regf::{hive::RegistryKey, DataType, RegistryHive};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
+#[path = "boot_configuration_rebuild.rs"]
+pub(crate) mod rebuild;
+#[path = "boot_configuration_recovery.rs"]
+pub(crate) mod recovery;
 #[path = "boot_configuration_repair.rs"]
 pub(crate) mod repair;
 
@@ -46,6 +50,63 @@ pub(crate) struct Store {
     timeout_seconds: Option<String>,
     unresolved_objects: Vec<Uuid>,
     pub entries: Vec<Entry>,
+}
+impl Store {
+    pub(crate) fn next_loader(&self) -> Option<&Entry> {
+        self.manager.as_ref()?;
+        let id = self.boot_sequence.first().copied().or(self.default)?;
+        self.entries.iter().find(|entry| entry.id == id && entry.object_type & APPLICATION_TYPE == OS_LOADER)
+    }
+}
+
+pub(crate) fn verify_winpe(bytes: Vec<u8>, bios: bool) -> Result<(), String> {
+    let hive = clean_hive(bytes)?;
+    let store = parse_hive(&hive)?;
+    let entry = store.next_loader().ok_or("WinPE BCD 没有可核对的默认启动项。")?;
+    let loader = if bios { "winload.exe" } else { "winload.efi" };
+    if !entry.path.as_deref().is_some_and(|path| {
+        path.eq_ignore_ascii_case(&format!(r"\windows\system32\boot\{loader}"))
+            || path.eq_ignore_ascii_case(&format!(r"\windows\system32\{loader}"))
+    }) || !entry.system_root.as_deref().is_some_and(|root| root.eq_ignore_ascii_case(r"\windows")) {
+        return Err("WinPE BCD 的加载器或系统目录与选定的启动方式不符。".into());
+    }
+    let elements = hive.open_key(&format!(r"Objects\{{{}}}\Elements", entry.id)).map_err(|err|err.to_string())?;
+    let image_path: Vec<_> = r"\sources\boot.wim".encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+    let options = |setting| -> Result<Uuid, String> {
+        let value = element(Some(&elements), setting, DataType::Binary, 64*1024)?
+            .ok_or("WinPE BCD 缺少 RAM 磁盘设备。")?;
+        // The optical BCD stores a RAM disk device followed by its nested
+        // boot-volume descriptor and the terminated, media-relative WIM path.
+        let nested_boot = value.len().checked_sub(image_path.len() + 72)
+            .and_then(|at| value.get(at..at + 72));
+        let is_boot_volume = nested_boot.is_some_and(|descriptor| {
+            let mut bcd_device = vec![0; 16];
+            bcd_device.extend_from_slice(descriptor);
+            decode_device(&bcd_device) == Device::Boot
+        });
+        if !matches!(decode_device(&value), Device::Unresolved {device_type:0})
+            || value.get(32..36) != Some(&[3,0,0,0])
+            || !value.get(value.len().saturating_sub(image_path.len())..)
+                .is_some_and(|part| part.eq_ignore_ascii_case(&image_path))
+            || !is_boot_volume
+        {
+            return Err("WinPE BCD 未引用介质中的 sources\\boot.wim。".into());
+        }
+        let id = Uuid::from_bytes_le(value[..16].try_into().unwrap());
+        if id.is_nil() { return Err("WinPE BCD 缺少 RAM 磁盘选项标识。".into()); }
+        Ok(id)
+    };
+    let ramdisk = options("11000001")?;
+    if options("21000001")? != ramdisk {
+        return Err("WinPE BCD 的加载器与系统设备引用不同。".into());
+    }
+    let sdi = hive.open_key(&format!(r"Objects\{{{ramdisk}}}\Elements")).map_err(|err|err.to_string())?;
+    if !text(Some(&sdi),"32000004")?.is_some_and(|path| path.eq_ignore_ascii_case(r"\boot\boot.sdi"))
+        || device(Some(&sdi),"31000003")? != Some(Device::Boot)
+    {
+        return Err("WinPE BCD 未通过本地 boot\\boot.sdi 引用检查。".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -492,7 +553,7 @@ impl Effective<'_, '_> {
     }
 }
 
-pub(crate) fn parse(bytes: Vec<u8>) -> Result<Store, String> {
+fn clean_hive(bytes: Vec<u8>) -> Result<RegistryHive, String> {
     if !(4096..=MAX_STORE).contains(&bytes.len()) {
         return Err("BCD store length outside the inspection limit".into());
     }
@@ -502,6 +563,122 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Result<Store, String> {
         return Err("BCD signature or transaction state is invalid".into());
     }
     let hive = RegistryHive::from_bytes(bytes).map_err(|err| err.to_string())?;
+    if !hive.base_block().checksum_valid {
+        return Err("The BCD base block checksum is invalid".into());
+    }
+    Ok(hive)
+}
+
+pub(crate) fn parse(bytes: Vec<u8>) -> Result<Store, String> {
+    parse_hive(&clean_hive(bytes)?)
+}
+
+/// Follow Windows Boot Manager's object references, including the menu,
+/// one-time entries, inheritance, recovery, resume and RAM-disk options.
+/// Firmware entries imported into the store by the current WinPE boot are
+/// separate from the Windows boot chain unless that chain references them.
+pub(crate) fn gpt_dependencies(bytes: Vec<u8>, disk: Uuid) -> Result<BTreeSet<Uuid>, String> {
+    let hive = clean_hive(bytes)?;
+    let objects = hive.open_key("Objects").map_err(|err| err.to_string())?;
+    if objects.subkey_count() > MAX_OBJECTS {
+        return Err("BCD object count exceeds the inspection limit".into());
+    }
+    let mut nodes = BTreeMap::new();
+    for object in objects.subkeys().map_err(|err| err.to_string())? {
+        let id = Uuid::parse_str(&object.name()).map_err(|err| err.to_string())?;
+        if nodes.insert(id, object).is_some() {
+            return Err("BCD 存在重复的启动配置对象。".into());
+        }
+    }
+    if !nodes.contains_key(&BOOT_MANAGER) {
+        return Err("Windows BCD 中没有可核对的下一次启动项。".into());
+    }
+    let mut pending = vec![BOOT_MANAGER];
+    let mut visited = BTreeSet::from([BOOT_MANAGER]);
+    let mut dependencies = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        // Optional menu and inheritance links can outlive their entries.
+        // A missing object contributes no device to this retained store.
+        let Some(object) = nodes.get(&id) else {
+            continue;
+        };
+        let Some(elements) = key(object, "Elements")? else {
+            continue;
+        };
+        let mut links = Vec::new();
+        for field in elements.subkeys().map_err(|err| err.to_string())? {
+            let name = field.name();
+            let code = u32::from_str_radix(&name, 16).ok().filter(|_| name.len() == 8)
+                .ok_or("BCD 存在无法识别的元素编号。")?;
+            // BcdElementType encodes the data format in bits 24–27.
+            match (code >> 24) & 0xf {
+                1 => {
+                    let bytes = element(Some(&elements), &name, DataType::Binary, 64 * 1024)?
+                        .ok_or("BCD 缺少设备元素。")?;
+                    let device = match decode_device(&bytes) {
+                        Device::Unresolved { device_type: 0 } => {
+                            let (parent, options) = ramdisk_parent(&bytes)
+                                .ok_or("BCD 存在无法绑定到分区的设备，请迁移全部分区。")?;
+                            links.push(options);
+                            parent
+                        }
+                        device => device,
+                    };
+                    match device {
+                        Device::Gpt { disk: owner, partition } if owner == disk => {
+                            dependencies.insert(partition);
+                        }
+                        Device::Boot | Device::Gpt { .. } | Device::Mbr { .. } => {}
+                        Device::Unresolved { .. } | Device::Invalid => {
+                            return Err("BCD 存在无法绑定到分区的设备，请迁移全部分区。".into());
+                        }
+                    }
+                }
+                3 => links.extend(object_id(Some(&elements), &name)?),
+                4 => {
+                    if let Some(ids) = object_list(Some(&elements), &name)? {
+                        links.extend(ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+        pending.extend(links.into_iter().filter(|id| visited.insert(*id)));
+    }
+    Ok(dependencies)
+}
+
+// Accept the checked Windows RAM-disk file descriptor with a single direct
+// boot-volume or qualified partition parent and a terminated UTF-16 path.
+fn ramdisk_parent(raw: &[u8]) -> Option<(Device, Uuid)> {
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(raw.get(at..at + 4)?.try_into().ok()?))
+    };
+    let options = Uuid::from_bytes_le(raw.get(..16)?.try_into().ok()?);
+    if options.is_nil()
+        || word(16)? != 0
+        || !matches!(word(20)?, 0 | 1)
+        || word(24)? as usize != raw.len().checked_sub(16)?
+        || word(28)? != 0
+        || word(32)? != 3
+        || word(56)? != 1
+        || word(60)? as usize != raw.len().checked_sub(56)?
+        || word(64)? != 5
+    {
+        return None;
+    }
+    let path = utf16(raw.get(140..)?).ok()?;
+    let path = String::from_utf16(path.get(..path.len().checked_sub(1)?)?).ok()?;
+    if !path.starts_with('\\') || path.chars().any(char::is_control) {
+        return None;
+    }
+    let mut parent = [0; 88];
+    parent[16..].copy_from_slice(raw.get(68..140)?);
+    let device = decode_device(&parent);
+    matches!(device, Device::Boot | Device::Gpt { .. } | Device::Mbr { .. }).then_some((device, options))
+}
+
+fn parse_hive(hive: &RegistryHive) -> Result<Store, String> {
     let objects = hive.open_key("Objects").map_err(|err| err.to_string())?;
     if objects.subkey_count() > MAX_OBJECTS {
         return Err("BCD object count exceeds the inspection limit".into());
@@ -676,6 +853,53 @@ mod tests {
         bytes[32..48].copy_from_slice(&GPT_PARTITION.to_bytes_le());
         bytes[56..72].copy_from_slice(&GPT_DISK.to_bytes_le());
         bytes
+    }
+
+    #[test]
+    fn selection_checks_an_sdi_object_and_a_ramdisk_parent() {
+        let mut hive = HiveBuilder::new().unwrap();
+        let manager = object(&mut hive, BOOT_MANAGER, 0x1010_0002);
+        let recovery_id = Uuid::from_u128(0xbcd1);
+        let recovery = object(&mut hive, recovery_id, 0x1020_0003);
+        list(&mut hive, &manager, "24000001", &[recovery_id, Uuid::from_u128(0xbcd7)]);
+        let sdi_id = Uuid::from_u128(0xbcd2);
+        let sdi = object(&mut hive, sdi_id, 0x3000_0000);
+        let sdi_partition = Uuid::from_u128(0xbcd3);
+        let inner = gpt_device();
+        let path: Vec<_> = r"\Recovery\WindowsRE\Winre.wim".encode_utf16()
+            .chain([0]).flat_map(u16::to_le_bytes).collect();
+        let mut ramdisk = vec![0; 140];
+        ramdisk.extend(path);
+        let size = ramdisk.len() as u32;
+        ramdisk[..16].copy_from_slice(&sdi_id.to_bytes_le());
+        for (at, word) in [(20, 1u32), (24, size - 16), (32, 3), (56, 1), (60, size - 56), (64, 5)] {
+            ramdisk[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        ramdisk[68..140].copy_from_slice(&inner[16..]);
+        let device = field(&mut hive, &recovery, "21000001");
+        hive.add_value_binary(&device, Some("Element"), &ramdisk).unwrap();
+        let mut sdi_device = inner;
+        sdi_device[32..48].copy_from_slice(&sdi_partition.to_bytes_le());
+        let device = field(&mut hive, &sdi, "31000003");
+        hive.add_value_binary(&device, Some("Element"), &sdi_device).unwrap();
+        let firmware = object(&mut hive, Uuid::from_u128(0xbcd5), 0x101f_ffff);
+        let device = field(&mut hive, &firmware, "11000001");
+        sdi_device[32..48].copy_from_slice(&Uuid::from_u128(0xbcd6).to_bytes_le());
+        hive.add_value_binary(&device, Some("Element"), &sdi_device).unwrap();
+        assert_eq!(gpt_dependencies(hive.build().unwrap(), GPT_DISK).unwrap(),
+            BTreeSet::from([GPT_PARTITION, sdi_partition]));
+    }
+
+    #[test]
+    fn selection_refuses_an_unresolved_resume_device() {
+        let mut hive = HiveBuilder::new().unwrap();
+        let manager = object(&mut hive, BOOT_MANAGER, 0x1010_0002);
+        let resume_id = Uuid::from_u128(0xbcd4);
+        let resume = object(&mut hive, resume_id, 0x1020_0004);
+        list(&mut hive, &manager, "24000001", &[resume_id]);
+        let device = field(&mut hive, &resume, "21000001");
+        hive.add_value_binary(&device, Some("Element"), &descriptor(8)).unwrap();
+        assert!(gpt_dependencies(hive.build().unwrap(), GPT_DISK).is_err());
     }
 
     fn fixture() -> Vec<u8> {

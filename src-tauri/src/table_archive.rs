@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
 pub const MAX_FILE: usize = 24 * 1024 * 1024;
+pub(crate) const IMAGE_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"DSPT0001";
 const PREFIX: usize = 44;
 
@@ -285,7 +286,7 @@ pub fn capture(
 impl Archive {
     pub fn validate(&self) -> Result<Info, String> {
         geometry(self.size, self.sector)?;
-        if self.version != 1
+        if !(self.version == 1 || (self.version == IMAGE_VERSION && self.includes_boot))
             || self.source.len() != 64
             || !self
                 .source
@@ -415,15 +416,14 @@ impl Archive {
     pub fn matches(
         &self,
         reader: &mut (impl Read + Seek),
-        mut checkpoint: impl FnMut() -> Result<(), String>,
+        checkpoint: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
-        for e in &self.extents {
-            checkpoint()?;
-            if read_at(reader, e.offset, e.bytes.len(), self.size)? != e.bytes {
-                return Err("备份范围的源内容已变化，请重新读取。".into());
-            }
-        }
-        Ok(())
+        match_ranges(
+            reader,
+            self.size,
+            self.extents.iter().map(|e| (e.offset, e.bytes.as_slice())),
+            checkpoint,
+        )
     }
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
@@ -452,6 +452,21 @@ impl Archive {
         value.validate()?;
         Ok(value)
     }
+}
+
+pub(crate) fn match_ranges<'a>(
+    reader: &mut (impl Read + Seek),
+    size: u64,
+    ranges: impl IntoIterator<Item = (u64, &'a [u8])>,
+    mut checkpoint: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    for (offset, bytes) in ranges {
+        checkpoint()?;
+        if read_at(reader, offset, bytes.len(), size)? != bytes {
+            return Err("备份范围的源内容已变化，请重新读取。".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

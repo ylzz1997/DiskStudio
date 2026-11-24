@@ -54,6 +54,10 @@ export interface TableReport {
     detail: string;
   }[];
 }
+export type MigrationPartitionPlan = {
+  copied: { partition: number; offset: number; bytes: number; required: boolean }[];
+  skipped: { partition: number; offset: number; bytes: number; required: boolean }[];
+};
 export interface Disk {
   id: string;
   name: string;
@@ -76,6 +80,39 @@ export interface DiskSnapshot {
   observedAt: number;
   warnings: string[];
 }
+export type GptSide = "primary" | "backup";
+export interface GptRepairChanges {
+  authority: GptSide;
+  repairPeer: boolean;
+  repairProtectiveMbr: boolean;
+}
+export interface VirtualMachineOptions {
+  platform: "vmware" | "virtualBox";
+  name: string;
+  cpus: number;
+  memoryMib: number;
+}
+export interface VirtualMachinePreview extends VirtualMachineOptions {
+  firmware: "uefi" | "bios";
+  controller: "sata" | "nvme";
+  driver: string;
+  addsEfiFallback: boolean;
+  config: string;
+  disk: string;
+}
+export interface MigrationLayout {
+  firmware: "uefi" | "bios";
+  sourceBytes: number;
+  targetBytes: number;
+  sector: number;
+  bootOffset: number;
+  windowsOffset: number;
+  partitions: number;
+  relocatedGpt: boolean;
+  addsEfiFallback: boolean;
+  partitionChanges: { partition: number; offset: number; newOffset: number; oldBytes: number; newBytes: number }[];
+  partitionSelection?: MigrationPartitionPlan;
+}
 export interface DataPlan {
   token: string;
   title: string;
@@ -84,6 +121,45 @@ export interface DataPlan {
   bytes: number;
   warning: string;
   destructive: boolean;
+  virtualMachine?: VirtualMachinePreview;
+  systemMigration?: MigrationLayout;
+  systemMigrationTargets?: { destination: string; layout: MigrationLayout }[];
+  maintenanceMedia?: {
+    bios: boolean;
+    adk?: boolean;
+    wimImage: number;
+    fileCount: number;
+    wimBytes: number;
+    appSha256?: string;
+    usb?: {
+      newFiles: number;
+      reusedFiles: number;
+      newBytes: number;
+      files: { path: string; reused: boolean }[];
+    };
+  };
+  tableConversion?: {
+    from: "mbr" | "gpt";
+    to: "mbr" | "gpt";
+    sector: number;
+    diskId: string;
+    tableBytes: number;
+    restoredFrom?: string;
+    gptRepair?: GptRepairChanges;
+    registration?: { rebuiltTable: boolean };
+    placement?: {
+      offset: number;
+      from: "primary" | "logical";
+      to: "primary" | "logical";
+    };
+    partitions: {
+      offset: number;
+      size: number;
+      oldType: string;
+      newType: string;
+      logical: boolean;
+    }[];
+  };
 }
 export interface PartitionTarget {
   target: string;

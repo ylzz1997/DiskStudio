@@ -1,7 +1,12 @@
-//! Native FLAC frame boundaries as defined in RFC 9639. No PCM is produced.
+//! Bounded native FLAC frame parsing as defined by RFC 9639.
 use super::{PResult, Probe, ProbeError};
 use crate::signature_zip::Budget;
 use std::io::{Read, Seek};
+
+#[path = "signature_flac_decode.rs"]
+mod decode;
+#[path = "signature_flac_fragments.rs"]
+pub(crate) mod fragments;
 
 const MAX_SAMPLE_POINTS: u64 = 256 * 1024 * 1024;
 const MAX_FRAMES: u64 = 65_536;
@@ -64,6 +69,33 @@ pub(super) fn inspect<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     budget: &mut Budget,
 ) -> PResult<u64> {
     let info = stream(header).ok_or(ProbeError::Invalid)?;
+    let at = metadata(probe, header, budget, None)?;
+    let mut bits = Bits::new(probe, budget, at);
+    let mut position = Position::default();
+    while position.samples < info.samples {
+        require(position.frames < MAX_FRAMES)?;
+        if position.frames % 64 == 0 {
+            (bits.probe.tick)().map_err(ProbeError::Failed)?;
+        }
+        let frame = frame(&mut bits, info, position, None)?;
+        position.advance(frame);
+    }
+    Ok(bits.offset)
+}
+
+#[derive(Clone, Copy)]
+struct SeekPoint {
+    sample: u64,
+    offset: u64,
+    block: u32,
+}
+
+fn metadata<R: Read + Seek, T: FnMut() -> Result<(), String>>(
+    probe: &mut Probe<'_, R, T>,
+    header: &[u8; 42],
+    budget: &mut Budget,
+    mut points: Option<&mut Vec<SeekPoint>>,
+) -> PResult<u64> {
     let mut at = header.len() as u64;
     let mut last = header[4] & 0x80 != 0;
     let mut seen = [false; 7];
@@ -87,39 +119,74 @@ pub(super) fn inspect<R: Read + Seek, T: FnMut() -> Result<(), String>>(
             _ => false,
         })?;
         seen[kind] = true;
-        at = probe.bounded(at + 4 + size)?;
+        let end = probe.bounded(at + 4 + size)?;
+        if let Some(points) = points.as_mut().filter(|_| kind == 3) {
+            require(size / 18 <= MAX_FRAMES)?;
+            budget.charge(size).map_err(ProbeError::Failed)?;
+            let mut table = vec![0u8; size as usize];
+            probe.read_at(at + 4, &mut table)?;
+            let mut placeholders = false;
+            for row in table.chunks_exact(18) {
+                let sample = u64::from_be_bytes(row[..8].try_into().unwrap());
+                if sample == u64::MAX {
+                    placeholders = true;
+                    continue;
+                }
+                let offset = u64::from_be_bytes(row[8..16].try_into().unwrap());
+                let block = u32::from(u16::from_be_bytes(row[16..].try_into().unwrap()));
+                require(
+                    !placeholders
+                        && block != 0
+                        && match points.last() {
+                            Some(previous) => previous.sample < sample && previous.offset < offset,
+                            None => (sample == 0) == (offset == 0),
+                        },
+                )?;
+                points.push(SeekPoint {
+                    sample,
+                    offset,
+                    block,
+                });
+            }
+        }
+        at = end;
         budget.charge(4).map_err(ProbeError::Failed)?;
     }
-    let mut bits = Bits::new(probe, budget, at);
-    let mut blocking = None;
-    let mut decoded = 0;
-    let mut frames = 0;
-    while decoded < info.samples {
-        require(frames < MAX_FRAMES)?;
-        if frames % 64 == 0 {
-            (bits.probe.tick)().map_err(ProbeError::Failed)?;
-        }
-        let (block, variable) = frame(&mut bits, info, blocking, frames, decoded)?;
-        decoded += u64::from(block);
-        blocking = Some(variable);
-        frames += 1;
+    Ok(at)
+}
+
+#[derive(Clone, Copy, Default)]
+struct Position {
+    variable: Option<bool>,
+    frames: u64,
+    samples: u64,
+}
+impl Position {
+    fn advance(&mut self, frame: Frame) {
+        self.variable = Some(frame.variable);
+        self.samples += u64::from(frame.block);
+        self.frames += 1;
     }
-    Ok(bits.offset)
+}
+
+#[derive(Clone, Copy)]
+struct Frame {
+    block: u32,
+    variable: bool,
 }
 
 fn frame<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     bits: &mut Bits<'_, '_, R, T>,
     info: Stream,
-    blocking: Option<bool>,
-    number: u64,
-    decoded: u64,
-) -> PResult<(u32, bool)> {
+    position: Position,
+    mut decoder: Option<&mut decode::Pcm>,
+) -> PResult<Frame> {
     let start = bits.offset;
     bits.begin_frame(info.frame_max);
     require(bits.read(15)? == 0x7ffc)?;
     let variable = bits.read(1)? != 0;
     require(
-        blocking.is_none_or(|old| old == variable)
+        position.variable.is_none_or(|old| old == variable)
             && (variable || info.block_min == info.block_max),
     )?;
     let block_code = bits.read(4)?;
@@ -127,8 +194,12 @@ fn frame<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     let channel_code = bits.read(4)?;
     let width_code = bits.read(3)?;
     require(bits.read(1)? == 0)?;
-    let sequence = utf_number(bits)?;
-    let expected_number = if variable { decoded } else { number };
+    let sequence = utf_number(|| bits.read(8).map(|byte| byte as u8))?;
+    let expected_number = if variable {
+        position.samples
+    } else {
+        position.frames
+    };
     require(sequence == expected_number && (variable || sequence <= 0x7fff_ffff))?;
     let block = match block_code {
         1 => 192,
@@ -138,7 +209,7 @@ fn frame<R: Read + Seek, T: FnMut() -> Result<(), String>>(
         8..=15 => 256 << (block_code - 8),
         _ => return Err(ProbeError::Invalid),
     };
-    let remaining = info.samples - decoded;
+    let remaining = info.samples - position.samples;
     require(block <= info.block_max && u64::from(block) <= remaining)?;
     if u64::from(block) < remaining {
         require(block >= info.block_min)?;
@@ -171,10 +242,19 @@ fn frame<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     require(rate == info.rate && width == info.width && channels == info.channels)?;
     let header_crc = bits.header_crc.take().ok_or(ProbeError::Invalid)?;
     require(bits.read(8)? == u32::from(header_crc))?;
+    if let Some(pcm) = decoder.as_mut() {
+        bits.budget
+            .charge(u64::from(block) * u64::from(width.div_ceil(8) * channels))
+            .map_err(ProbeError::Failed)?;
+        pcm.configure(channels as usize, block as usize);
+    }
     for channel in 0..channels {
         let side =
             (channel_code == 9 && channel == 0) || (matches!(channel_code, 8 | 10) && channel == 1);
-        subframe(bits, block, width + u32::from(side))?;
+        let samples = decoder
+            .as_deref_mut()
+            .map(|pcm| pcm.channel(channel as usize));
+        subframe(bits, block, width + u32::from(side), samples)?;
     }
     if bits.used != 0 {
         require(bits.read(u32::from(8 - bits.used))? == 0)?;
@@ -182,13 +262,14 @@ fn frame<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     bits.read(16)?;
     let length = bits.offset - start;
     require(bits.frame_crc == 0 && (info.frame_min == 0 || length >= info.frame_min))?;
-    Ok((block, variable))
+    if let Some(pcm) = decoder {
+        pcm.append(channel_code, width)?;
+    }
+    Ok(Frame { block, variable })
 }
 
-fn utf_number<R: Read + Seek, T: FnMut() -> Result<(), String>>(
-    bits: &mut Bits<'_, '_, R, T>,
-) -> PResult<u64> {
-    let first = bits.read(8)? as u8;
+fn utf_number(mut byte: impl FnMut() -> PResult<u8>) -> PResult<u64> {
+    let first = byte()?;
     if first < 128 {
         return Ok(u64::from(first));
     }
@@ -196,7 +277,7 @@ fn utf_number<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     require((2..=7).contains(&bytes))?;
     let mut number = u64::from(first & (0x7f >> bytes));
     for _ in 1..bytes {
-        let next = bits.read(8)?;
+        let next = byte()?;
         require(next & 0xc0 == 0x80)?;
         number = (number << 6) | u64::from(next & 63);
     }
@@ -209,26 +290,61 @@ fn subframe<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     bits: &mut Bits<'_, '_, R, T>,
     block: u32,
     mut width: u32,
+    mut output: Option<&mut Vec<i64>>,
 ) -> PResult<()> {
     require(bits.read(1)? == 0)?;
     let kind = bits.read(6)?;
-    if bits.read(1)? != 0 {
-        let wasted = 1 + bits.zero_run(width - 2)?;
-        width -= wasted;
-    }
+    let wasted = if bits.read(1)? != 0 {
+        1 + bits.zero_run(width - 2)?
+    } else {
+        0
+    };
+    width -= wasted;
     let order = match kind {
-        0 => return bits.skip(u64::from(width)),
-        1 => return bits.skip(u64::from(width) * u64::from(block)),
+        0 => {
+            if let Some(samples) = output {
+                samples.resize(block as usize, bits.signed(width)? << wasted);
+                return Ok(());
+            }
+            return bits.skip(u64::from(width));
+        }
+        1 => {
+            if let Some(samples) = output {
+                for _ in 0..block {
+                    samples.push(bits.signed(width)? << wasted);
+                }
+                return Ok(());
+            }
+            return bits.skip(u64::from(width) * u64::from(block));
+        }
         8..=12 => kind - 8,
         32..=63 => kind - 31,
         _ => return Err(ProbeError::Invalid),
     };
     require(order < block)?;
-    bits.skip(u64::from(order * width))?;
+    if let Some(samples) = output.as_mut() {
+        for _ in 0..order {
+            samples.push(bits.signed(width)?);
+        }
+    } else {
+        bits.skip(u64::from(order * width))?;
+    }
+    let mut coefficients = [0i64; 32];
+    let mut shift = 0;
     if kind >= 32 {
         let precision = bits.read(4)? + 1;
-        require(precision <= 15 && bits.read(5)? < 16)?;
-        bits.skip(u64::from(order * precision))?;
+        shift = bits.read(5)?;
+        require(precision <= 15 && shift < 16)?;
+        if output.is_some() {
+            for coefficient in &mut coefficients[..order as usize] {
+                *coefficient = bits.signed(precision)?;
+            }
+        } else {
+            bits.skip(u64::from(order * precision))?;
+        }
+    } else {
+        let fixed: &[&[i64]] = &[&[], &[1], &[2, -1], &[3, -3, 1], &[4, -6, 4, -1]];
+        coefficients[..order as usize].copy_from_slice(fixed[order as usize]);
     }
     let param_width = match bits.read(2)? {
         0 => 4,
@@ -238,18 +354,46 @@ fn subframe<R: Read + Seek, T: FnMut() -> Result<(), String>>(
     let partitions = 1 << bits.read(4)?;
     require(block % partitions == 0 && block / partitions > order)?;
     let partition_samples = block / partitions;
+    let decode = output.is_some();
+    let mut append = |residual| -> PResult<()> {
+        if let Some(samples) = output.as_mut() {
+            let predicted = coefficients[..order as usize]
+                .iter()
+                .zip(samples.iter().rev())
+                .map(|(coefficient, sample)| coefficient * sample)
+                .sum::<i64>()
+                >> shift;
+            let sample = residual + predicted;
+            require(decode::fits(sample, width))?;
+            samples.push(sample);
+        }
+        Ok(())
+    };
     for partition in 0..partitions {
         let samples = partition_samples - if partition == 0 { order } else { 0 };
         let parameter = bits.read(param_width)?;
         if parameter == (1 << param_width) - 1 {
             let raw_width = bits.read(5)?;
-            bits.skip(u64::from(samples * raw_width))?;
+            if decode {
+                for _ in 0..samples {
+                    append(bits.signed(raw_width)?)?;
+                }
+            } else {
+                bits.skip(u64::from(samples * raw_width))?;
+            }
         } else {
             for _ in 0..samples {
                 let quotient = bits.zero_run(u32::MAX >> parameter)?;
                 let remainder = bits.read(parameter)?;
-                require(((quotient << parameter) | remainder) != u32::MAX)?;
+                let coded = (quotient << parameter) | remainder;
+                require(coded != u32::MAX)?;
+                append(i64::from(coded >> 1) ^ -i64::from(coded & 1))?;
             }
+        }
+    }
+    if let Some(samples) = output {
+        for sample in samples {
+            *sample <<= wasted;
         }
     }
     Ok(())
@@ -322,6 +466,14 @@ impl<'a, 'r, R: Read + Seek, T: FnMut() -> Result<(), String>> Bits<'a, 'r, R, T
             count -= take;
         }
         Ok(result)
+    }
+
+    fn signed(&mut self, width: u32) -> PResult<i64> {
+        if width == 0 {
+            return Ok(0);
+        }
+        let sign = i64::from(self.read(1)?);
+        Ok(i64::from(self.read(width - 1)?) - (sign << (width - 1)))
     }
 
     fn skip(&mut self, mut count: u64) -> PResult<()> {

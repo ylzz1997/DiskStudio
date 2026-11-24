@@ -167,7 +167,7 @@ impl Cursor {
             return journal.count() as u64;
         }
         match self {
-            Self::Signatures { cursor, .. } => cursor.consumed,
+            Self::Signatures { cursor, options } => cursor.work_done(options),
             Self::Ntfs { cursor, .. } => cursor.next,
             Self::Fat { cursor, .. } => cursor.records,
             Self::Ext { cursor, .. } => cursor.entries,
@@ -178,8 +178,8 @@ impl Cursor {
                 ..
             } => metadata.done(),
             Self::Combined {
-                signature_cursor, ..
-            } => signature_cursor.consumed,
+                signature_cursor, options, ..
+            } => signature_cursor.work_done(options),
         }
     }
     pub fn total(&self, size: u64) -> Result<u64, String> {
@@ -189,7 +189,7 @@ impl Cursor {
         match self {
             Self::Signatures { options, .. } => {
                 let r = options.range(size)?;
-                Ok(r.end - r.start)
+                Ok(options.work(r.end - r.start))
             }
             Self::Ntfs { cursor, .. } => Ok(cursor.total),
             Self::Fat { cursor, .. } => Ok(if cursor.sealed { cursor.records } else { 0 }),
@@ -202,7 +202,7 @@ impl Cursor {
             } => metadata.total(size),
             Self::Combined { options, .. } => {
                 let range = options.range(size)?;
-                Ok(range.end - range.start)
+                Ok(options.work(range.end - range.start))
             }
         }
     }
@@ -861,6 +861,10 @@ mod tests {
             length: Some(4096),
             sector_aligned: true,
             free_only: true,
+            zip_fragments: false,
+            ogg_fragments: false,
+            flac_fragments: false,
+            png_fragments: false,
         };
         let mut found = Vec::new();
         let mut tree = Catalog::default();

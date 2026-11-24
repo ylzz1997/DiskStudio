@@ -74,7 +74,9 @@ fn status_in(s: &State) -> Option<Status> {
         scan_id: current.as_ref().map(|c| c.0.clone()),
         scan_partition: current.as_ref().and_then(|c| c.1),
         scan_mode: current.map(|_| s.scan_mode),
-        search: s.retained_partition_search.as_ref().filter(|search| search.for_image(&opened.browser.info.id)).map(retained_partition_tasks::Search::read_only),
+        search: s.retained_partition_search.as_ref().filter(|search| search.for_image(&opened.browser.info.id)).map(|search| {
+            if cfg!(windows) && !opened.source_disks.is_empty() { search.clone() } else { search.read_only() }
+        }),
     })
 }
 pub fn status() -> Option<Status> {

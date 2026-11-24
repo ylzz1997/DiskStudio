@@ -63,7 +63,7 @@ fn exact_patch(
     })
 }
 
-fn gpt_bytes(disk: Uuid, partition: Uuid) -> Vec<u8> {
+pub(super) fn gpt_bytes(disk: Uuid, partition: Uuid) -> Vec<u8> {
     let mut bytes = vec![0; 88];
     bytes[16..20].copy_from_slice(&6u32.to_le_bytes());
     bytes[24..28].copy_from_slice(&72u32.to_le_bytes());
@@ -130,6 +130,10 @@ fn unrelated_content(
         }
     }
     Ok(keys)
+}
+
+pub(super) fn validate_tree(hive: &RegistryHive) -> Result<(), String> {
+    unrelated_content(hive, &HashSet::new()).map(|_| ())
 }
 
 pub(crate) fn rebind(

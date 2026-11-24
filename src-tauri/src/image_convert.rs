@@ -8,6 +8,41 @@ use std::io::{Read, Seek, SeekFrom, Write};
 mod containers;
 
 pub const CHUNK: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Pass {
+    Copy,
+    Check,
+}
+
+pub(crate) fn feed<W: Read + Write + Seek>(
+    reader: &mut impl Read,
+    encoder: &mut Encoder<W>,
+    size: u64,
+    pass: Pass,
+    mut tick: impl FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut bytes = vec![0; CHUNK];
+    let mut done = 0;
+    while done < size {
+        tick(done)?;
+        let len = (size - done).min(CHUNK as u64) as usize;
+        let bytes = &mut bytes[..len];
+        reader
+            .read_exact(bytes)
+            .map_err(|e| format!("读取失败，未跳过坏扇区：{e}"))?;
+        tick(done)?;
+        match pass {
+            Pass::Copy => encoder.push(done, bytes)?,
+            Pass::Check => {
+                encoder.verify_source(done, bytes)?;
+            }
+        }
+        done += len as u64;
+    }
+    tick(done)
+}
+
 const EMPTY: u32 = u32::MAX;
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
