@@ -3880,6 +3880,13 @@ i {
   border-block-start: 1px solid var(--border);
   padding-block: 0.5rem;
 }
+.data-plan > .migration-target-preview,
+.data-plan > .migration-target-preview > div {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  row-gap: 0.45rem;
+}
 .migration-target-header {
   display: flex;
   align-items: center;

@@ -1,7 +1,7 @@
 //! Give the NTFS tool an ordinary volume consisting of the confirmed target
 //! extent and a temporary read-through view of any discarded source tail.
 use crate::{
-    data_io::Region, extfs::Engine, ntfs_file_clone, surface_scan::Range,
+    backup_archive::Source, extfs::Engine, ntfs_file_clone, surface_scan::Range,
     system_migration::VolumeChange, used_space::View,
 };
 use sha2::{Digest, Sha256};
@@ -14,8 +14,8 @@ use std::{
 
 const PAGE: u64 = ntfs_file_clone::TARGET_PAGE;
 
-struct Volume<'a> {
-    source: Region<&'a File>,
+struct Volume<'a, R> {
+    source: View<R>,
     target: Option<View<&'a mut File>>,
     change: &'a VolumeChange,
     size: u64,
@@ -23,7 +23,7 @@ struct Volume<'a> {
     tail: BTreeMap<u64, Vec<u8>>,
 }
 
-impl Read for Volume<'_> {
+impl<R: Read + Seek> Read for Volume<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let end = self.cursor + (self.size - self.cursor).min(bytes.len() as u64);
         let start = self.cursor;
@@ -71,7 +71,7 @@ impl Read for Volume<'_> {
     }
 }
 
-impl Seek for Volume<'_> {
+impl<R> Seek for Volume<'_, R> {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         let offset = match from {
             SeekFrom::Start(n) => i128::from(n),
@@ -88,7 +88,7 @@ impl Seek for Volume<'_> {
     }
 }
 
-impl Write for Volume<'_> {
+impl<R> Write for Volume<'_, R> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let target = self
             .target
@@ -123,7 +123,8 @@ impl Write for Volume<'_> {
 
 pub(super) fn resize(
     engine: &Engine,
-    source: &File,
+    source: impl Source,
+    source_bytes: u64,
     target: Option<(&mut File, u64)>,
     change: &VolumeChange,
     sector: u64,
@@ -135,7 +136,7 @@ pub(super) fn resize(
         .transpose()
         .map_err(|e| e.to_string())?;
     let view = Volume {
-        source: Region::for_file_view(source, change.offset, change.old_bytes)
+        source: View::bounded(source, change.offset, change.old_bytes, source_bytes)
             .map_err(|e| e.to_string())?,
         target,
         change,

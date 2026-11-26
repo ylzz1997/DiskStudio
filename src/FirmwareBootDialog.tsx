@@ -8,11 +8,11 @@ import type { SecureBootReport } from "./FirmwareSecureBootPanel";
 import { useLocale } from "./i18n/LanguageProvider";
 import { diskTitle } from "./LocalDiskView";
 import {
-  MigrationTargets, invalidMigrationSizes, migrationOptions,
+  MigrationTargets, ReplacedMigrationPartitions, canReplaceMigrationTarget, invalidMigrationSizes, migrationOptions,
   type MigrationSelection, type MigrationTarget, type PartitionSize,
 } from "./MigrationSizes";
 import { formatSize } from "./types";
-import type { Disk } from "./types";
+import type { Disk, MigrationReplacedPartition } from "./types";
 
 type Entry = {
   id: number;
@@ -75,6 +75,7 @@ type WinPePreview = {
       bytes: number;
       partitionSizes: PartitionSize[];
       partitionSelection: MigrationSelection;
+      replaced?: MigrationReplacedPartition[];
     }[];
   };
 };
@@ -329,11 +330,7 @@ export function FirmwareBootDialog({
     candidate.disk.sectorSize === selectedTask.disk.sectorSize &&
     (taskKind === "clone"
       ? candidate.targetWritable && (candidate.partition === null) === (selectedTask.partition === null) && candidate.size === selectedTask.size
-      : candidate.partition === null && candidate.disk.hardware?.deviceReadOnly === false &&
-        candidate.disk.hardware.layoutAvailable && !candidate.disk.hardware.isSystem &&
-        (candidate.disk.scheme === "RAW" || candidate.disk.scheme === "GPT") &&
-        candidate.disk.partitions.every((part) => part.number === undefined) &&
-        (selectedTask.disk.scheme !== "MBR" || candidate.size >= selectedTask.size))) : [];
+      : candidate.partition === null && canReplaceMigrationTarget(selectedTask.disk, candidate.disk))) : [];
   const selectedDestination = eligibleDestinations.find(([key]) => key === taskDestination)?.[1];
   const migrationDestinations = migrationTargets.map((target) => ({
     choice: eligibleDestinations.find(([key]) => key === `${target.id}/disk`)?.[1],
@@ -581,6 +578,7 @@ export function FirmwareBootDialog({
                   <div key={target.destination} className="migration-target-preview">
                     <dt>{t("目标磁盘")}</dt>
                     <dd>{target.destination} · {formatSize(target.bytes)}</dd>
+                    <ReplacedMigrationPartitions partitions={target.replaced} />
                     <dt>{t("迁移范围")}</dt>
                     {target.partitionSelection.mode === "selected" ? <>
                       <dd>{t("Windows 必需分区和所选数据分区")}</dd>

@@ -1,9 +1,6 @@
-//! Recover a dirty BCD in memory from strictly checked, retained registry logs.
+//! Replay strictly checked registry log chains in memory. BCD recovery also verifies the boot graph.
 use super::{clean_hive, parse, repair, Device, MAX_STORE};
-use regf::{
-    transaction_log::{LogEntry, OldFormatLog},
-    BaseBlock, BASE_BLOCK_SIZE,
-};
+use regf::{structures::marvin32_hash, transaction_log::OldFormatLog, BaseBlock, BASE_BLOCK_SIZE};
 use serde::Serialize;
 use std::{collections::BTreeMap, io::Cursor};
 use uuid::Uuid;
@@ -11,8 +8,11 @@ use uuid::Uuid;
 const PAGE: usize = 512;
 const BIN: usize = 4096;
 const MAX_ENTRIES: usize = 1024;
-const MAX_PAGES: usize = MAX_STORE / PAGE;
 const HALF_SEQUENCE_RANGE: u32 = 1 << 31;
+const LOG_SIGNATURE: &[u8; 4] = b"HvLE";
+const LOG_HEADER: usize = 40;
+// The registry log's native 64-bit seed, interpreted in little-endian order.
+const LOG_SEED: u64 = 0x82ef_4d88_7a4e_55c5;
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -33,15 +33,15 @@ pub(crate) struct Replay {
     pub windows_entries: usize,
 }
 
-fn bin_size(size: u32) -> Result<usize, String> {
+fn bin_size(size: u32, limit: usize) -> Result<usize, String> {
     let size = size as usize;
-    if size < BIN || size > MAX_STORE - BASE_BLOCK_SIZE || !size.is_multiple_of(BIN) {
+    if size < BIN || size > limit - BASE_BLOCK_SIZE || !size.is_multiple_of(BIN) {
         return Err("BCD log declares an invalid or oversized hive extent".into());
     }
     Ok(size)
 }
 
-fn log_header(raw: &[u8], primary: &BaseBlock) -> Result<BaseBlock, String> {
+fn log_header(raw: &[u8], primary: &BaseBlock, limit: usize) -> Result<BaseBlock, String> {
     let mut bytes = [0; BASE_BLOCK_SIZE];
     bytes[..PAGE].copy_from_slice(raw.get(..PAGE).ok_or("Truncated BCD log header")?);
     let log = BaseBlock::parse(&bytes).map_err(|error| error.to_string())?;
@@ -60,7 +60,7 @@ fn log_header(raw: &[u8], primary: &BaseBlock) -> Result<BaseBlock, String> {
     {
         return Err("BCD log header does not match the dirty store".into());
     }
-    bin_size(log.hive_bins_data_size)?;
+    bin_size(log.hive_bins_data_size, limit)?;
     Ok(log)
 }
 
@@ -113,19 +113,95 @@ impl Image {
         header
             .write(&mut &mut self.bytes[..BASE_BLOCK_SIZE])
             .map_err(|error| error.to_string())?;
-        let hive = clean_hive(self.bytes.clone())?;
-        repair::validate_tree(&hive)?;
         Ok(self.bytes)
     }
 }
 
-struct Incremental {
+struct Incremental<'a> {
     name: &'static str,
     header: BaseBlock,
-    entries: Vec<LogEntry>,
+    entries: Vec<Transaction<'a>>,
 }
 
-fn incremental(name: &'static str, raw: &[u8], header: BaseBlock) -> Result<Incremental, String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplayScope {
+    BootStore,
+    LiveSnapshot,
+}
+
+struct Transaction<'a> {
+    raw: &'a [u8],
+    sequence: u32,
+    flags: u32,
+    bins: usize,
+    pages: Vec<(usize, &'a [u8])>,
+}
+
+fn transaction(raw: &[u8], expected: u32, limit: usize) -> Result<Transaction<'_>, String> {
+    if raw.len() < LOG_HEADER || raw.get(..4) != Some(LOG_SIGNATURE) {
+        return Err("Registry log contains a damaged or truncated transaction".into());
+    }
+    let word = |offset: usize| u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
+    let sequence = word(12);
+    if sequence != expected {
+        return Err("Registry log transaction sequence is discontinuous".into());
+    }
+    let size = word(4) as usize;
+    let count = word(20) as usize;
+    let flags = word(8);
+    let bins = bin_size(word(16), limit)?;
+    if size < PAGE || !size.is_multiple_of(PAGE) || count == 0 || count > limit / PAGE || flags > 1
+    {
+        return Err("Registry log transaction size or dirty page count is invalid".into());
+    }
+    let raw = raw
+        .get(..size)
+        .ok_or("Registry log transaction is truncated")?;
+    let hash1 = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+    let hash2 = u64::from_le_bytes(raw[32..40].try_into().unwrap());
+    if marvin32_hash(&raw[..32], LOG_SEED) != hash2
+        || marvin32_hash(&raw[LOG_HEADER..], LOG_SEED) != hash1
+    {
+        return Err("Registry log transaction checksum is invalid".into());
+    }
+    let mut data = LOG_HEADER + count * 8;
+    let references = raw
+        .get(LOG_HEADER..data)
+        .ok_or("Registry log page references are truncated")?;
+    let mut pages = Vec::with_capacity(count);
+    for fields in references.chunks_exact(8) {
+        let offset = u32::from_le_bytes(fields[..4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(fields[4..].try_into().unwrap()) as usize;
+        if len == 0 || offset.checked_add(len).is_none_or(|end| end > bins) {
+            return Err("Registry log page exceeds the declared hive extent".into());
+        }
+        let end = data
+            .checked_add(len)
+            .ok_or("Registry log page size overflow")?;
+        pages.push((
+            offset,
+            raw.get(data..end)
+                .ok_or("Registry log page data is truncated")?,
+        ));
+        data = end;
+    }
+    Ok(Transaction {
+        raw,
+        sequence,
+        flags,
+        bins,
+        pages,
+    })
+}
+
+fn incremental<'a>(
+    name: &'static str,
+    raw: &'a [u8],
+    header: BaseBlock,
+    primary: &BaseBlock,
+    limit: usize,
+    scope: ReplayScope,
+) -> Result<Incremental<'a>, String> {
     let mut entries = Vec::new();
     let mut expected = header.primary_sequence;
     let mut pending = &raw[PAGE..];
@@ -133,34 +209,35 @@ fn incremental(name: &'static str, raw: &[u8], header: BaseBlock) -> Result<Incr
         if pending.iter().all(|&byte| byte == 0) {
             break;
         }
-        if pending.get(..4) != Some(LogEntry::SIGNATURE.as_slice())
-            || pending.len() < LogEntry::HEADER_SIZE
-        {
-            return Err("BCD log contains a damaged or truncated transaction".into());
-        }
-        let sequence = u32::from_le_bytes(pending[12..16].try_into().unwrap());
         // A log can retain already superseded entries after its live prefix.
-        if !entries.is_empty() && sequence.wrapping_sub(expected) >= HALF_SEQUENCE_RANGE {
+        if !entries.is_empty()
+            && pending.get(..4) == Some(LOG_SIGNATURE)
+            && pending.get(12..16).is_some_and(|sequence| {
+                u32::from_le_bytes(sequence.try_into().unwrap()).wrapping_sub(expected)
+                    >= HALF_SEQUENCE_RANGE
+            })
+        {
             break;
         }
-        if sequence != expected || entries.len() >= MAX_ENTRIES {
-            return Err(
-                "BCD log transaction sequence is discontinuous or exceeds the limit".into(),
-            );
+        if entries.len() >= MAX_ENTRIES {
+            return Err("Registry log transaction count exceeds the limit".into());
         }
-        let size = u32::from_le_bytes(pending[4..8].try_into().unwrap()) as usize;
-        let count = u32::from_le_bytes(pending[20..24].try_into().unwrap()) as usize;
-        if size < LogEntry::HEADER_SIZE || count == 0 || count > MAX_PAGES {
-            return Err("BCD log transaction size or dirty page count is invalid".into());
-        }
-        let raw = pending
-            .get(..size)
-            .ok_or("BCD log transaction is truncated")?;
-        let entry = LogEntry::parse(raw).map_err(|error| error.to_string())?;
-        bin_size(entry.hive_bins_data_size)?;
-        entries.push(entry);
+        let entry = match transaction(pending, expected, limit) {
+            Ok(entry) => entry,
+            // A rotating live log may end in recycled padding or an incomplete
+            // write. Stop at its verified prefix. Replay still requires a
+            // complete, non-conflicting chain across both log files.
+            Err(_) if scope == ReplayScope::LiveSnapshot => break,
+            Err(error) => {
+                return Err(format!(
+                    "{name}, transaction {expected} (hive {}–{}): {error}",
+                    primary.secondary_sequence, primary.primary_sequence,
+                ))
+            }
+        };
         expected = expected.wrapping_add(1);
-        pending = &pending[size..];
+        pending = &pending[entry.raw.len()..];
+        entries.push(entry);
     }
     Ok(Incremental {
         name,
@@ -172,7 +249,7 @@ fn incremental(name: &'static str, raw: &[u8], header: BaseBlock) -> Result<Incr
 fn modern_replay(
     mut image: Image,
     mut primary: BaseBlock,
-    logs: &[Incremental],
+    logs: &[Incremental<'_>],
 ) -> Result<(Vec<u8>, Replay), String> {
     let start = primary.secondary_sequence;
     let distance = primary.primary_sequence.wrapping_sub(start);
@@ -182,10 +259,10 @@ fn modern_replay(
     let mut transactions = BTreeMap::new();
     for log in logs {
         for entry in &log.entries {
-            let index = entry.sequence_number.wrapping_sub(start);
+            let index = entry.sequence.wrapping_sub(start);
             if index < HALF_SEQUENCE_RANGE {
                 if let Some((_, previous)) = transactions.insert(index, (log, entry)) {
-                    if (previous.hash1, previous.hash2) != (entry.hash1, entry.hash2) {
+                    if previous.raw != entry.raw {
                         return Err("BCD logs disagree about a transaction sequence".into());
                     }
                 }
@@ -205,10 +282,10 @@ fn modern_replay(
     let mut used = Vec::new();
     let mut sequence = start;
     for (log, entry) in transactions.values() {
-        image.resize(bin_size(entry.hive_bins_data_size)?);
+        image.resize(entry.bins);
         let mut written = vec![false; image.present.len()];
-        for (page, data) in entry.page_references.iter().zip(&entry.dirty_pages) {
-            image.apply(page.offset as usize, data, &mut written)?;
+        for &(offset, data) in &entry.pages {
+            image.apply(offset, data, &mut written)?;
         }
         if !used.contains(&log.name) {
             used.push(log.name);
@@ -216,7 +293,7 @@ fn modern_replay(
         primary.flags = (log.header.flags & !1) | entry.flags;
         primary.last_written = log.header.last_written;
         primary.last_reorganized = log.header.last_reorganized;
-        sequence = entry.sequence_number;
+        sequence = entry.sequence;
     }
     let bytes = image.finish(primary, sequence.wrapping_add(1))?;
     Ok((
@@ -236,6 +313,7 @@ fn legacy_replay(
     mut primary: BaseBlock,
     name: &'static str,
     log: OldFormatLog,
+    limit: usize,
 ) -> Result<(Vec<u8>, Replay), String> {
     let sequence = primary.primary_sequence;
     if !log.can_apply_to(primary.last_written)
@@ -244,7 +322,7 @@ fn legacy_replay(
     {
         return Err("The legacy BCD log does not match the interrupted write".into());
     }
-    image.resize(bin_size(log.base_block.hive_bins_data_size)?);
+    image.resize(bin_size(log.base_block.hive_bins_data_size, limit)?);
     let mut written = vec![false; image.present.len()];
     for page in log.dirty_pages {
         image.apply(page.offset as usize, &page.data, &mut written)?;
@@ -282,8 +360,23 @@ pub(crate) fn recover(
     boot: Uuid,
     windows: Uuid,
 ) -> Result<(Vec<u8>, Replay), String> {
+    let (bytes, mut report) = replay_hive(original, logs, MAX_STORE, ReplayScope::BootStore)?;
+    let hive = clean_hive(bytes.clone())?;
+    repair::validate_tree(&hive)?;
+    (report.default_entry, report.windows_entries) = verify_store(&bytes, disk, boot, windows)?;
+    Ok((bytes, report))
+}
+
+pub(crate) fn replay_hive(
+    original: Vec<u8>,
+    logs: &[(&'static str, &[u8])],
+    limit: usize,
+    scope: ReplayScope,
+) -> Result<(Vec<u8>, Replay), String> {
     let primary = BaseBlock::parse(&original).map_err(|error| error.to_string())?;
-    if original.len() > MAX_STORE
+    if !(BASE_BLOCK_SIZE..=limit).contains(&original.len())
+        || logs.len() > 3
+        || logs.iter().any(|(_, bytes)| bytes.len() > limit)
         || !primary.checksum_valid
         || primary.file_type != 0
         || primary.file_format != 1
@@ -292,19 +385,19 @@ pub(crate) fn recover(
         || primary.primary_sequence == primary.secondary_sequence
     {
         return Err(
-            "BCD log recovery requires a dirty store with a valid recoverable header".into(),
+            "Registry log replay requires a dirty hive with a valid recoverable header".into(),
         );
     }
-    let bins = bin_size(primary.hive_bins_data_size)?;
+    let bins = bin_size(primary.hive_bins_data_size, limit)?;
     let mut modern = Vec::new();
     let mut legacy = None;
     for &(name, raw) in logs {
         if raw.iter().all(|&byte| byte == 0) {
             continue;
         }
-        let header = log_header(raw, &primary)?;
+        let header = log_header(raw, &primary, limit)?;
         match header.file_type {
-            6 => modern.push(incremental(name, raw, header)?),
+            6 => modern.push(incremental(name, raw, header, &primary, limit, scope)?),
             1 | 2 => {
                 let log =
                     OldFormatLog::parse(Cursor::new(raw)).map_err(|error| error.to_string())?;
@@ -322,13 +415,11 @@ pub(crate) fn recover(
         }
     }
     let image = Image::new(original, bins);
-    let (bytes, mut report) = match (legacy, modern.is_empty()) {
-        (None, false) => modern_replay(image, primary, &modern)?,
-        (Some((name, log)), true) => legacy_replay(image, primary, name, log)?,
-        _ => return Err("No unambiguous BCD transaction log chain is available".into()),
-    };
-    (report.default_entry, report.windows_entries) = verify_store(&bytes, disk, boot, windows)?;
-    Ok((bytes, report))
+    match (legacy, modern.is_empty()) {
+        (None, false) => modern_replay(image, primary, &modern),
+        (Some((name, log)), true) => legacy_replay(image, primary, name, log, limit),
+        _ => Err("No unambiguous registry transaction log chain is available".into()),
+    }
 }
 
 pub(crate) fn verify_store(

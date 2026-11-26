@@ -1,4 +1,12 @@
 {
+  "Windows 保持运行，备份前核对快照和启动链。": "Windows keeps running while DiskStudio checks the snapshot and boot chain.",
+  "切换到按已用空间，可在 Windows 运行时备份所选范围。": "Select Used space to back up this scope while Windows is running.",
+  "请选择在线 NTFS 数据分区或受支持的 Windows 系统盘。": "Choose an online NTFS data partition or a supported Windows system disk.",
+  "将被覆盖的现有分区": "Existing partitions to overwrite",
+  "热迁移 Windows": "Migrate Windows hot",
+  "使用 VSS 快照复制正在运行的 Windows，无需重启": "Copy running Windows from VSS snapshots without restarting",
+  "热迁移支持同盘 EFI 和未加密的 NTFS 卷。其他文件系统可用 WinPE 迁移。": "Hot migration supports EFI on the same disk and unencrypted NTFS volumes. Use WinPE to migrate other file systems.",
+  "VSS 提供文件系统一致性。运行中的应用可能需要恢复事务。": "VSS provides file system consistency. Running applications may need to recover their transactions.",
   "目标 NTFS 分区布局（MiB）": "Destination NTFS partition layout (MiB)",
   "起点（MiB）": "Start (MiB)",
   "容量（MiB）": "Size (MiB)",

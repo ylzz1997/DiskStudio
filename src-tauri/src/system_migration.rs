@@ -1,7 +1,7 @@
-//! Logical target for a cold Windows migration. All I/O is through bounded streams.
+//! Logical target for Windows migration. All I/O is through bounded streams.
 use crate::{
     backup_archive::Source,
-    boot_inspection::virtualization::{self as boot, WindowsBoot},
+    boot_inspection::virtualization::{self as boot, SystemHive, WindowsBoot},
     image_table_conversion::{Overlay, Patch},
     system_virtualization::Firmware,
     table_archive::{self, Archive, Kind},
@@ -25,6 +25,7 @@ pub(crate) struct Plan {
     adds_efi_fallback: bool,
     partitions: usize,
     system_digest: String,
+    system_hive: SystemHive,
     changes: Vec<VolumeChange>,
     mappings: Vec<Mapping>,
     selection: Option<SelectionPreview>,
@@ -732,9 +733,25 @@ impl Plan {
         options: &Options,
         partition_numbers: impl FnOnce(&table_restore::Layout) -> Result<Vec<PartitionNumber>, String>,
     ) -> Result<Self, String> {
+        Self::prepare_layout_with_hive(
+            source, source_size, target_size, sector, expected_ranges, options,
+            SystemHive::Clean, partition_numbers,
+        )
+    }
+
+    pub(crate) fn prepare_layout_with_hive(
+        source: &mut impl Source,
+        source_size: u64,
+        target_size: u64,
+        sector: u64,
+        expected_ranges: Option<&[Span]>,
+        options: &Options,
+        system_hive: SystemHive,
+        partition_numbers: impl FnOnce(&table_restore::Layout) -> Result<Vec<PartitionNumber>, String>,
+    ) -> Result<Self, String> {
         options.validate()?;
         let (windows, before) = boot::check_windows(source, source_size, sector, expected_ranges)?;
-        let system_digest = windows.check_system(source, sector)?;
+        let system_digest = windows.system_digest(source, sector, false, system_hive)?;
         let (changes, omitted, mut selection) =
             if options.sizes.is_empty() && options.selection.is_all() {
                 (Vec::new(), Vec::new(), None)
@@ -822,6 +839,7 @@ impl Plan {
             adds_efi_fallback,
             partitions,
             system_digest,
+            system_hive,
             changes,
             mappings,
             selection,
@@ -853,6 +871,26 @@ impl Plan {
 
     pub(crate) fn adds_efi_fallback(&self) -> bool {
         self.adds_efi_fallback
+    }
+
+    pub(crate) fn hot_source_matches(
+        &self,
+        windows: Span,
+        available: impl Fn(Span) -> bool,
+    ) -> Result<(), String> {
+        if self.windows.windows_offset() != windows.start {
+            return Err("BCD 的默认 Windows 安装与正在运行的系统卷不同。".into());
+        }
+        let selected = |offset: u64| {
+            self.selection.as_ref().is_none_or(|selection|
+                !selection.skipped.iter().any(|part| part.offset == offset))
+        };
+        if table_restore::archive_layout(&self.before)?.entries.iter().any(|entry| {
+            selected(entry.offset) && !available(Span { start: entry.offset, end: entry.offset + entry.size })
+        }) {
+            return Err("本次热迁移包含无法一致读取的分区。请选择支持的 NTFS 分区或使用 WinPE。".into());
+        }
+        Ok(())
     }
 
     pub(crate) fn mbr_signature(&self) -> Option<[u8; 4]> {
@@ -910,6 +948,7 @@ impl Plan {
                 reader,
                 self.after.sector,
                 self.system_change().is_some_and(VolumeChange::resizes),
+                self.system_hive,
             )? != self.system_digest
             || !boot::fallback(reader, self.after.size, self.after.sector, &windows)?.is_empty()
         {

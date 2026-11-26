@@ -23,7 +23,8 @@ import { Dialog, FormError, Hint } from "./components";
 import { native } from "./backend";
 import type { WinPeTaskForm } from "./FirmwareBootDialog";
 import {
-  MigrationLayoutPreview, MigrationTargets, invalidMigrationSizes, migrationOptions,
+  MigrationLayoutPreview, MigrationRequestDetails, MigrationTargets, ReplacedMigrationPartitions,
+  canReplaceMigrationTarget, invalidMigrationSizes, migrationOptions,
   type MigrationTarget,
 } from "./MigrationSizes";
 import { RecoveryResults } from "./RecoveryResults";
@@ -372,12 +373,16 @@ export function DataTools({
     allowMemberSelection && (memberKeys.length > 0 || allowMissingMembers);
   const staleMembers =
     useMembers && selectedMembers.length !== memberKeys.length;
-  const canHot =
-    copyMode === "allSectors" &&
-    !!selectedPart &&
-    !selectedPart.system &&
-    disk?.hardware?.offline === false &&
-    selectedPart.fs.toUpperCase() === "NTFS";
+  const windowsSnapshotDisk = physical && disk.scheme === "GPT" &&
+    !!disk.hardware?.identity && !!disk.hardware.layoutKey && disk.hardware.layoutAvailable &&
+    disk.hardware.isSystem && disk.hardware.offline === false &&
+    disk.partitions.some((part) => part.role === "EFI 系统") &&
+    disk.partitions.some((part) => part.role === "Windows 系统" && part.fs.toUpperCase() === "NTFS" && !part.encryption);
+  const systemBackupScope = windowsSnapshotDisk && (!partition || selectedPart?.role === "Windows 系统");
+  const canHot = systemBackupScope
+    ? copyMode === "usedSpace"
+    : copyMode === "allSectors" && !!selectedPart && !selectedPart.system &&
+      disk?.hardware?.offline === false && selectedPart.fs.toUpperCase() === "NTFS";
   useEffect(() => {
     if (!canHot) setHot(false);
   }, [canHot]);
@@ -402,8 +407,10 @@ export function DataTools({
     disk.hardware?.offline === false && !disk.hardware.isSystem &&
     parts.some(diskClonePart) &&
     parts.every((part) => diskClonePart(part) || part.role === "MSR 保留");
-  const canMigrate = task === "clone" && !partition && canExportDeviceImage &&
+  const canColdMigrate = task === "clone" && !partition && canExportDeviceImage &&
     disk.hardware?.offline === true && (disk.scheme === "GPT" || (disk.scheme === "MBR" && disk.sectorSize === 512));
+  const canHotMigrate = task === "clone" && !partition && windowsSnapshotDisk;
+  const canMigrate = canColdMigrate || canHotMigrate;
   const resizingClone = canResizeClone && partitionClone === "resize";
   const cloningFiles = canFileClone && partitionClone === "files";
   const cloningDiskFiles = canDiskFileClone && partitionClone === "diskFiles";
@@ -413,12 +420,13 @@ export function DataTools({
     disk.hardware.layoutAvailable && typeof disk.hardware.offline === "boolean";
   const canQueueMigration = canQueueWinPe && !partition && task === "clone" &&
     (disk.scheme === "GPT" || (disk.scheme === "MBR" && disk.sectorSize === 512));
-  const cloneDisks = cloningDiskFiles || migrating
+  const cloneDisks = migrating
+    ? destinations.filter((target) => canReplaceMigrationTarget(disk, target))
+    : cloningDiskFiles
     ? destinations.filter((d) =>
         (d.scheme === "RAW" || d.scheme === "GPT") &&
         d.sectorSize === disk.sectorSize && d.hardware?.layoutAvailable &&
         d.hardware.deviceReadOnly === false &&
-        (!migrating || disk.scheme === "GPT" || d.size >= disk.size) &&
         d.partitions.every((part) => part.number === undefined))
     : destinations;
   const cloneDiskSelected = cloneDisks.some((d) => d.id === destination);
@@ -721,7 +729,7 @@ export function DataTools({
         request = { type: "restore", destination: selection(disk, partition) };
       else if (migrating)
         request = {
-          type: "migrateSystemBatch",
+          type: canHotMigrate ? "migrateWindowsHot" : "migrateSystemBatch",
           source: selection(disk, ""),
           destinations: migrationDestinations.map(({ disk: target, options }) => ({
             selection: selection(target, ""),
@@ -1549,8 +1557,8 @@ export function DataTools({
                         }}
                       />
                       <span>
-                        <strong>{t("离线迁移 Windows")}</strong>
-                        <small>{t("先核对 Windows 启动链，再复制到另一块磁盘")}</small>
+                        <strong>{t(canHotMigrate ? "热迁移 Windows" : "离线迁移 Windows")}</strong>
+                        <small>{t(canHotMigrate ? "使用 VSS 快照复制正在运行的 Windows，无需重启" : "先核对 Windows 启动链，再复制到另一块磁盘")}</small>
                       </span>
                     </label>
                   )}
@@ -1587,7 +1595,11 @@ export function DataTools({
                     <span>
                       <strong>{t("VSS 热备份")}</strong>
                       <small>
-                        {copyMode === "usedSpace"
+                        {systemBackupScope
+                          ? canHot
+                            ? t("Windows 保持运行，备份前核对快照和启动链。")
+                            : t("切换到按已用空间，可在 Windows 运行时备份所选范围。")
+                          : copyMode === "usedSpace"
                           ? t(
                               "按已用空间备份需要锁定源卷；切换逐扇区方式可用热备份",
                             )
@@ -1596,7 +1608,7 @@ export function DataTools({
                                 "源卷可继续使用；保证文件系统一致性，不保证应用事务一致性",
                               )
                             : t(
-                                "选择在线 NTFS 数据分区后可用；整盘备份仍需锁定源卷",
+                                "请选择在线 NTFS 数据分区或受支持的 Windows 系统盘。",
                               )}
                       </small>
                     </span>
@@ -1628,7 +1640,7 @@ export function DataTools({
                         id: choice.id,
                         label: `${diskTitle(choice, t)} · ${formatSize(choice.size)}`,
                       }))}
-                      targets={migrationTargets} onChange={setMigrationTargets} disabled={!!busy} />
+                      targets={migrationTargets} onChange={setMigrationTargets} disabled={!!busy} hot={canHotMigrate} />
                     : <div>
                       <label htmlFor="clone-disk">{t("目标磁盘")}</label>
                       <select
@@ -1702,7 +1714,9 @@ export function DataTools({
                     </fieldset>
                   )}
                   <Hint>
-                    {migrating
+                    {migrating && canHotMigrate
+                      ? t("热迁移支持同盘 EFI 和未加密的 NTFS 卷。其他文件系统可用 WinPE 迁移。")
+                      : migrating
                       ? t("请选择无分区且逻辑扇区大小相同的 RAW 或 GPT 目标。迁移后的 GPT 分区必须能放入目标，MBR 目标容量须不小于源盘。")
                       : cloningDiskFiles
                       ? t("容量留空则沿用源分区大小。选择逻辑扇区大小相同的空 RAW 或 GPT 盘，写入后目标保持脱机。")
@@ -1818,6 +1832,7 @@ export function DataTools({
                     busy ||
                     !physical ||
                     !native ||
+                    (task === "backup" && systemBackupScope && (!hot || !canHot)) ||
                     (task === "clone" &&
                       (migrating ? invalidMigration : !cloneDiskSelected || (cloningDiskFiles && invalidDiskSizes) || (!!partition && !cloneTargets.some(
                         (part) => String(part.number) === destinationPartition,
@@ -1836,11 +1851,9 @@ export function DataTools({
                 </button>
               </div>
             </section>
-            <p className="data-footnote">
-              {t(
-                "复制采用有界并行流水线，写入按顺序执行并完整回读校验。VSS 仅支持 NTFS 数据分区。",
-              )}
-            </p>
+            {((migrating && canHotMigrate) || (task === "backup" && hot && canHot)) && (
+              <p className="data-footnote">{t("VSS 提供文件系统一致性。运行中的应用可能需要恢复事务。")}</p>
+            )}
           </>
         )}
       </div>
@@ -2599,14 +2612,27 @@ export function DataTools({
                 <dd>{plan.virtualMachine.disk}</dd>
               </>
             )}
-            {plan.systemMigration && <MigrationLayoutPreview layout={plan.systemMigration} />}
-            {plan.systemMigrationTargets?.map(({ destination, layout }) => (
+            {!plan.systemMigrationTargets?.length && plan.systemMigration && <MigrationLayoutPreview layout={plan.systemMigration} />}
+            {plan.systemMigrationTargets?.map(({ destination, layout, replaced }) => (
               <div key={destination} className="migration-target-preview">
                 <dt>{t("目标磁盘")}</dt>
                 <dd>{destination}</dd>
+                <ReplacedMigrationPartitions partitions={replaced} />
                 <MigrationLayoutPreview layout={layout} />
               </div>
             ))}
+            {plan.hotMigration && <>
+              <dt>{t("启动固件")}</dt>
+              <dd>UEFI · {plan.hotMigration.sector.toLocaleString()} B</dd>
+              {plan.hotMigration.targets.map((target) => (
+                <div key={target.destination} className="migration-target-preview">
+                  <dt>{t("目标磁盘")}</dt>
+                  <dd>{target.destination} · {formatSize(target.bytes)}</dd>
+                  <ReplacedMigrationPartitions partitions={target.replaced} />
+                  <MigrationRequestDetails selection={target.partitionSelection} sizes={target.partitionSizes} />
+                </div>
+              ))}
+            </>}
             {plan.maintenanceMedia && (
               <>
                 <dt>{t("启动固件")}</dt>

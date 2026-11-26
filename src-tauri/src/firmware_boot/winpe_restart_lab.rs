@@ -178,11 +178,14 @@ fn copy_lab_media(index: u32) -> Selection {
 
 fn copy_lab_optical() -> PathBuf {
     let optical: Vec<_> = ('C'..='Z').filter_map(|letter| {
-        let root = format!("{letter}:\\");
-        let wide: Vec<_> = root.encode_utf16().chain([0]).collect();
-        (unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide.as_ptr()) } == 5)
-            .then(|| PathBuf::from(root).join("dspayload"))
-            .filter(|path| path.join(r"sources\boot.wim").is_file())
+        let drive = format!("{letter}:\\");
+        let wide: Vec<_> = drive.encode_utf16().chain([0]).collect();
+        if unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide.as_ptr()) } != 5 {
+            return None;
+        }
+        let root = PathBuf::from(drive);
+        let payload = if root.join("dsoccupied.txt").is_file() { root } else { root.join("dspayload") };
+        payload.join(r"sources\boot.wim").is_file().then_some(payload)
     }).collect();
     let [path] = optical.as_slice() else { panic!("Expected one read-only WinPE media tree") };
     path.clone()
@@ -307,18 +310,7 @@ fn prepares_queued_migration_relocation() {
 fn prepare_resize_fixture(existing_sample: bool) {
     let (a, b) = pair();
     lab::verify_blank_disk(a, "DS-TEST-A-0001", A, 4096).unwrap();
-    let (media, part) = select_partition(b, |part| part.role == "数据分区" && part.base.fs == "FAT32");
-    assert_eq!(part.base.size, 1000 * disk_core::MIB);
-    let letter = part.drive_letter.unwrap().chars().next().unwrap();
-    let root = checked_lab_volume(letter, b, &media);
-    let optical = copy_lab_optical();
-    for item in ["DiskStudio.exe", r"sources\boot.wim"] {
-        assert!(root.join(item).is_file());
-        let mut permissions = fs::metadata(root.join(item)).unwrap().permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(root.join(item), permissions).unwrap();
-        fs::copy(optical.join(item), root.join(item)).unwrap();
-    }
+    refresh_migration_media(b, &copy_lab_optical());
     let data_setup = if existing_sample {
         let (data, part) = select_partition(b, |part| part.base.size == 16 * disk_core::MIB && part.base.fs == "NTFS");
         let letter = part.drive_letter.unwrap().chars().next().unwrap();
@@ -338,6 +330,20 @@ fn prepare_resize_fixture(existing_sample: bool) {
     }
     assert_eq!(resize_migration_sizes(b, existing_sample).len(), 2);
     println!("WINPE RESIZE MIGRATION FIXTURE READY");
+}
+
+fn refresh_migration_media(b: u32, optical: &Path) {
+    let (media, part) = select_partition(b, |part| part.role == "数据分区" && part.base.fs == "FAT32");
+    assert_eq!(part.base.size, 1000 * disk_core::MIB);
+    let letter = part.drive_letter.unwrap().chars().next().unwrap();
+    let root = checked_lab_volume(letter, b, &media);
+    for item in ["DiskStudio.exe", r"sources\boot.wim"] {
+        assert!(root.join(item).is_file());
+        let mut permissions = fs::metadata(root.join(item)).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(root.join(item), permissions).unwrap();
+        fs::copy(optical.join(item), root.join(item)).unwrap();
+    }
 }
 
 #[test]
@@ -407,6 +413,10 @@ fn schedules_queued_migration_selection() {
 #[test]
 #[ignore = "uses the batch handoff with one destination in the verified isolated 4Kn A/B guest"]
 fn schedules_queued_migration_batch() {
+    schedule_migration_batch(None);
+}
+
+fn schedule_migration_batch(expected_replaced: Option<serde_json::Value>) {
     use crate::data_tasks::system_migration_tasks::Destination;
 
     let (a, b) = pair();
@@ -418,6 +428,10 @@ fn schedules_queued_migration_batch() {
         partition_sizes: options.sizes,
         partition_selection: options.selection,
     }], &media).unwrap();
+    if let Some(expected) = expected_replaced {
+        assert_eq!(serde_json::to_value(&preview).unwrap()["migrationDestinations"][0]["replaced"], expected);
+        println!("WINPE MIGRATION OVERWRITE PREVIEW: {expected}");
+    }
     let before = inspect().unwrap();
     let plan = prepare_winpe(
         WinPeRequest { revision: before.revision, source: media, task: None },
@@ -428,6 +442,55 @@ fn schedules_queued_migration_batch() {
     assert_eq!(result.report.next, Some(plan.entry));
     assert_eq!(result.report.order, before.order);
     assert!(result.error.is_none(), "{:?}", result.error);
+}
+
+fn occupied_migration_destination(a: u32) -> serde_json::Value {
+    let (selection, part) = select_partition(a, |part| part.base.fs == "NTFS");
+    assert_eq!(part.base.start, 2 * disk_core::MIB);
+    assert_eq!(part.base.size, 128 * disk_core::MIB);
+    let letter = part.drive_letter.unwrap().chars().next().unwrap();
+    let root = checked_lab_volume(letter, a, &selection);
+    assert_eq!(fs::read(root.join("BeforeMigration.txt")).unwrap(), b"Disposable destination before hot migration");
+    serde_json::json!([{"number": part.number, "offset": part.base.start, "bytes": part.base.size}])
+}
+
+fn set_copy_lab_source_offline(b: u32, offline: bool) {
+    let source = data_windows::resolve(&copy_lab_selection(b), false, false).unwrap();
+    assert_eq!(source.disk.number, b);
+    assert_eq!(source.disk.is_boot, Some(false));
+    assert_eq!(source.disk.is_system, Some(false));
+    let change = if offline { "offline" } else { "online" };
+    let commands = r"X:\ds-copy-source-state.txt";
+    fs::write(commands, format!("select disk {b}\r\n{change} disk\r\n")).unwrap();
+    assert!(Command::new(r"X:\Windows\System32\diskpart.exe").args(["/s", commands])
+        .status().unwrap().success());
+    let fresh = data_windows::resolve(&copy_lab_selection(b), false, false).unwrap();
+    assert_eq!(fresh.disk.is_offline, Some(offline));
+}
+
+#[test]
+#[ignore = "checks offline migration preview and one-time WinPE scheduling with the verified occupied A/B fixtures"]
+fn schedules_queued_migration_occupied() {
+    let (a, b) = pair();
+    let replaced = occupied_migration_destination(a);
+    let options = selection_migration_options(b);
+    set_copy_lab_source_offline(b, true);
+    let preview = crate::data_tasks::prepare(crate::data_tasks::Request::MigrateSystem {
+        source: copy_lab_selection(b),
+        destination: copy_lab_selection(a),
+        partition_sizes: options.sizes,
+        partition_selection: options.selection,
+    });
+    set_copy_lab_source_offline(b, false);
+    let direct = preview.unwrap().unwrap();
+    let response = serde_json::to_value(&direct).unwrap();
+    assert_eq!(response["systemMigrationTargets"][0]["replaced"], replaced);
+    assert_eq!(response["systemMigrationTargets"][0]["layout"], response["systemMigration"]);
+    crate::data_tasks::discard_plan(direct.token);
+    assert_eq!(occupied_migration_destination(a), replaced);
+    println!("OFFLINE MIGRATION OVERWRITE PREVIEW: {replaced}");
+    refresh_migration_media(b, &copy_lab_optical());
+    schedule_migration_batch(Some(replaced));
 }
 
 #[test]
@@ -974,4 +1037,237 @@ fn verifies_queued_restore() {
         RESTORED_SAMPLE
     );
     println!("WINPE QUEUED RESTORE VERIFIED: offline target SHA-256 {expected}, restored file matches, ticket consumed");
+}
+
+const HOT_BACKUP_BYTES: u64 = 5_638_895_341;
+const HOT_BACKUP_MARKER: &[u8] = b"DiskStudio running Windows backup fixture";
+const HOT_BACKUP_DISK_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+fn hot_backup_archive(a: u32, b: u32) -> (PathBuf, crate::backup_archive::Chain) {
+    let (selection, partition) = select_partition(b, |part| {
+        part.role == "数据分区" && part.base.fs == "NTFS" && part.base.size > 14 * 1024 * disk_core::MIB
+    });
+    let letter = partition.drive_letter.unwrap().chars().next().unwrap();
+    let root = checked_lab_volume(letter, b, &selection);
+    let path = root.join("windows-disk.dsbackup");
+    assert_eq!(fs::symlink_metadata(&path).unwrap().len(), HOT_BACKUP_BYTES);
+    let destination = copy_lab_selection(a);
+    let input = backup_files::Input::open(&path, Some(&destination.target)).unwrap();
+    let archive = input.archive(|| Ok(())).unwrap().unwrap();
+    let chain = crate::backup_archive::Chain::new(archive);
+    let header = chain.header();
+    assert_eq!(header.version, 3);
+    assert_eq!(header.kind, "disk");
+    assert_eq!(header.size, HOT_BACKUP_DISK_BYTES);
+    assert_eq!(header.sector, 4096);
+    assert!(header.allocation.is_some());
+    assert!(header.parent.is_none());
+    (path, chain)
+}
+
+fn check_hot_backup_windows(reader: &mut impl crate::backup_archive::Source) {
+    use crate::boot_inspection::virtualization::{check_windows, SystemHive};
+    let (windows, table) = check_windows(reader, HOT_BACKUP_DISK_BYTES, 4096, None).unwrap();
+    assert_eq!(windows.windows_offset(), 301989888);
+    windows.system_digest(reader, 4096, false, SystemHive::SnapshotLogs).unwrap();
+    let layout = crate::table_restore::archive_layout(&table).unwrap();
+    let system = layout.entries.iter().find(|entry| entry.offset == windows.windows_offset()).unwrap();
+    let data = layout.entries.iter().find(|entry| entry.size == 16 * disk_core::MIB).unwrap();
+    for (entry, file, expected) in [
+        (system, "DSHotBackupProof.txt", HOT_BACKUP_MARKER),
+        (data, "resize.txt", GROW_SAMPLE),
+    ] {
+        let mut view = crate::used_space::View::bounded(
+            &mut *reader, entry.offset, entry.size, HOT_BACKUP_DISK_BYTES,
+        ).unwrap();
+        let mut ntfs = ntfs::Ntfs::new(&mut view).unwrap();
+        ntfs.read_upcase_table(&mut view).unwrap();
+        assert_eq!(crate::boot_inspection::ntfs_file(&ntfs, &mut view, &[file], 4096).unwrap().unwrap(), expected);
+    }
+    assert_eq!(layout.entries.len(), 4);
+}
+
+fn run_hot_backup_fixture_diskpart(script: String) {
+    let commands = r"X:\ds-hot-backup-restore.txt";
+    fs::write(commands, script).unwrap();
+    assert!(Command::new(r"X:\Windows\System32\diskpart.exe").args(["/s", commands])
+        .status().unwrap().success());
+}
+
+#[test]
+#[ignore = "checks the real hot backup before replacing the verified disposable A fixture"]
+fn prepares_queued_hot_backup_restore() {
+    let (a, b) = pair();
+    let (_, mut chain) = hot_backup_archive(a, b);
+    chain.verify(|_| Ok(())).unwrap();
+    check_hot_backup_windows(&mut chain.reader());
+    println!("HOT BACKUP CANDIDATE VERIFIED: SHA-256 {}, Windows and data markers present", chain.header().sha256);
+    let manifest = chain.manifest().to_owned();
+    drop(chain);
+
+    let optical = copy_lab_optical();
+    lab::check_drive_letter('T').unwrap();
+    let (storage, part) = select_partition(b, |part| part.base.fs == "NTFS");
+    assert!(part.base.size > 15 * 1024 * disk_core::MIB);
+    let output = data_windows::resolve(&storage, true, false).unwrap();
+    assert_eq!(output.disk.number, b);
+    assert_eq!(output.disk.is_boot, Some(false));
+    assert_eq!(output.disk.is_system, Some(false));
+    run_hot_backup_fixture_diskpart(format!(
+        "select disk {b}\r\nselect partition {}\r\nshrink desired=1024 minimum=1024\r\ncreate partition primary size=1000\r\nformat fs=fat32 quick label=DSWINPE\r\nassign letter=T\r\n",
+        storage.partition.unwrap(),
+    ));
+    let (media, part) = select_partition(b, |part| part.base.fs == "FAT32");
+    assert_eq!(part.base.size, 1000 * disk_core::MIB);
+    copy_tree(&optical, &checked_lab_volume('T', b, &media));
+    let (_, mut after) = hot_backup_archive(a, b);
+    assert_eq!(after.manifest(), manifest);
+    check_hot_backup_windows(&mut after.reader());
+    drop(after);
+
+    let destination = copy_lab_selection(a);
+    let target = data_windows::resolve(&destination, false, false).unwrap();
+    assert_eq!(target.disk.number, a);
+    assert_eq!(target.disk.is_boot, Some(false));
+    assert_eq!(target.disk.is_system, Some(false));
+    assert_eq!(target.disk.is_offline, Some(false));
+    assert_eq!(target.disk.is_read_only, Some(false));
+    assert_eq!(target.disk.partition_style, Some(2));
+    assert_eq!(target.partition_ranges.len(), 4);
+    run_hot_backup_fixture_diskpart(format!("select disk {a}\r\nclean\r\nconvert gpt\r\n"));
+    let destination = copy_lab_selection(a);
+    let target = data_windows::resolve(&destination, true, true).unwrap();
+    assert_eq!(target.disk.partition_style, Some(2));
+    assert!(target.partition_ranges.is_empty());
+    println!("HOT BACKUP RESTORE FIXTURE READY: verified archive and WinPE on B, empty GPT on A");
+}
+
+#[test]
+#[ignore = "queues the verified 16 GiB whole-disk hot backup for restore to empty isolated Test A"]
+fn schedules_queued_hot_backup_restore() {
+    let (a, b) = pair();
+    let destination = copy_lab_selection(a);
+    let target = data_windows::resolve(&destination, true, true).unwrap();
+    assert_eq!(target.disk.partition_style, Some(2));
+    assert!(target.partition_ranges.is_empty());
+    let (path, chain) = hot_backup_archive(a, b);
+    let media = copy_lab_media(b);
+    let (task, preview) = Restore::prepare(destination, &media.target, &path, |_| None).unwrap().unwrap();
+    assert_eq!(preview.bytes, HOT_BACKUP_DISK_BYTES);
+    assert!(preview.destructive);
+    let before = inspect().unwrap();
+    let plan = prepare_winpe(
+        WinPeRequest { revision: before.revision, source: media, task: None },
+        PathBuf::from(r"X:\DiskStudio.exe"),
+        Some((Task::Restore(task), preview)),
+    ).unwrap();
+    println!("HOT BACKUP RESTORE QUEUED: {} bytes, SHA-256 {}, one-time Boot{:04X}", HOT_BACKUP_DISK_BYTES, chain.header().sha256, plan.entry);
+    let result = winpe_restart(plan.token).unwrap();
+    assert_eq!(result.report.next, Some(plan.entry));
+    assert_eq!(result.report.order, before.order);
+    assert!(result.error.is_none(), "{:?}", result.error);
+}
+
+#[test]
+#[ignore = "checks the whole restored disk and both marker files on offline Test A after one-time WinPE"]
+fn verifies_queued_hot_backup_restore() {
+    let (a, b) = pair();
+    confirm_handoff();
+    assert!(claim_winpe_task().unwrap().is_none());
+    let file = lab::verify_disk_geometry(a, "DS-TEST-A-0001", A, 4096).unwrap();
+    lab::verify_offline(&file).unwrap();
+    check_restored_hot_backup_disk(file, a, b);
+}
+
+#[test]
+#[ignore = "read-only recheck after restoring the hot backup to isolated Test A"]
+fn verifies_hot_backup_restored_bytes() {
+    let (a, b) = pair();
+    let file = lab::verify_disk_geometry(a, "DS-TEST-A-0001", A, 4096).unwrap();
+    check_restored_hot_backup_disk(file, a, b);
+}
+
+fn check_restored_hot_backup_disk(file: std::fs::File, a: u32, b: u32) {
+    let (_, chain) = hot_backup_archive(a, b);
+    let mut reader = crate::data_io::Region::for_file_view(file, 0, HOT_BACKUP_DISK_BYTES).unwrap();
+    let digest = crate::data_io::hash_exact(&mut reader, HOT_BACKUP_DISK_BYTES, |_| Ok(())).unwrap();
+    assert_eq!(digest, chain.header().sha256);
+    check_hot_backup_windows(&mut reader);
+    println!("HOT BACKUP DISK VERIFIED: Test A full SHA-256 {digest}, Windows and data markers present");
+}
+
+#[test]
+#[ignore = "opens the two isolated 4Kn hot-resize witnesses read-only"]
+fn verifies_hot_migration_resize_bytes() {
+    use crate::boot_inspection::virtualization::{check_windows, SystemHive};
+    use std::io::{Read, Seek, SeekFrom};
+
+    let (a, b) = pair();
+    let target = lab::verify_disk_geometry(a, "DS-TEST-A-0001", A, 4096).unwrap();
+    let source = lab::verify_disk_geometry(b, "DS-TEST-B-0001", B, 4096).unwrap();
+    assert_eq!(std::env::var("SystemDrive").unwrap(), "X:");
+    let bytes = 16 * 1024 * disk_core::MIB;
+    let previous = loader::checked_gpt(&source, bytes, 4096).unwrap();
+    let next = loader::checked_gpt(&target, bytes, 4096).unwrap();
+    assert_eq!(previous.disk_guid, next.disk_guid);
+    assert_eq!(previous.partitions.len(), 4);
+    assert_eq!(next.partitions.len(), 4);
+
+    for (old, new, name, expected) in [
+        (
+            (288, 14800),
+            (288, 12288),
+            "DSHotMigrationProof.txt",
+            &b"DiskStudio running Windows VSS fixture"[..],
+        ),
+        (
+            (15100, 64),
+            (14000, 128),
+            "DSHotResizeData.txt",
+            &b"DiskStudio hot migration NTFS resize fixture"[..],
+        ),
+    ] {
+        let (old_start, old_size) = old;
+        let (new_start, new_size) = new;
+        let original_range = old_start * disk_core::MIB..(old_start + old_size) * disk_core::MIB;
+        let initial = previous
+            .partitions
+            .iter()
+            .find(|part| part.range == original_range)
+            .unwrap();
+        let migrated = next
+            .partitions
+            .iter()
+            .find(|part| part.guid == initial.guid)
+            .unwrap();
+        let offset = new_start * disk_core::MIB;
+        let length = new_size * disk_core::MIB;
+        assert_eq!(migrated.range, offset..offset + length);
+        let mut view = crate::data_io::Region::for_file_view(&target, offset, length).unwrap();
+        let mut ntfs = ntfs::Ntfs::new(&mut view).unwrap();
+        assert_eq!(u64::from(ntfs.sector_size()), 4096);
+        ntfs.read_upcase_table(&mut view).unwrap();
+        assert_eq!(
+            crate::boot_inspection::ntfs_file(&ntfs, &mut view, &[name], 4096)
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+
+    let mut reader = crate::data_io::Region::for_file_view(target, 0, bytes).unwrap();
+    reader.seek(SeekFrom::Start(15100 * disk_core::MIB)).unwrap();
+    let mut retired = vec![0; disk_core::MIB as usize];
+    for _ in 0..64 {
+        reader.read_exact(&mut retired).unwrap();
+        assert!(retired.iter().all(|&byte| byte == 0));
+    }
+    let (windows, _) = check_windows(&mut reader, bytes, 4096, None).unwrap();
+    assert_eq!(windows.windows_offset(), 288 * disk_core::MIB);
+    windows
+        .system_digest(&mut reader, 4096, false, SystemHive::SnapshotLogs)
+        .unwrap();
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    let digest = crate::data_io::hash_exact(&mut reader, bytes, |_| Ok(())).unwrap();
+    println!("HOT MIGRATION RESIZE VERIFIED: 12 GiB Windows and 128 MiB NTFS moved data, both files match, full SHA-256 {digest}");
 }

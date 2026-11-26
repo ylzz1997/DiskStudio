@@ -1,10 +1,10 @@
 import { useLocale } from "./i18n/LanguageProvider";
-import { formatSize, type Disk, type MigrationLayout, type MigrationPartitionPlan } from "./types";
+import { formatSize, type Disk, type MigrationLayout, type MigrationPartitionPlan, type MigrationPartitionSize, type MigrationReplacedPartition, type MigrationSelection } from "./types";
 
 const MiB = 1024 ** 2;
 
-export type PartitionSize = { partition: number; bytes?: number; startBytes?: number };
-export type MigrationSelection = { mode: "all" } | { mode: "selected"; partitions: number[] };
+export type PartitionSize = MigrationPartitionSize;
+export type { MigrationSelection };
 export const defaultMigrationSelection: MigrationSelection = { mode: "selected", partitions: [] };
 type PartitionFields = { size?: string; start?: string };
 export type MigrationValues = Record<number, PartitionFields>;
@@ -20,12 +20,24 @@ export function migrationOptions(disk: Disk | undefined, target: MigrationTarget
   return { partitionSelection, partitionSizes: migrationSizes(disk, target.values, partitionSelection) };
 }
 
-export function MigrationTargets({ source, choices, targets, onChange, disabled }: {
+export function canReplaceMigrationTarget(source: Disk, target: Disk): boolean {
+  const hardware = target.hardware;
+  return target.kind === "physical" && target.id !== source.id &&
+    !!hardware?.identity && !!hardware.layoutKey && hardware.layoutAvailable &&
+    !hardware.isSystem && hardware.deviceReadOnly === false && typeof hardware.offline === "boolean" &&
+    target.sectorSize === source.sectorSize && (source.scheme !== "MBR" || target.size >= source.size) &&
+    (target.scheme === "RAW" || target.scheme === "GPT") &&
+    target.partitions.every((part) => part.number === undefined ||
+      (target.scheme === "GPT" && part.role === "数据分区" && !part.system && !part.hidden));
+}
+
+export function MigrationTargets({ source, choices, targets, onChange, disabled, hot = false }: {
   source: Disk;
   choices: { id: string; label: string }[];
   targets: MigrationTarget[];
   onChange: (targets: MigrationTarget[]) => void;
   disabled: boolean;
+  hot?: boolean;
 }) {
   const { t } = useLocale();
   const available = choices.filter((choice) => !targets.some((target) => target.id === choice.id));
@@ -60,7 +72,7 @@ export function MigrationTargets({ source, choices, targets, onChange, disabled 
               <details open={targets.length === 1}>
                 <summary>{t("迁移分区和布局")}{invalidMigrationSizes(options.partitionSizes) &&
                   ` · ${t("请检查起点和容量")}`}</summary>
-                <MigrationSizes disk={source} values={target.values} selection={options.partitionSelection}
+                <MigrationSizes disk={source} values={target.values} selection={options.partitionSelection} hot={hot}
                   onChange={(values) => patch(target.id, { values })}
                   onSelectionChange={(selection) => patch(target.id, { selection })} disabled={disabled} />
               </details>
@@ -115,18 +127,20 @@ export function invalidMigrationSizes(sizes: PartitionSize[]) {
       startBytes >= 2 ** 43 || startBytes % MiB !== 0)));
 }
 
-export function MigrationSizes({ disk, values, selection, onChange, onSelectionChange, disabled }: {
+function MigrationSizes({ disk, values, selection, onChange, onSelectionChange, disabled, hot }: {
   disk?: Disk;
   values: MigrationValues;
   selection: MigrationSelection;
   onChange: (next: MigrationValues) => void;
   onSelectionChange: (next: MigrationSelection) => void;
   disabled: boolean;
+  hot: boolean;
 }) {
   const { t } = useLocale();
   if (disk?.scheme !== "GPT") return null;
   const parts = eligiblePartitions(disk, selection);
-  const optional = optionalPartitions(disk);
+  const available = optionalPartitions(disk);
+  const optional = hot ? available.filter((part) => part.fs.toUpperCase() === "NTFS" && !part.encryption) : available;
   function update(number: number, field: keyof PartitionFields, value: string) {
     onChange({ ...values, [number]: { ...values[number], [field]: value } });
   }
@@ -139,7 +153,7 @@ export function MigrationSizes({ disk, values, selection, onChange, onSelectionC
         <select value={selection.mode} onChange={(event) =>
           onSelectionChange(event.currentTarget.value === "all" ? { mode: "all" } : defaultMigrationSelection)}>
           <option value="selected">{t("Windows 必需分区和所选数据分区")}</option>
-          <option value="all">{t("复制全部分区")}</option>
+          <option value="all" disabled={hot && optional.length !== available.length}>{t("复制全部分区")}</option>
         </select>
       </label>
       {selection.mode === "selected" && optional.map((part) => {
@@ -211,6 +225,21 @@ export function MigrationPartitionPreview({ selection }: { selection: MigrationP
   );
 }
 
+export function ReplacedMigrationPartitions({ partitions }: { partitions?: MigrationReplacedPartition[] }) {
+  const { t } = useLocale();
+  if (!partitions?.length) return null;
+  return <>
+    <dt>{t("将被覆盖的现有分区")}</dt>
+    <dd>
+      <ul className="migration-preview-list">
+        {partitions.map((part) => <li key={part.number}>
+          {t("分区 {number}", { number: part.number })} · {formatSize(part.bytes)} · {(part.offset / MiB).toLocaleString()} MiB
+        </li>)}
+      </ul>
+    </dd>
+  </>;
+}
+
 export function MigrationLayoutPreview({ layout }: { layout: MigrationLayout }) {
   const { t } = useLocale();
   return (
@@ -240,4 +269,24 @@ export function MigrationLayoutPreview({ layout }: { layout: MigrationLayout }) 
       ))}
     </>
   );
+}
+
+export function MigrationRequestDetails({ selection, sizes }: {
+  selection: MigrationSelection;
+  sizes: PartitionSize[];
+}) {
+  const { t } = useLocale();
+  return <>
+    <dt>{t("迁移范围")}</dt>
+    <dd>{t(selection.mode === "selected" ? "Windows 必需分区和所选数据分区" : "复制全部分区")}</dd>
+    {selection.mode === "selected" && selection.partitions.map((number) =>
+      <dd key={number}>{t("分区 {number}", { number })}</dd>)}
+    {sizes.map((part) => (
+      <div key={part.partition}>
+        <dt>{t("分区 {number}", { number: part.partition })}</dt>
+        {part.startBytes !== undefined && <dd>{t("起点（MiB）")} · {(part.startBytes / MiB).toLocaleString()}</dd>}
+        {part.bytes !== undefined && <dd>{formatSize(part.bytes)}</dd>}
+      </div>
+    ))}
+  </>;
 }

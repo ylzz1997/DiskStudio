@@ -29,6 +29,9 @@ pub(crate) use surface_device_windows::surface_scan_device;
 #[path = "online_boot_source.rs"]
 mod online_boot_source;
 pub(crate) use online_boot_source::{OnlineBootSource, EFI_SYSTEM_TYPE};
+#[path = "hot_migration_source.rs"]
+mod hot_migration_source;
+pub(crate) use hot_migration_source::{HotMigrationSource, HotPartitionKind};
 
 const DISKS: &str = "SELECT __PATH,Number,SerialNumber,UniqueId,FriendlyName,Size,LogicalSectorSize,BusType,PartitionStyle,NumberOfPartitions,IsBoot,IsSystem,IsOffline,IsReadOnly,IsClustered FROM MSFT_Disk";
 #[derive(Clone)]

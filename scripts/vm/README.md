@@ -962,6 +962,10 @@ WinPE 离线还原验收复用空白的两块 4Kn 测试盘。`prepares_queued_r
 
 正式构建 `94e9c16c…` 通过 1783 项自动检查。隔离来宾从 B 启动 WinPE，重新定位由 U: 变为 E: 的备份卷，原生密码解锁后验证两层备份并还原到 A。程序完成 SHA-256 写后回读，独立检查确认 A 脱机、`BootCurrent=Boot0003`、`BootNext` 和续接记录均已消费。该 WinPE 脱机句柄拒绝 `SEEK_END`，验收入口改用已核对的设备容量限定读取范围。本次关机后只读提取 A 的 QCOW2 文件中 128 MiB 目标分区，独立核对备份摘要和完整 57 字节 NTFS 文件。QMP 核对解锁至还原完成期间 B 无新增写入。桌面向导另以模拟固件调用验证预览、取消和覆盖确认。记录见 `.vm/winpe-restore-handoff-status.json`。
 
+Windows 整盘热备份还原验收使用运行中 Windows 生成并存放在 B 的 `windows-disk.dsbackup`。`prepares_queued_hot_backup_restore` 先校验归档全量摘要、启动链及两个 NTFS 卷的标记文件，再为 B 准备独立 WinPE 分区，将 A 准备为空 GPT 目标。`schedules_queued_hot_backup_restore` 通过正式流程确认备份和目标，设置一次性重启。`verifies_queued_hot_backup_restore` 核对一次性记录、脱机状态和目标内容。`verifies_hot_backup_restored_bytes` 可在 A 以只读设备接入时独立复核全量摘要、启动链和标记文件。最后完全移除 B 与启动介质，单独从 A 启动 Windows。
+
+正式构建 `b86de513…` 在隔离 4Kn 来宾中完成 16 GiB 还原和全盘 SHA-256 写后回读。A 保持脱机，B 的写入计数在还原验证与复制阶段保持一致。`BootCurrent` 为 `Boot0004`，`BootNext` 与续接任务均已消费。首次独立文件检查使用了未对齐的 4Kn 读取，换用扇区对齐读取器后，同一副本通过启动链、全盘摘要及标记文件字节核对。仅连接 A、使用全新的 UEFI 变量时，Windows Server Core 启动到登录界面。记录见 `.vm/system-hot-backup-restore-status.json`。
+
 WinPE 克隆续接由 `prepares_queued_clone` 在两块已核对的空白 4Kn 盘上准备。B 保存 WinPE 和 128 MiB NTFS 源分区，A 保存同容量目标。正式构建 `ec13ef58…` 从 B 自动启动，完成全扇区克隆和 SHA-256 写后回读，并保持 A 脱机。关机后从两份 QCOW2 独立解析 GPT 和 NTFS，核对源与副本内的 73 字节文件。快照比较另记录了 20 个不同的 4 KiB 块，源卷在 WinPE 中继续联机。启动映像内程序与桌面构建摘要一致，1784 项自动化检查通过。桌面克隆和迁移入口使用原生 WebView 和模拟固件调用验收。
 
 Windows 迁移续接复用 16 GiB 4Kn Windows Server 2025 测试源 B。先单独启动 B 并正常关闭 Windows，再启动隔离 WinPE，将空 GPT 的 A 确认为目标。正式构建 `870f483e…` 复核源盘布局并持有源卷锁，完成 16 GiB 写入、源盘复读和目标盘 SHA-256 回读。QMP 记录复制和复读期间 B 的写入计数保持一致。独立的 `verifies_queued_migration` 核对 A 仍脱机、目标 Windows 启动链和固件续接记录，确认 `BootCurrent=Boot0004`、`BootNext` 与任务记录均已消费。1784 项自动化检查通过，WinPE 内执行文件与桌面构建摘要一致。验收先验证了两处拒绝条件，重启后 RAW 目标原生布局与确认时不同，以及源 SYSTEM 配置单元需要日志回放。

@@ -19,6 +19,9 @@ pub mod boot_repair_tasks;
 #[path = "image_archive_tasks.rs"]
 mod image_archive_tasks;
 #[cfg(windows)]
+#[path = "native_file_picker.rs"]
+pub(crate) mod native_file_picker;
+#[cfg(windows)]
 #[path = "device_image_tasks.rs"]
 mod device_image_tasks;
 #[cfg(windows)]
@@ -2022,6 +2025,11 @@ pub enum Request {
         destinations: Vec<system_migration_tasks::Destination>,
     },
     #[cfg(windows)]
+    MigrateWindowsHot {
+        source: Selection,
+        destinations: Vec<system_migration_tasks::Destination>,
+    },
+    #[cfg(windows)]
     CreateWinpeIso {
         mode: crate::maintenance_media::Mode,
         #[serde(default)]
@@ -2159,12 +2167,17 @@ impl BackupOptions {
         }
     }
 }
-fn validate_backup_options(options: &BackupOptions) -> Result<(), String> {
+fn validate_backup_options(options: &BackupOptions, system_snapshot: bool) -> Result<(), String> {
     if options.compression && options.compression_level == backup_archive::Compression::None {
         return Err("压缩开关与压缩档位不一致。".into());
     }
-    if options.hot && options.mode == crate::used_space::Mode::UsedSpace {
-        return Err("按已用空间备份需要锁定源卷；VSS 热备请使用逐扇区方式。".into());
+    use crate::used_space::Mode;
+    if options.hot {
+        match (system_snapshot, options.mode) {
+            (false, Mode::UsedSpace) => return Err("按已用空间备份需要锁定源卷；VSS 热备请使用逐扇区方式。".into()),
+            (true, Mode::AllSectors) => return Err("运行中的 Windows 热备份请使用按已用空间方式。".into()),
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -2203,12 +2216,23 @@ pub struct Plan {
     #[cfg(windows)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system_migration_targets: Vec<system_migration_tasks::TargetPreview>,
+    #[cfg(windows)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hot_migration: Option<system_migration_tasks::HotPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maintenance_media: Option<crate::maintenance_media::Preview>,
 }
 pub(crate) enum Work {
     ArchiveBackup {
         source: Selection,
+        path: PathBuf,
+        options: BackupOptions,
+        parent: Option<Chain>,
+    },
+    #[cfg(windows)]
+    HotSystemBackup {
+        source: Box<system_migration_tasks::HotBackup>,
+        destination: Target,
         path: PathBuf,
         options: BackupOptions,
         parent: Option<Chain>,
@@ -2221,6 +2245,8 @@ pub(crate) enum Work {
     VirtualizeSystem(Box<system_virtualization_tasks::Export>),
     #[cfg(windows)]
     MigrateSystem(Box<system_migration_tasks::Migration>),
+    #[cfg(windows)]
+    MigrateWindowsHot(Box<system_migration_tasks::HotMigration>),
     #[cfg(windows)]
     CreateWinpeIso(Box<maintenance_media_tasks::Export>),
     #[cfg(windows)]
@@ -2341,24 +2367,37 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
         let (title, source_label, destination_label, bytes, warning, destructive, work) =
             match request {
                 Request::Backup { source, options } => {
-                    validate_backup_options(&options)?;
-                    let r = platform::resolve(&source, true, false)?;
-                    if options.hot
+                    let observed = platform::resolve(&source, !options.hot, false)?;
+                    let hot_system = if options.hot {
+                        system_migration_tasks::HotBackup::bind(&source, &observed)?
+                    } else {
+                        None
+                    };
+                    validate_backup_options(&options, hot_system.is_some())?;
+                    let r = if options.hot && hot_system.is_none() {
+                        platform::resolve(&source, true, false)?
+                    } else {
+                        observed
+                    };
+                    if options.hot && hot_system.is_none()
                         && (source.partition.is_none()
                             || !r.ntfs_volume
                             || r.volumes.len() != 1
                             || r.disk.is_offline != Some(false))
                     {
                         return Err(
-                            "VSS 热备需要一个在线 NTFS 数据分区。整盘及运行中的系统分区暂不支持。"
+                            "VSS 数据分区热备需要一个在线 NTFS 数据分区。"
                                 .into(),
                         );
                     }
                     let parent = if options.incremental {
-                        let Some(path) = rfd::FileDialog::new()
-                            .set_title(locale.text("选择上一次备份（完整或增量）"))
-                            .add_filter(locale.text("DiskStudio 备份"), &["dsbackup"])
-                            .pick_file()
+                        let title = locale.text("选择上一次备份（完整或增量）");
+                        let filter = locale.text("DiskStudio 备份");
+                        let Some(path) = (if hot_system.is_some() {
+                            native_file_picker::choose(std::ptr::null_mut(), title, &format!("{filter}\0*.dsbackup\0"), None, Some("dsbackup"), true)?
+                        } else {
+                            rfd::FileDialog::new().set_title(title).add_filter(filter, &["dsbackup"]).pick_file()
+                        })
                         else {
                             return Ok(None);
                         };
@@ -2377,11 +2416,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     } else {
                         None
                     };
-                    let Some(path) = rfd::FileDialog::new()
-                        .set_title(locale.text("保存磁盘/分区备份"))
-                        .add_filter(locale.text("DiskStudio 备份"), &["dsbackup"])
-                        .set_file_name("DiskStudio-backup.dsbackup")
-                        .save_file()
+                    let title = locale.text("保存磁盘/分区备份");
+                    let filter = locale.text("DiskStudio 备份");
+                    let filename = "DiskStudio-backup.dsbackup";
+                    let Some(path) = (if hot_system.is_some() {
+                        native_file_picker::choose(std::ptr::null_mut(), title, &format!("{filter}\0*.dsbackup\0"), Some(filename), Some("dsbackup"), false)?
+                    } else {
+                        rfd::FileDialog::new().set_title(title).add_filter(filter, &["dsbackup"]).set_file_name(filename).save_file()
+                    })
                     else {
                         return Ok(None);
                     };
@@ -2397,9 +2439,9 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     {
                         return Err("请选择不含特殊路径字符、以 .dsbackup 结尾的新文件名（最多 120 字符）。".into());
                     }
-                    let folder = platform::destination_folder(
+                    let (folder, destination) = platform::destination_location(
                         path.parent().ok_or("输出目录无效")?,
-                        &source.target,
+                        std::slice::from_ref(&source.target),
                         if options.mode == crate::used_space::Mode::UsedSpace {
                             0
                         } else {
@@ -2435,7 +2477,11 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         } else {
                             ""
                         },
-                        "完成后重新读取并校验全部逻辑内容。",
+                        if hot_system.is_some() {
+                            "核对 Windows 启动链，重新读取快照及备份内容。已确认空闲的区域按零保存。"
+                        } else {
+                            "完成后重新读取并校验全部逻辑内容。"
+                        },
                     ]);
                     (
                         "创建镜像备份",
@@ -2444,11 +2490,11 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                         r.size,
                         warning,
                         false,
-                        Work::ArchiveBackup {
-                            source,
-                            path,
-                            options,
-                            parent,
+                        match hot_system {
+                            Some(system) => Work::HotSystemBackup {
+                                source: Box::new(system), destination, path, options, parent,
+                            },
+                            None => Work::ArchiveBackup { source, path, options, parent },
                         },
                     )
                 }
@@ -2594,6 +2640,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     (
                         system_migration_tasks::TITLE, source, destination, work.size(), warning, true,
                         Work::MigrateSystem(Box::new(work)),
+                    )
+                }
+                Request::MigrateWindowsHot { source, destinations } => {
+                    let (work, source, destination, warning) =
+                        system_migration_tasks::HotMigration::prepare(source, destinations, &locale)?;
+                    (
+                        system_migration_tasks::HOT_TITLE, source, destination, work.size(), warning, true,
+                        Work::MigrateWindowsHot(Box::new(work)),
                     )
                 }
                 Request::Clone {
@@ -3014,6 +3068,14 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                     )
                 }
             };
+        let system_migration_targets = match &work {
+            Work::MigrateSystem(migration) => migration.preview(),
+            _ => Vec::new(),
+        };
+        let system_migration = match system_migration_targets.as_slice() {
+            [target] => Some(target.layout.clone()),
+            _ => None,
+        };
         let plan = Plan {
             token: uuid::Uuid::new_v4().to_string(),
             title: title.into(),
@@ -3030,14 +3092,12 @@ pub fn prepare(request: Request) -> Result<Option<Plan>, String> {
                 Work::VirtualizeSystem(export) => Some(export.preview()),
                 _ => None,
             },
-            system_migration: match &work {
-                Work::MigrateSystem(migration) if migration.target_count() == 1 => migration.preview().pop().map(|target| target.layout),
-                _ => None,
-            },
+            system_migration,
+            system_migration_targets,
             #[cfg(windows)]
-            system_migration_targets: match &work {
-                Work::MigrateSystem(migration) if migration.target_count() > 1 => migration.preview(),
-                _ => Vec::new(),
+            hot_migration: match &work {
+                Work::MigrateWindowsHot(migration) => Some(migration.preview()),
+                _ => None,
             },
             maintenance_media: match &work {
                 Work::CreateWinpeIso(export) => Some(export.preview().clone()),
@@ -3170,7 +3230,7 @@ pub(crate) fn run_with_handoff(
             options,
             mut parent,
         } => {
-            validate_backup_options(&options)?;
+            validate_backup_options(&options, false)?;
             let r = platform::resolve(&source, true, false)?;
             platform::destination_folder(
                 path.parent().ok_or("输出目录无效")?,
@@ -3347,6 +3407,10 @@ pub(crate) fn run_with_handoff(
                 Some(header.sha256),
             ))
         }
+        Work::HotSystemBackup { source, destination, path, options, parent } => {
+            validate_backup_options(&options, true)?;
+            source.execute(&path, &destination, &options, parent, id, cancel)
+        }
         Work::ImageBackup(backup) => backup.execute(id, cancel),
         Work::ExportDeviceImage(export) => export.execute(id, cancel),
         Work::VirtualizeSystem(export) => export.execute(id, cancel),
@@ -3438,6 +3502,7 @@ pub(crate) fn run_with_handoff(
             ))
         }
         Work::MigrateSystem(migration) => migration.execute(id, cancel),
+        Work::MigrateWindowsHot(migration) => migration.execute(id, cancel),
         Work::CreateWinpeIso(export) => export.execute(id, cancel),
         Work::CreateWinpeUsb(install) => install.execute(id, cancel),
         Work::Clone {
@@ -4038,12 +4103,11 @@ mod tests {
         let options: BackupOptions =
             serde_json::from_str(r#"{"mode":"usedSpace","compression":true}"#).unwrap();
         assert_eq!(options.mode, Mode::UsedSpace);
-        assert!(validate_backup_options(&options).is_ok());
-        assert!(validate_backup_options(&BackupOptions {
-            hot: true,
-            ..options
-        })
-        .is_err());
+        assert!(validate_backup_options(&options, false).is_ok());
+        let hot = BackupOptions { hot: true, ..options };
+        assert!(validate_backup_options(&hot, false).is_err());
+        assert!(validate_backup_options(&hot, true).is_ok());
+        assert!(validate_backup_options(&BackupOptions { mode: Mode::AllSectors, ..hot }, true).is_err());
         assert!(serde_json::from_str::<BackupOptions>(r#"{"mode":"guessFree"}"#).is_err());
         assert!(
             serde_json::from_str::<BackupOptions>(r#"{"mode":"usedSpace","path":"C:\\disk"}"#)
@@ -4068,13 +4132,13 @@ mod tests {
             r#"{"compression":true,"compressionLevel":"high","encryption":true}"#,
         )
         .unwrap();
-        assert!(validate_backup_options(&options).is_ok());
+        assert!(validate_backup_options(&options, false).is_ok());
         assert_eq!(options.compression(), backup_archive::Compression::High);
         assert!(options.encryption);
         assert!(validate_backup_options(&BackupOptions {
             compression_level: backup_archive::Compression::None,
             ..options
-        })
+        }, false)
         .is_err());
         for extra in ["password", "path", "key"] {
             assert!(serde_json::from_value::<BackupOptions>(
@@ -4185,6 +4249,8 @@ mod tests {
                 system_migration: None,
                 #[cfg(windows)]
                 system_migration_targets: Vec::new(),
+                #[cfg(windows)]
+                hot_migration: None,
                 maintenance_media: None,
             },
             work: Work::Backup {

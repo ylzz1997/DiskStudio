@@ -58,6 +58,9 @@ export type MigrationPartitionPlan = {
   copied: { partition: number; offset: number; bytes: number; required: boolean }[];
   skipped: { partition: number; offset: number; bytes: number; required: boolean }[];
 };
+export type MigrationSelection = { mode: "all" } | { mode: "selected"; partitions: number[] };
+export type MigrationPartitionSize = { partition: number; bytes?: number; startBytes?: number };
+export type MigrationReplacedPartition = { number: number; offset: number; bytes: number };
 export interface Disk {
   id: string;
   name: string;
@@ -123,7 +126,17 @@ export interface DataPlan {
   destructive: boolean;
   virtualMachine?: VirtualMachinePreview;
   systemMigration?: MigrationLayout;
-  systemMigrationTargets?: { destination: string; layout: MigrationLayout }[];
+  systemMigrationTargets?: { destination: string; layout: MigrationLayout; replaced?: MigrationReplacedPartition[] }[];
+  hotMigration?: {
+    sector: number;
+    targets: {
+      destination: string;
+      bytes: number;
+      partitionSelection: MigrationSelection;
+      partitionSizes: MigrationPartitionSize[];
+      replaced?: MigrationReplacedPartition[];
+    }[];
+  };
   maintenanceMedia?: {
     bios: boolean;
     adk?: boolean;

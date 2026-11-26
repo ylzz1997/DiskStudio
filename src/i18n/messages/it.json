@@ -1,4 +1,12 @@
 {
+  "Windows 保持运行，备份前核对快照和启动链。": "Windows rimane in esecuzione mentre DiskStudio verifica lo snapshot e la sequenza di avvio.",
+  "切换到按已用空间，可在 Windows 运行时备份所选范围。": "Seleziona Spazio utilizzato per eseguire il backup dell’area selezionata mentre Windows è in esecuzione.",
+  "请选择在线 NTFS 数据分区或受支持的 Windows 系统盘。": "Seleziona una partizione dati NTFS online o un disco di sistema Windows supportato.",
+  "将被覆盖的现有分区": "Partizioni esistenti da sovrascrivere",
+  "热迁移 Windows": "Migra Windows a caldo",
+  "使用 VSS 快照复制正在运行的 Windows，无需重启": "Copia Windows in esecuzione da snapshot VSS senza riavviare",
+  "热迁移支持同盘 EFI 和未加密的 NTFS 卷。其他文件系统可用 WinPE 迁移。": "La migrazione a caldo supporta EFI sullo stesso disco e volumi NTFS non crittografati. Usa WinPE per migrare altri file system.",
+  "VSS 提供文件系统一致性。运行中的应用可能需要恢复事务。": "VSS garantisce la coerenza del file system. Le applicazioni in esecuzione potrebbero dover recuperare le proprie transazioni.",
   "添加目标磁盘": "Aggiungi disco di destinazione",
   "目标磁盘已不可用": "Disco di destinazione non disponibile",
   "移除目标磁盘 {disk}": "Rimuovi il disco di destinazione {disk}",

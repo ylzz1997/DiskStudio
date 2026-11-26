@@ -15,6 +15,7 @@ mod password;
 mod registration;
 
 use crate::{
+    data_tasks::native_file_picker,
     image_browser::{Kind, Options},
     image_table_conversion::{registration as layout_options, Scheme},
     native_locale::{self, Language, Locale},
@@ -24,9 +25,7 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::BTreeSet,
-    ffi::OsString,
     io,
-    os::windows::ffi::OsStringExt,
     path::PathBuf,
     ptr::{null, null_mut},
     sync::{
@@ -46,14 +45,7 @@ use windows_sys::{
             Registry::{RegCloseKey, RegOpenKeyExW, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE},
         },
         UI::{
-            Controls::{
-                Dialogs::{
-                    CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_DONTADDTORECENT,
-                    OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS,
-                    OFN_NOTESTFILECREATE, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-                },
-                EM_SETLIMITTEXT,
-            },
+            Controls::EM_SETLIMITTEXT,
             Input::KeyboardAndMouse::{EnableWindow, SetFocus},
             WindowsAndMessaging::*,
         },
@@ -739,71 +731,29 @@ enum PathMode {
 
 unsafe fn choose_path(hwnd: HWND, mode: PathMode) -> Result<Option<PathBuf>, String> {
     let locale = native_locale::current();
-    let mut name = vec![0u16; 32768];
-    let (title, filter, suggested, action_flags) = match mode {
+    let (title, filter, suggested, extension) = match mode {
         PathMode::Image => (
             locale.text("选择 RAW 或 IMG 镜像"),
-            wide("RAW / IMG\0*.raw;*.img\0"),
+            "RAW / IMG\0*.raw;*.img\0".to_owned(),
             None,
-            OFN_FILEMUSTEXIST,
+            None,
         ),
         PathMode::Directory => (
             locale.text("选择新建导出目录的位置和名称"),
-            wide(&format!("{}\0*\0", locale.text("导出目录"))),
+            format!("{}\0*\0", locale.text("导出目录")),
             Some(format!("DiskStudio-recovered-{}", uuid::Uuid::new_v4())),
-            OFN_NOTESTFILECREATE,
+            None,
         ),
         PathMode::RegisteredImage => (
             locale.text("保存含找回分区的新 RAW 镜像"),
-            wide("RAW\0*.img\0"),
+            "RAW\0*.img\0".to_owned(),
             Some("DiskStudio-recovered-partitions.img".into()),
-            OFN_NOTESTFILECREATE,
+            Some("img"),
         ),
     };
-    if let Some(suggested) = suggested {
-        let suggested = wide(&suggested);
-        name[..suggested.len()].copy_from_slice(&suggested);
-    }
-    let title = wide(title);
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: hwnd,
-        lpstrFilter: filter.as_ptr(),
-        lpstrFile: name.as_mut_ptr(),
-        nMaxFile: name.len() as u32,
-        lpstrTitle: title.as_ptr(),
-        lpstrDefExt: if matches!(mode, PathMode::RegisteredImage) {
-            w!("img")
-        } else {
-            null()
-        },
-        Flags: action_flags
-            | OFN_PATHMUSTEXIST
-            | OFN_NOCHANGEDIR
-            | OFN_NODEREFERENCELINKS
-            | OFN_HIDEREADONLY
-            | OFN_DONTADDTORECENT,
-        ..Default::default()
-    };
-    let selected = if matches!(mode, PathMode::Image) {
-        GetOpenFileNameW(&mut dialog)
-    } else {
-        GetSaveFileNameW(&mut dialog)
-    };
-    if selected == 0 {
-        return match CommDlgExtendedError() {
-            0 => Ok(None),
-            code => Err(format!(
-                "{} (0x{code:x})",
-                locale.text("文件选择窗口未能打开。")
-            )),
-        };
-    }
-    let size = name
-        .iter()
-        .position(|&unit| unit == 0)
-        .unwrap_or(name.len());
-    Ok(Some(PathBuf::from(OsString::from_wide(&name[..size]))))
+    native_file_picker::choose(
+        hwnd, title, &filter, suggested.as_deref(), extension, matches!(mode, PathMode::Image),
+    )
 }
 
 unsafe fn begin(

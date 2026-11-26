@@ -1,4 +1,12 @@
 {
+  "Windows 保持运行，备份前核对快照和启动链。": "Windows läuft weiter, während DiskStudio den Snapshot und die Startkette prüft.",
+  "切换到按已用空间，可在 Windows 运行时备份所选范围。": "Wählen Sie „Belegter Speicher“, um den gewählten Bereich bei laufendem Windows zu sichern.",
+  "请选择在线 NTFS 数据分区或受支持的 Windows 系统盘。": "Wählen Sie eine Online-NTFS-Datenpartition oder einen unterstützten Windows-Systemdatenträger.",
+  "将被覆盖的现有分区": "Vorhandene Partitionen, die überschrieben werden",
+  "热迁移 Windows": "Windows im laufenden Betrieb migrieren",
+  "使用 VSS 快照复制正在运行的 Windows，无需重启": "Laufendes Windows aus VSS-Snapshots kopieren, ohne neu zu starten",
+  "热迁移支持同盘 EFI 和未加密的 NTFS 卷。其他文件系统可用 WinPE 迁移。": "Die Online-Migration unterstützt EFI auf demselben Laufwerk und unverschlüsselte NTFS-Volumes. Andere Dateisysteme können Sie in WinPE migrieren.",
+  "VSS 提供文件系统一致性。运行中的应用可能需要恢复事务。": "VSS stellt die Dateisystemkonsistenz sicher. Laufende Anwendungen müssen ihre Transaktionen möglicherweise wiederherstellen.",
   "添加目标磁盘": "Ziellaufwerk hinzufügen",
   "目标磁盘已不可用": "Ziellaufwerk nicht verfügbar",
   "移除目标磁盘 {disk}": "Ziellaufwerk {disk} entfernen",

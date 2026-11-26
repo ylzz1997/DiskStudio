@@ -21,6 +21,12 @@ const MAX_SYSTEM: usize = 64 * 1024 * 1024;
 const MAX_PATCH: usize = 32 * 1024 * 1024;
 const BOOTX64: &[&str] = &["EFI", "Boot", "bootx64.efi"];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SystemHive {
+    Clean,
+    SnapshotLogs,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub firmware: Firmware,
@@ -248,15 +254,9 @@ impl WindowsBoot {
         crate::boot_configuration::gpt_dependencies(bytes, disk)
     }
 
-    pub(crate) fn check_system(
-        &self,
-        reader: &mut impl Source,
-        sector: u64,
+    pub(crate) fn system_digest(
+        &self, reader: &mut impl Source, sector: u64, resized: bool, policy: SystemHive,
     ) -> Result<String, String> {
-        self.system_digest(reader, sector, false)
-    }
-
-    pub(crate) fn system_digest(&self, reader: &mut impl Source, sector: u64, resized: bool) -> Result<String, String> {
         let (mut view, fs) = open_extent(reader, self.os, sector)?;
         let super::Filesystem::Ntfs(ntfs) = &fs else {
             return Err("需要可读取的 NTFS Windows 系统分区。".into());
@@ -271,9 +271,40 @@ impl WindowsBoot {
         let bytes = fs
             .read_file(&mut view, &path, MAX_SYSTEM)?
             .ok_or("缺少 Windows SYSTEM 配置单元。")?;
-        let digest = hash(&bytes);
-        system_hive(bytes)?;
-        Ok(digest)
+        if policy == SystemHive::SnapshotLogs && bytes.len() >= 4096 && &bytes[..4] == b"regf"
+            && bytes[4..8] != bytes[8..12]
+        {
+            let mut logs = Vec::new();
+            let mut left = MAX_SYSTEM;
+            let file = path.len() - 1;
+            for name in ["SYSTEM.LOG", "SYSTEM.LOG1", "SYSTEM.LOG2"] {
+                path[file] = name;
+                if let Some(log) = fs.read_file(&mut view, &path, left)? {
+                    left = left.checked_sub(log.len()).ok_or("Windows SYSTEM 快照日志超过上限。")?;
+                    logs.push((name, log));
+                }
+            }
+            let original_logs: Vec<_> = logs.iter().map(|(name, bytes)| (*name, bytes.as_slice())).collect();
+            use crate::boot_configuration::recovery::{replay_hive, ReplayScope};
+            let (recovered, _) = replay_hive(bytes, &original_logs, MAX_SYSTEM, ReplayScope::LiveSnapshot)
+                .map_err(|error| format!("Windows SYSTEM 快照日志无法可靠回放。{error}"))?;
+            let digest = hash(&recovered);
+            let hive = system_hive(recovered)?;
+            let default = hive.open_key("Select")
+                .and_then(|select| select.value("Default"))
+                .and_then(|value| value.dword_data())
+                .map_err(|error| error.to_string())?;
+            if !(1..=999).contains(&default)
+                || hive.open_key(&format!("ControlSet{default:03}\\Services")).is_err()
+            {
+                return Err("无法核对 Windows 默认控制集。".into());
+            }
+            Ok(digest)
+        } else {
+            let digest = hash(&bytes);
+            system_hive(bytes)?;
+            Ok(digest)
+        }
     }
 }
 

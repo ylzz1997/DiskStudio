@@ -4,7 +4,7 @@ use crate::{
     backup_archive::{Chain, Compression, MAX_CHAIN},
     backup_files::{PortableInput, PortableOutput},
     data_tasks::{
-        self, system_migration_tasks::{validate_destinations, BoundDestination, Destination, Migration},
+        self, system_migration_tasks::{validate_destinations, BoundDestination, Destination, Migration, ReplacedPartition},
         BackupHeader, BackupOptions, HandoffBinding,
         Selection, Work,
     },
@@ -75,6 +75,8 @@ struct MigrationDestinationPreview {
     bytes: u64,
     partition_sizes: Vec<PartitionSize>,
     partition_selection: PartitionSelection,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    replaced: Vec<ReplacedPartition>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -238,20 +240,29 @@ impl MigrationJob {
         if (!options.sizes.is_empty() || !options.selection.is_all()) && from.disk.partition_style != Some(2) {
             return Err("选择迁移分区与调整 NTFS 布局需要 GPT/UEFI。".into());
         }
-        let (to, target_guard) = Migration::handoff_target(&destination, &from)?;
-        let (pair, mut preview) = DiskPair::prepare(source, destination, from, to, false)?;
+        let to = Migration::handoff_target(&destination, &from)?;
+        let (pair, mut preview) = DiskPair::prepare(source, destination, from, to.resolved, false)?;
         preview.partition_sizes = options.sizes.clone();
         preview.partition_selection = options.selection.clone();
+        if !to.replaced.is_empty() {
+            preview.migration_destinations.push(MigrationDestinationPreview {
+                destination: preview.destination.clone(),
+                bytes: preview.bytes,
+                partition_sizes: options.sizes.clone(),
+                partition_selection: options.selection.clone(),
+                replaced: to.replaced,
+            });
+        }
         Ok((Self {
-            pair, target_guard, partition_sizes: options.sizes, partition_selection: options.selection,
+            pair, target_guard: to.guard, partition_sizes: options.sizes, partition_selection: options.selection,
         }, preview))
     }
 
     fn revalidate(&self) -> Result<(), String> {
         let from = device::resolve(&self.pair.source, false, false)?;
-        let (to, guard) = Migration::handoff_target(&self.pair.destination, &from)?;
-        self.pair.verify(&from, &to, false)?;
-        if guard != self.target_guard {
+        let to = Migration::handoff_target(&self.pair.destination, &from)?;
+        self.pair.verify(&from, &to.resolved, false)?;
+        if to.guard != self.target_guard {
             return Err("Windows 迁移目标内容已变化。".into());
         }
         Ok(())
@@ -307,17 +318,18 @@ impl MigrationBatch {
                 return Err("选择迁移分区与调整 NTFS 布局需要 GPT/UEFI。".into());
             }
             let (target, to) = BoundDestination::capture(destination, &from)?;
-            if to.disk.number == boot_number {
+            if to.resolved.disk.number == boot_number {
                 return Err("WinPE 启动介质与写入目标必须位于不同磁盘。".into());
             }
-            if !numbers.insert(to.disk.number) {
+            if !numbers.insert(to.resolved.disk.number) {
                 return Err("系统迁移的目标必须是互不相同的物理磁盘。".into());
             }
             previews.push(MigrationDestinationPreview {
-                destination: to.label,
+                destination: to.resolved.label,
                 bytes: target.bytes,
                 partition_sizes: target.destination.partition_sizes.clone(),
                 partition_selection: target.destination.partition_selection.clone(),
+                replaced: to.replaced,
             });
             targets.push(target);
         }
@@ -346,7 +358,7 @@ impl MigrationBatch {
         let mut numbers = BTreeSet::from([from.disk.number]);
         for target in &self.targets {
             let (actual, to) = BoundDestination::capture(target.destination.clone(), &from)?;
-            if to.disk.number == boot_number || !numbers.insert(to.disk.number)
+            if to.resolved.disk.number == boot_number || !numbers.insert(to.resolved.disk.number)
                 || actual.bytes != target.bytes || actual.guard != target.guard || actual.layout != target.layout
             {
                 return Err("Windows 迁移目标布局已变化。".into());

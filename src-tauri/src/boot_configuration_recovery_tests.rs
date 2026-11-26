@@ -1,6 +1,9 @@
 use super::*;
 use crate::boot_configuration::{rebuild, repair::gpt_bytes, BOOT_MANAGER};
-use regf::{transaction_log::DirtyPageReference, DataType, HiveBuilder, KeyTreeNode, KeyTreeValue};
+use regf::{
+    transaction_log::{DirtyPageReference, LogEntry},
+    DataType, HiveBuilder, KeyTreeNode, KeyTreeValue,
+};
 
 const DISK: Uuid = Uuid::from_bytes_le(*b"DiskStudioGPT001");
 const EFI: Uuid = Uuid::from_bytes_le(*b"DiskStudioBoot01");
@@ -141,7 +144,28 @@ fn modern_log(base: &BaseBlock, sequence: u32, pages: &[(usize, Vec<u8>)]) -> Ve
         dirty_pages: pages.iter().map(|(_, data)| data.clone()).collect(),
     };
     entry.write(&mut log).unwrap();
+    let entry = &mut log[PAGE..];
+    let body = marvin32_hash(&entry[LOG_HEADER..], LOG_SEED);
+    entry[24..32].copy_from_slice(&body.to_le_bytes());
+    let header = marvin32_hash(&entry[..32], LOG_SEED);
+    entry[32..40].copy_from_slice(&header.to_le_bytes());
     log
+}
+
+#[test]
+fn uses_windows_transaction_checksums() {
+    let mut entry = [0; 1024];
+    entry[..4].copy_from_slice(LOG_SIGNATURE);
+    for (offset, value) in [(4, 1024u32), (12, 42), (16, 4096), (20, 1), (44, 512)] {
+        entry[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    entry[48..560].fill(0x31);
+    entry[24..32].copy_from_slice(&0xae64_4bd7_3ac9_5392u64.to_le_bytes());
+    entry[32..40].copy_from_slice(&0x369e_d9ff_ee47_14c3u64.to_le_bytes());
+    let parsed = transaction(&entry, 42, MAX_STORE).unwrap();
+    assert_eq!(parsed.pages.as_slice(), [(0, [0x31; 512].as_slice())]);
+    entry[559] ^= 1;
+    assert!(transaction(&entry, 42, MAX_STORE).is_err());
 }
 
 fn dual_logs(start: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -202,6 +226,61 @@ fn declines_missing_gapped_corrupt_and_conflicting_transactions() {
     ] {
         assert!(recover(dirty.clone(), &logs, DISK, EFI, OS).is_err());
     }
+}
+
+#[test]
+fn replays_a_larger_snapshot_hive_without_expanding_bcd_limits() {
+    let (mut original, first, second, _) = dual_logs(12);
+    original.resize(MAX_STORE + BASE_BLOCK_SIZE, 0);
+    let logs: [(&str, &[u8]); 2] = [("SYSTEM.LOG1", &first), ("SYSTEM.LOG2", &second)];
+    let scope = ReplayScope::LiveSnapshot;
+    assert!(replay_hive(original.clone(), &logs, MAX_STORE, scope).is_err());
+    assert!(replay_hive(original.clone(), &logs[1..], 64 * 1024 * 1024, scope).is_err());
+    let (recovered, report) = replay_hive(original, &logs, 64 * 1024 * 1024, scope).unwrap();
+    assert_eq!(report.transactions, 2);
+    assert_eq!(verify_store(&recovered, DISK, EFI, OS).unwrap(), (MAIN, 2));
+}
+
+#[test]
+fn snapshot_replays_the_verified_prefix_and_rejects_a_torn_required_entry() {
+    let (dirty, first, mut second, mut expected) = dual_logs(u32::MAX);
+    let base = BaseBlock::parse(&dirty).unwrap();
+    let latest = edit_label(&mut expected, SECOND_NEW, SECOND_OLD);
+    let third = modern_log(&base, 1, &[latest]);
+    *second.last_mut().unwrap() ^= 1;
+    let mut rotated = first;
+    rotated.extend_from_slice(&second[PAGE..]);
+    rotated.extend_from_slice(&third[PAGE..]);
+    let logs = [("SYSTEM.LOG1", rotated.as_slice())];
+    let scope = ReplayScope::LiveSnapshot;
+    let (recovered, report) = replay_hive(dirty.clone(), &logs, MAX_STORE, scope).unwrap();
+    assert_eq!(report.transactions, 1);
+    assert_eq!(&recovered[BASE_BLOCK_SIZE..], &expected[BASE_BLOCK_SIZE..]);
+    assert!(replay_hive(dirty.clone(), &logs, MAX_STORE, ReplayScope::BootStore).is_err());
+
+    let mut dirty = dirty;
+    let mut base = base;
+    base.primary_sequence = 1;
+    base.write(&mut &mut dirty[..BASE_BLOCK_SIZE]).unwrap();
+    assert!(replay_hive(dirty, &logs, MAX_STORE, scope).is_err());
+}
+
+#[test]
+fn snapshot_uses_complete_rotation_when_an_alternate_log_is_incomplete() {
+    let (dirty, valid, _, mut expected) = dual_logs(42);
+    edit_label(&mut expected, SECOND_NEW, SECOND_OLD);
+    let mut incomplete = valid.clone();
+    incomplete[PAGE] = 0;
+    let scope = ReplayScope::LiveSnapshot;
+    let logs = [
+        ("SYSTEM.LOG1", valid.as_slice()),
+        ("SYSTEM.LOG2", incomplete.as_slice()),
+    ];
+    let (recovered, report) = replay_hive(dirty.clone(), &logs, MAX_STORE, scope).unwrap();
+    assert_eq!(report.transactions, 1);
+    assert_eq!(&recovered[BASE_BLOCK_SIZE..], &expected[BASE_BLOCK_SIZE..]);
+    assert!(replay_hive(dirty.clone(), &logs[1..], MAX_STORE, scope).is_err());
+    assert!(replay_hive(dirty, &logs, MAX_STORE, ReplayScope::BootStore).is_err());
 }
 
 #[test]

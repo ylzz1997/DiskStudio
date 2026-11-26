@@ -94,7 +94,7 @@ impl Backup {
         partition: Option<u32>,
         options: BackupOptions,
     ) -> Result<Option<Self>, String> {
-        validate_backup_options(&options)?;
+        validate_backup_options(&options, false)?;
         if options.hot {
             return Err("镜像备份不使用 VSS 热备份。".into());
         }
